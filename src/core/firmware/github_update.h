@@ -20,10 +20,14 @@
 // GitHub permanently redirects the old URL, so older firmware continues to
 // work. Never recreate a repository at the old URL because that would break
 // the redirect.
+//
+// ZHAC fork: updates come from the fork's own releases. An upstream image has
+// no ZHAC Cloud transport, so installing it would silently cut a cloud panel
+// off.
 namespace GithubUpdate {
 
 constexpr const char* kRepoUrl =
-    "https://github.com/GalusPeres/HomeTiles";
+    "https://github.com/zhac-project/HomeTiles";
 
 struct CheckResult {
   bool ok = false;                // The request completed successfully.
