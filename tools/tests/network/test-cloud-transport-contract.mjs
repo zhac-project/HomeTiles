@@ -45,6 +45,19 @@ assert.doesNotMatch(client, /#include\s+[<"](lvgl|LittleFS|Preferences|src\/ui)/
   'the worker-side transport must not touch LVGL, flash or UI state');
 assert.match(client, /kSubprotocol\[\] = "hometiles\.v1"/);
 
+// The firmware supplies the CA bundle symbols itself (ESP-IDF common CA set),
+// so the core's full 69 KB bundle is not linked; the Tab5 app slot is full.
+const bundle = read('src/network/cloud/cloud_ca_bundle.cpp');
+const declared = bundle.match(/kHomeTilesCaBundle\[(\d+)\] asm\(\s*"_binary_x509_crt_bundle_start"\)/);
+assert.ok(declared, 'cloud_ca_bundle.cpp defines _binary_x509_crt_bundle_start');
+const bytes = (bundle.match(/0x[0-9a-f]{2},/g) || []).length;
+assert.equal(bytes, Number(declared[1]), 'the array holds exactly the declared bundle size');
+assert.match(bundle, new RegExp(`\\.set _binary_x509_crt_bundle_end, _binary_x509_crt_bundle_start \\+ ${bytes}\\\\n`),
+  '_binary_x509_crt_bundle_end marks the end of the same bytes');
+assert.ok(bytes < 24 * 1024, 'keep the bundle small; the full Mozilla bundle does not fit every profile');
+assert.match(client, /kCloudCaBundleStart\[\] asm\("_binary_x509_crt_bundle_start"\)/);
+assert.match(client, /kCloudCaBundleEnd\[\] asm\("_binary_x509_crt_bundle_end"\)/);
+
 // Vendored WebSocket client patches that the transport relies on.
 const wsHeader = read('src/network/vendor/arduinowebsockets/WebSockets.h');
 assert.match(wsHeader, /#define WEBSOCKETS_MAX_DATA_SIZE \(4 \+ 1024 \+ 65535\)/,

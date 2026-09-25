@@ -8,8 +8,7 @@
 #include "src/network/cloud/cloud_frame.h"
 #include "src/network/vendor/arduinowebsockets/WebSocketsClient.h"
 
-// Mozilla CA bundle embedded in the core's mbedTLS library
-// (CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL), used to verify the cloud.
+// ESP-IDF common-CA bundle that verifies the cloud (cloud_ca_bundle.cpp).
 extern const uint8_t kCloudCaBundleStart[] asm("_binary_x509_crt_bundle_start");
 extern const uint8_t kCloudCaBundleEnd[] asm("_binary_x509_crt_bundle_end");
 
