@@ -103,6 +103,7 @@ CloudTopicClient::~CloudTopicClient() {
 
 bool CloudTopicClient::configure(const char* url, const char* token) {
   configured_ = false;
+  refusal_ = Refusal::None;  // New settings; a stale reason would mislead.
   if (!cloud_config::tokenValid(token) ||
       !cloud_config::parseUrl(url, &endpoint_)) {
     endpoint_.host[0] = '\0';
