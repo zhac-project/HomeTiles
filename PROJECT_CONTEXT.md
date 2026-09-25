@@ -49,7 +49,7 @@ Issue: https://github.com/GalusPeres/HomeTiles/issues/30
 
 ## ZHAC Cloud transport (fork)
 
-- `feat/zhac-cloud-transport`: `transport=cloud` uses `CloudTopicClient` (`hometiles.v1`/wss, ARCHITECTURE.md). Compile-only; P4/S3 TLS soak and cloud end-to-end pending.
+- `feat/cloud-remote-admin` (on `feat/zhac-cloud-transport`): cloud transport + remote Web Admin tunnel (ARCHITECTURE.md). Compile-only; TLS soak, tunnel, E2E pending.
 
 ## Issue #38
 

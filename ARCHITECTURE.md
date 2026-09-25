@@ -118,6 +118,18 @@ minutes instead of 6-96 s and the Web Admin shows the reason. The panel token
 (`cloud_token`) is write-only. The WebSocket library is a patched, vendored
 client subset of arduinoWebSockets 2.7.2 (LGPL-2.1, see its README).
 
+The same socket carries the remote Web Admin tunnel (`cloud_tunnel.h`; ops
+`0x10` TUN_OPEN, `0x11` TUN_DATA, `0x12` TUN_CLOSE, the topic is the stream
+id), announced with `X-HomeTiles-Features: tunnel` at the handshake. Each
+stream is one raw HTTP/1.1 request that the worker bridges to the panel's own
+Web Admin at `127.0.0.1:80`, so the handlers stay unchanged. At most two
+streams; the worker reads the loopback socket eagerly into PSRAM (at most
+256 KiB per stream) so the web server, which writes from the loop, is never
+held up by the internet link, and sends at most one 16 KiB TUN_DATA frame per
+stream and pass so tile states interleave. A stream ends with TUN_CLOSE `done`
+after the response, `busy`, `refused`, `timeout` (30 s idle) or `error`; a
+dropped cloud socket closes every stream.
+
 The media artwork worker owns HTTP download buffers and unpublished results.
 The loop attaches image descriptors to widgets and performs LVGL cache cleanup.
 Freeing an unpublished descriptor differs from releasing an image already used

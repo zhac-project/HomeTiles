@@ -1,9 +1,13 @@
 #include "src/network/cloud/cloud_topic_client.h"
 
+#include <errno.h>
 #include <esp_heap_caps.h>
+#include <fcntl.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <lwip/sockets.h>
 #include <new>
+#include <unistd.h>
 
 #include "src/network/cloud/cloud_frame.h"
 #include "src/network/vendor/arduinowebsockets/WebSocketsClient.h"
@@ -15,6 +19,8 @@ extern const uint8_t kCloudCaBundleEnd[] asm("_binary_x509_crt_bundle_end");
 namespace {
 
 constexpr char kSubprotocol[] = "hometiles.v1";
+// Tells the cloud this panel serves its Web Admin through the tunnel.
+constexpr char kFeatureHeader[] = "X-HomeTiles-Features: tunnel";
 // Bounded like PubSubClient's socket timeout (TCP + TLS + HTTP upgrade).
 constexpr uint32_t kConnectTimeoutMs = 15000;
 // Panel pings every 15 s; three unanswered pings close the socket. The cloud
@@ -56,6 +62,48 @@ int httpStatusFromReason(const uint8_t* reason, size_t length) {
   return 0;
 }
 
+// Tunnel buffers live in PSRAM only; internal RAM stays for Wi-Fi and TLS.
+void* tunnelGrow(void* block, size_t bytes) {
+  return heap_caps_realloc(block, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
+void tunnelFree(void* block) { heap_caps_free(block); }
+
+// Non-blocking connect to the panel's own Web Admin; -1 when it fails at once.
+int openLoopback() {
+  const int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (fd < 0) return -1;
+  const int flags = fcntl(fd, F_GETFL, 0);
+  fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(cloud_tunnel::kLocalPort);
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 &&
+      errno != EINPROGRESS) {
+    close(fd);
+    return -1;
+  }
+  return fd;
+}
+
+// 1 connected, 0 still connecting, -1 failed.
+int connectState(int fd) {
+  fd_set writable;
+  FD_ZERO(&writable);
+  FD_SET(fd, &writable);
+  timeval no_wait{0, 0};
+  const int ready = select(fd + 1, nullptr, &writable, nullptr, &no_wait);
+  if (ready == 0) return 0;
+  if (ready < 0) return -1;
+  int error = 0;
+  socklen_t length = sizeof(error);
+  if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) != 0) return -1;
+  return error == 0 ? 1 : -1;
+}
+
+bool wouldBlock() { return errno == EAGAIN || errno == EWOULDBLOCK; }
+
 const char* refusalName(CloudTopicClient::Refusal refusal) {
   switch (refusal) {
     case CloudTopicClient::Refusal::Unauthorized: return "unauthorized";
@@ -95,6 +143,7 @@ class CloudWebSocket final : public WebSocketsClient {
 };
 
 CloudTopicClient::~CloudTopicClient() {
+  closeAllTunnels();
   delete ws_;
   heap_caps_free(tx_);
   heap_caps_free(fragment_);
@@ -108,8 +157,8 @@ bool CloudTopicClient::configure(const char* url, const char* token) {
     endpoint_.host[0] = '\0';
     return false;
   }
-  snprintf(auth_header_, sizeof(auth_header_), "Authorization: Bearer %s",
-           token);
+  snprintf(auth_header_, sizeof(auth_header_),
+           "Authorization: Bearer %s\r\n%s", token, kFeatureHeader);
   if (!ws_) {
     ws_ = new (std::nothrow) CloudWebSocket(*this);
     if (!ws_) return false;
@@ -214,8 +263,12 @@ int CloudTopicClient::state() {
 bool CloudTopicClient::loop() {
   if (!ws_ || phase_ != Phase::Open) return false;
   ws_->loop();
-  if (phase_ == Phase::Open && ws_->isConnected()) return true;
+  if (phase_ == Phase::Open && ws_->isConnected()) {
+    serviceTunnels();
+    return true;
+  }
   if (phase_ == Phase::Open) phase_ = Phase::Closed;
+  closeAllTunnels();
   state_ = MQTT_CONNECTION_LOST;
   return false;
 }
@@ -331,6 +384,7 @@ bool CloudTopicClient::reserve(uint8_t*& buffer, size_t& capacity,
 }
 
 void CloudTopicClient::resetSession() {
+  closeAllTunnels();
   streaming_ = false;
   stream_written_ = 0;
   stream_expected_ = 0;
@@ -404,6 +458,7 @@ void CloudTopicClient::onDisconnected(const uint8_t* reason, size_t length) {
     phase_ = Phase::Closed;
   }
   fragment_active_ = false;
+  closeAllTunnels();
 }
 
 void CloudTopicClient::onFragment(const uint8_t* data, size_t length,
@@ -450,6 +505,12 @@ void CloudTopicClient::deliver(uint8_t* data, size_t length) {
     }
     return;
   }
+  if (frame.op == cloud_frame::kOpTunOpen ||
+      frame.op == cloud_frame::kOpTunData ||
+      frame.op == cloud_frame::kOpTunClose) {
+    onTunnelFrame(frame);
+    return;
+  }
   if (frame.op != cloud_frame::kOpPub) {
     if (logDue(last_drop_log_ms, 10000)) {
       Serial.printf("[Cloud] Dropped a frame with op 0x%02X\n", frame.op);
@@ -483,4 +544,174 @@ void CloudTopicClient::deliver(uint8_t* data, size_t length) {
     callback_(topic, payload, static_cast<unsigned int>(frame.payload_len));
   }
   last_retained_ = false;
+}
+
+// --- Remote Web Admin tunnel (cloud_tunnel.h, zhac-tiles docs/04 §4.1) -------
+// Everything below runs on the MQTT worker: frames arrive through deliver()
+// inside ws_->loop(), and loop() services the loopback sockets once per pass.
+
+bool CloudTopicClient::sendTunnelFrame(uint8_t op, uint16_t id,
+                                       const uint8_t* payload, size_t length) {
+  char topic[6];
+  cloud_tunnel::formatStreamId(id, topic);
+  return sendFrame(op, false, topic, payload, length);
+}
+
+void CloudTopicClient::onTunnelFrame(const cloud_frame::Frame& frame) {
+  const uint16_t id = cloud_tunnel::parseStreamId(frame.topic, frame.topic_len);
+  if (id == 0) {
+    static uint32_t last_log_ms = 0;
+    if (logDue(last_log_ms, 10000)) {
+      Serial.printf("[Cloud] Dropped a tunnel frame without a stream id (op 0x%02X)\n",
+                    frame.op);
+    }
+    return;
+  }
+  const uint32_t now_ms = millis();
+  if (frame.op == cloud_frame::kOpTunOpen) {
+    cloud_tunnel::Stream* stream = nullptr;
+    switch (tunnels_.open(id, now_ms, &stream)) {
+      case cloud_tunnel::OpenResult::Busy: {
+        const char* reason = cloud_tunnel::kReasonBusy;
+        sendTunnelFrame(cloud_frame::kOpTunClose, id,
+                        reinterpret_cast<const uint8_t*>(reason), strlen(reason));
+        return;
+      }
+      case cloud_tunnel::OpenResult::Duplicate:
+        closeTunnel(*stream, cloud_tunnel::kReasonError);
+        return;
+      case cloud_tunnel::OpenResult::Opened:
+        break;
+    }
+    stream->fd = openLoopback();
+    if (stream->fd < 0) closeTunnel(*stream, cloud_tunnel::kReasonRefused);
+    return;
+  }
+
+  cloud_tunnel::Stream* stream = tunnels_.find(id);
+  if (frame.op == cloud_frame::kOpTunClose) {
+    if (stream) closeTunnel(*stream, nullptr);  // The cloud ended it.
+    return;
+  }
+  // TUN_DATA: request bytes for the web server.
+  if (!stream) {
+    const char* reason = cloud_tunnel::kReasonError;
+    sendTunnelFrame(cloud_frame::kOpTunClose, id,
+                    reinterpret_cast<const uint8_t*>(reason), strlen(reason));
+    return;
+  }
+  if (!stream->to_server.append(frame.payload, frame.payload_len, tunnelGrow)) {
+    closeTunnel(*stream, cloud_tunnel::kReasonError);
+    return;
+  }
+  stream->bytes_in += frame.payload_len;
+  stream->last_activity_ms = now_ms;
+}
+
+void CloudTopicClient::serviceTunnels() {
+  // A camera stream publish owns the send buffer until endPublish(); the
+  // tunnel waits for it (its data stays buffered).
+  if (streaming_ || tunnels_.active() == 0) return;
+  const uint32_t now_ms = millis();
+  for (cloud_tunnel::Stream& stream : tunnels_.slots) {
+    if (stream.id == 0) continue;
+
+    if (!stream.connected) {
+      const int state = connectState(stream.fd);
+      if (state < 0) {
+        closeTunnel(stream, cloud_tunnel::kReasonRefused);
+        continue;
+      }
+      if (state == 0) {
+        if (cloud_tunnel::idle(stream, now_ms)) {
+          closeTunnel(stream, cloud_tunnel::kReasonTimeout);
+        }
+        continue;
+      }
+      stream.connected = true;
+    }
+
+    // Cloud -> web server.
+    bool failed = false;
+    while (stream.to_server.length != 0) {
+      const ssize_t sent = send(stream.fd, stream.to_server.front(),
+                                stream.to_server.length, MSG_DONTWAIT);
+      if (sent > 0) {
+        stream.to_server.consume(static_cast<size_t>(sent));
+        stream.last_activity_ms = now_ms;
+        continue;
+      }
+      failed = sent < 0 && !wouldBlock();
+      break;
+    }
+
+    // Web server -> buffer, eagerly, so the web server finishes its response
+    // (it writes from the Arduino loop) without waiting for the internet link.
+    while (!failed && !stream.eof &&
+           stream.to_cloud.length < cloud_tunnel::kMaxBuffered) {
+      size_t want = cloud_tunnel::kMaxBuffered - stream.to_cloud.length;
+      if (want > cloud_tunnel::kMaxDataFrame) want = cloud_tunnel::kMaxDataFrame;
+      uint8_t* slot = stream.to_cloud.reserve(want, tunnelGrow);
+      if (!slot) {
+        failed = true;
+        break;
+      }
+      const ssize_t received = recv(stream.fd, slot, want, MSG_DONTWAIT);
+      if (received > 0) {
+        stream.to_cloud.commit(static_cast<size_t>(received));
+        stream.bytes_out += static_cast<uint32_t>(received);
+        stream.last_activity_ms = now_ms;
+        continue;
+      }
+      if (received == 0) {
+        stream.eof = true;
+      } else if (!wouldBlock()) {
+        failed = true;
+      }
+      break;
+    }
+    if (failed) {
+      closeTunnel(stream, cloud_tunnel::kReasonError);
+      continue;
+    }
+
+    // At most one TUN_DATA frame per stream and pass: tile states interleave.
+    const size_t chunk = cloud_tunnel::nextFrameBytes(stream);
+    if (chunk != 0 && sendTunnelFrame(cloud_frame::kOpTunData, stream.id,
+                                      stream.to_cloud.front(), chunk)) {
+      stream.to_cloud.consume(chunk);
+      stream.last_activity_ms = now_ms;
+    }
+
+    if (cloud_tunnel::done(stream)) {
+      closeTunnel(stream, cloud_tunnel::kReasonDone);
+    } else if (cloud_tunnel::idle(stream, now_ms)) {
+      closeTunnel(stream, cloud_tunnel::kReasonTimeout);
+    }
+  }
+}
+
+void CloudTopicClient::closeTunnel(cloud_tunnel::Stream& stream,
+                                   const char* reason) {
+  // ponytail: if this send fails (link lost, or a camera stream publish holds
+  // the send buffer) the cloud ends the request by its own timeout.
+  if (reason) {
+    sendTunnelFrame(cloud_frame::kOpTunClose, stream.id,
+                    reinterpret_cast<const uint8_t*>(reason), strlen(reason));
+  }
+  if (stream.fd >= 0) close(stream.fd);
+  static uint32_t last_log_ms = 0;
+  if (logDue(last_log_ms, 2000)) {
+    Serial.printf("[Cloud] Tunnel stream %u closed (%s): %u bytes in, %u bytes out\n",
+                  static_cast<unsigned>(stream.id), reason ? reason : "by cloud",
+                  static_cast<unsigned>(stream.bytes_in),
+                  static_cast<unsigned>(stream.bytes_out));
+  }
+  cloud_tunnel::Table::release(stream, tunnelFree);
+}
+
+void CloudTopicClient::closeAllTunnels() {
+  for (cloud_tunnel::Stream& stream : tunnels_.slots) {
+    if (stream.id != 0) closeTunnel(stream, nullptr);
+  }
 }

@@ -9,7 +9,10 @@
 // carries exactly one topic operation.
 //
 //   byte 0     op     0x01 PUB, 0x02 SUB, 0x03 UNSUB, 0x04 WILL,
-//                     0x7F ERR (cloud -> panel diagnostics)
+//                     0x7F ERR (cloud -> panel diagnostics),
+//                     0x10 TUN_OPEN (cloud -> panel), 0x11 TUN_DATA,
+//                     0x12 TUN_CLOSE (remote Web Admin tunnel, see
+//                     cloud_tunnel.h; the topic carries the stream id)
 //   byte 1     flags  bit0 = retain (PUB, WILL); other bits reserved
 //   bytes 2-3  topic length, uint16 big-endian, 1..1024
 //   ...        topic, UTF-8 without NUL
@@ -24,6 +27,9 @@ constexpr uint8_t kOpSub = 0x02;
 constexpr uint8_t kOpUnsub = 0x03;
 constexpr uint8_t kOpWill = 0x04;
 constexpr uint8_t kOpErr = 0x7F;
+constexpr uint8_t kOpTunOpen = 0x10;
+constexpr uint8_t kOpTunData = 0x11;
+constexpr uint8_t kOpTunClose = 0x12;
 constexpr uint8_t kFlagRetain = 0x01;
 constexpr size_t kHeaderBytes = 4;
 constexpr size_t kMaxTopicBytes = 1024;
@@ -42,7 +48,8 @@ struct Frame {
 
 inline bool knownOp(uint8_t op) {
   return op == kOpPub || op == kOpSub || op == kOpUnsub || op == kOpWill ||
-         op == kOpErr;
+         op == kOpErr || op == kOpTunOpen || op == kOpTunData ||
+         op == kOpTunClose;
 }
 
 // Writes the header and the topic to out and returns their length; the

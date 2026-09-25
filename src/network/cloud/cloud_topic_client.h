@@ -2,6 +2,8 @@
 #define CLOUD_TOPIC_CLIENT_H
 
 #include "src/network/cloud/cloud_config.h"
+#include "src/network/cloud/cloud_frame.h"
+#include "src/network/cloud/cloud_tunnel.h"
 #include "src/network/topic_client.h"
 
 class CloudWebSocket;  // Wraps the vendored WebSocketsClient (see .cpp).
@@ -10,7 +12,8 @@ class CloudWebSocket;  // Wraps the vendored WebSocketsClient (see .cpp).
 // (subprotocol hometiles.v1, frames in cloud_frame.h), authenticated with the
 // panel token at the handshake. Like PubSubClient it is polled by the MQTT
 // worker, which is its only caller after init(); inbound messages reach the
-// callback on the worker, inside loop().
+// callback on the worker, inside loop(). The same socket carries the remote
+// Web Admin tunnel (cloud_tunnel.h), serviced by loop() on the worker too.
 class CloudTopicClient final : public TopicClient {
  public:
   // Why the cloud refused the panel. Drives the long retry and the Web Admin
@@ -72,6 +75,14 @@ class CloudTopicClient final : public TopicClient {
   void onDisconnected(const uint8_t* reason, size_t length);
   void onFragment(const uint8_t* data, size_t length, bool first, bool last);
   void deliver(uint8_t* data, size_t length);
+  void onTunnelFrame(const cloud_frame::Frame& frame);
+  void serviceTunnels();
+  // reason == nullptr: the cloud ended the stream or the link is down, so no
+  // TUN_CLOSE is sent.
+  void closeTunnel(cloud_tunnel::Stream& stream, const char* reason);
+  void closeAllTunnels();
+  bool sendTunnelFrame(uint8_t op, uint16_t id, const uint8_t* payload,
+                       size_t length);
   bool sendFrame(uint8_t op, bool retain, const char* topic,
                  const uint8_t* payload, size_t length);
   bool reserve(uint8_t*& buffer, size_t& capacity, size_t bytes);
@@ -80,8 +91,9 @@ class CloudTopicClient final : public TopicClient {
   CloudWebSocket* ws_ = nullptr;
   cloud_config::Endpoint endpoint_{};
   bool configured_ = false;
-  // "Authorization: Bearer " + token; passed to the handshake only.
-  char auth_header_[24 + cloud_config::kTokenMax] = {};
+  // "Authorization: Bearer " + token + the feature header; passed to the
+  // handshake only.
+  char auth_header_[24 + cloud_config::kTokenMax + 40] = {};
   Callback callback_;
 
   volatile Phase phase_ = Phase::Idle;
@@ -109,6 +121,8 @@ class CloudTopicClient final : public TopicClient {
   size_t fragment_capacity_ = 0;
   size_t fragment_len_ = 0;
   bool fragment_active_ = false;
+
+  cloud_tunnel::Table tunnels_;
 };
 
 #endif  // CLOUD_TOPIC_CLIENT_H
