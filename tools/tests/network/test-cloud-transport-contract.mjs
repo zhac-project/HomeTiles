@@ -87,7 +87,7 @@ assert.match(fn('HomeTilesNetworkManager::serviceMqttWorker'),
 const header = read('src/core/i18n/i18n.h');
 const cloudFields = [...header.matchAll(/const char\* ((?:admin_settings_cloud|cloud_[a-z_]+));/g)]
   .map(match => match[1]);
-assert.equal(cloudFields.length, 18, 'expected the 18 cloud strings');
+assert.equal(cloudFields.length, 19, 'expected the 19 cloud strings');
 const i18n = read('src/core/i18n/i18n.cpp');
 const tables = {};
 for (const name of ['kStringsDe', 'kStringsEn', 'kStringsFr']) {

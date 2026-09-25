@@ -95,11 +95,11 @@ if (stagingPolicy.includes('DEVICE_WAVESHARE') ||
 requireMarker(server, '"/api/ota/upload/raw", HTTP_POST,',
   'Raw OTA route');
 requireMarker(server,
-  '"/api/ota/upload", HTTP_POST, [this]() { this->handleOtaUploadDone(); },',
+  '"/api/ota/upload", HTTP_POST,\n        localOnly([this]() { this->handleOtaUploadDone(); }),',
   'Legacy multipart OTA route');
-requireMarker(server, '[this]() { this->handleOtaUpdate(); });',
+requireMarker(server, 'localOnlyUpload([this]() { this->handleOtaUpdate(); }));',
   'Legacy multipart OTA callback');
-requireMarker(server, '[this]() { this->handleOtaRawUpdate(); });',
+requireMarker(server, 'localOnlyUpload([this]() { this->handleOtaRawUpdate(); }));',
   'Raw OTA callback');
 
 const browserUpload = functionBody(

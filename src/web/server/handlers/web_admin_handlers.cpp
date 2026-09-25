@@ -19,6 +19,31 @@
 
 using namespace web_admin_handlers;
 
+namespace {
+
+// How the panel reaches the network and its broker or cloud. A remote Web
+// Admin session may re-send these unchanged but never change them.
+bool connectionSettingsChanged(const DeviceConfig& a, const DeviceConfig& b) {
+  return strcmp(a.wifi_ssid, b.wifi_ssid) != 0 ||
+         strcmp(a.wifi_pass, b.wifi_pass) != 0 ||
+         a.wifi_static_enabled != b.wifi_static_enabled ||
+         strcmp(a.wifi_static_ip, b.wifi_static_ip) != 0 ||
+         strcmp(a.wifi_gateway, b.wifi_gateway) != 0 ||
+         strcmp(a.wifi_subnet, b.wifi_subnet) != 0 ||
+         strcmp(a.wifi_dns, b.wifi_dns) != 0 ||
+         a.ethernet_enabled != b.ethernet_enabled ||
+         strcmp(a.mqtt_host, b.mqtt_host) != 0 || a.mqtt_port != b.mqtt_port ||
+         strcmp(a.mqtt_user, b.mqtt_user) != 0 ||
+         strcmp(a.mqtt_pass, b.mqtt_pass) != 0 ||
+         strcmp(a.mqtt_client_id, b.mqtt_client_id) != 0 ||
+         strcmp(a.mqtt_base_topic, b.mqtt_base_topic) != 0 ||
+         strcmp(a.ha_prefix, b.ha_prefix) != 0 || a.transport != b.transport ||
+         strcmp(a.cloud_url, b.cloud_url) != 0 ||
+         strcmp(a.cloud_token, b.cloud_token) != 0;
+}
+
+}  // namespace
+
 void WebAdminServer::handleSaveMQTT() {
   const bool ajax_save =
       server.hasArg("_ajax") && server.arg("_ajax") == "1";
@@ -167,6 +192,13 @@ void WebAdminServer::handleSaveMQTT() {
       sendSaveError(400, i18n::strings(cfg.language).cloud_token_invalid);
       return;
     }
+  }
+  // A remote session (cloud tunnel) could cut the panel off by changing its
+  // connection. The form re-sends unchanged values, and an empty password or
+  // token field already means "keep", so only a real change is refused.
+  if (isRemoteRequest() && connectionSettingsChanged(previous_cfg, cfg)) {
+    sendSaveError(403, i18n::strings(previous_cfg.language).cloud_remote_blocked);
+    return;
   }
   if (server.hasArg("language")) {
     String language = server.arg("language");

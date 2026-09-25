@@ -131,7 +131,14 @@ after the response, `busy`, `refused`, `timeout` (30 s idle) or `error`; a
 dropped cloud socket closes every stream. The Web Admin uses only relative
 URLs (it is one page at `/`, and its redirects go to `./`), so it also works
 under the cloud proxy's path prefix;
-`tools/tests/web/test-web-admin-relative-urls.mjs` guards that.
+`tools/tests/web/test-web-admin-relative-urls.mjs` guards that. A request from
+`127.0.0.1` can only come through the tunnel, so it is a remote session: it
+cannot change how the panel connects (a settings save that would change
+Wi-Fi/IP, Ethernet, the broker, base topic or prefix, the transport or the cloud
+URL/token is refused; unchanged values pass), install firmware (OTA prepare,
+upload, install, GitHub install), write files (file manager delete, rename,
+mkdir, upload) or erase the crash dump. Those answer 403 with a localized
+message; `/status` reports `remote`.
 
 The media artwork worker owns HTTP download buffers and unpublished results.
 The loop attaches image descriptors to widgets and performs LVGL cache cleanup.

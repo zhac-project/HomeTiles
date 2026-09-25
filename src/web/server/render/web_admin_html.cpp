@@ -2119,6 +2119,9 @@ String WebAdminServer::getStatusJSON() {
   size_t config_used = get_ns_used("tab5_config");
 
   String json = "{";
+  // A remote Web Admin session (cloud tunnel); some settings are local-only.
+  json += "\"remote\":";
+  json += isRemoteRequest() ? "true," : "false,";
   json += "\"wifi_connected\":";
   json += networkTransport.isConnected() ? "true" : "false";
   json += ",\"wifi_ssid\":\"";

@@ -1,5 +1,8 @@
 #include "src/web/server/web_admin.h"
+#include "src/core/config/config_manager.h"
+#include "src/core/i18n/i18n.h"
 #include "src/web/server/assets/web_admin_assets.h"
+#include "src/web/server/handlers/web_admin_handler_utils.h"
 #include "src/web/server/assets/web_admin_fonts.h"
 #include "src/web/server/web_admin_utils.h"
 #include "src/network/transport/network_transport.h"
@@ -38,6 +41,16 @@ void WebAdminServer::setGithubUpdateInstallFailed(const char* error) {
   github_install_error = error ? error : "Update failed";
 }
 
+bool WebAdminServer::isRemoteRequest() {
+  return server.client().remoteIP() == IPAddress(127, 0, 0, 1);
+}
+
+void WebAdminServer::sendRemoteRefused() {
+  web_admin_handlers::sendJsonError(
+      server, 403,
+      i18n::strings(configManager.getConfig().language).cloud_remote_blocked);
+}
+
 void webAdminMarkActivity() {
   g_web_admin_last_activity_ms = millis();
 }
@@ -61,6 +74,23 @@ bool WebAdminServer::start() {
   // WebServer::stop() retains handlers. Register once so repeated Wi-Fi/AP
   // cycles do not allocate duplicate routes in internal heap.
   if (!routes_registered) {
+    // Local network only: refused (403) for a remote session through the cloud.
+    auto localOnly = [this](auto handler) {
+      return [this, handler]() {
+        if (isRemoteRequest()) {
+          sendRemoteRefused();
+          return;
+        }
+        handler();
+      };
+    };
+    // Upload bodies of a remote session are dropped before any byte is written;
+    // the route's handler (wrapped with localOnly) then answers 403.
+    auto localOnlyUpload = [this](auto upload) {
+      return [this, upload]() {
+        if (!isRemoteRequest()) upload();
+      };
+    };
     static const char* request_headers[] = {
         "Content-Length",
         "Content-Type",
@@ -131,22 +161,23 @@ bool WebAdminServer::start() {
     server.on("/api/screenshot/download", HTTP_GET,
               [this]() { this->handleDownloadScreenshot(); });
     server.on("/api/ota/prepare", HTTP_POST,
-              [this]() { this->handlePrepareOtaUpload(); });
+              localOnly([this]() { this->handlePrepareOtaUpload(); }));
     server.on(
-        "/api/ota/upload", HTTP_POST, [this]() { this->handleOtaUploadDone(); },
-        [this]() { this->handleOtaUpdate(); });
+        "/api/ota/upload", HTTP_POST,
+        localOnly([this]() { this->handleOtaUploadDone(); }),
+        localOnlyUpload([this]() { this->handleOtaUpdate(); }));
     server.on(
         "/api/ota/upload/raw", HTTP_POST,
-        [this]() { this->handleOtaUploadDone(); },
-        [this]() { this->handleOtaRawUpdate(); });
+        localOnly([this]() { this->handleOtaUploadDone(); }),
+        localOnlyUpload([this]() { this->handleOtaRawUpdate(); }));
     server.on("/api/ota/install", HTTP_POST,
-              [this]() { this->handleStartOtaInstall(); });
+              localOnly([this]() { this->handleStartOtaInstall(); }));
     server.on("/api/ota/status", HTTP_GET,
               [this]() { this->handleGetOtaStatus(); });
     server.on("/api/ota/github/check", HTTP_POST,
               [this]() { this->handleGithubUpdateCheck(); });
     server.on("/api/ota/github/install", HTTP_POST,
-              [this]() { this->handleGithubUpdateInstall(); });
+              localOnly([this]() { this->handleGithubUpdateInstall(); }));
     server.on("/api/ota/github/status", HTTP_GET,
               [this]() { this->handleGetGithubUpdateStatus(); });
     server.on(
@@ -158,19 +189,19 @@ bool WebAdminServer::start() {
     server.on("/api/files/download", HTTP_GET,
               [this]() { this->handleFileManagerDownload(); });
     server.on("/api/files/delete", HTTP_POST,
-              withStorageHold([this]() { this->handleFileManagerDelete(); }));
+              localOnly(withStorageHold([this]() { this->handleFileManagerDelete(); })));
     server.on("/api/files/rename", HTTP_POST,
-              withStorageHold([this]() { this->handleFileManagerRename(); }));
+              localOnly(withStorageHold([this]() { this->handleFileManagerRename(); })));
     server.on("/api/files/mkdir", HTTP_POST,
-              withStorageHold([this]() { this->handleFileManagerMkdir(); }));
+              localOnly(withStorageHold([this]() { this->handleFileManagerMkdir(); })));
     server.on(
         "/api/files/upload", HTTP_POST,
-        [this]() { this->handleFileManagerUploadDone(); },
-        [this]() { this->handleFileManagerUpload(); });
+        localOnly([this]() { this->handleFileManagerUploadDone(); }),
+        localOnlyUpload([this]() { this->handleFileManagerUpload(); }));
     server.on("/api/coredump", HTTP_GET,
               [this]() { this->handleCoreDumpDownload(); });
     server.on("/api/coredump/erase", HTTP_POST,
-              withStorageHold([this]() { this->handleCoreDumpErase(); }));
+              localOnly(withStorageHold([this]() { this->handleCoreDumpErase(); })));
     server.on("/api/crashlog", HTTP_GET,
               [this]() { this->handleCrashLogDownload(); });
     server.on("/api/sd-diagnostics", HTTP_GET,

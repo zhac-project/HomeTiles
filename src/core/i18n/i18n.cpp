@@ -489,7 +489,8 @@ static const Strings kStringsDe = {
     "Token abgelehnt",
     "Token widerrufen",
     "Tarif erforderlich",
-    "Zugriff verweigert"};
+    "Zugriff verweigert",
+    "In einer Fernsitzung nicht verfügbar: bitte im lokalen Netzwerk des Panels ändern."};
 
 static const Strings kStringsEn = {
     "en",
@@ -973,7 +974,8 @@ static const Strings kStringsEn = {
     "Token rejected",
     "Token revoked",
     "Plan required",
-    "Access denied"};
+    "Access denied",
+    "Not available in a remote session: change it on the panel's local network."};
 
 static const Strings kStringsFr = {
     "fr",
@@ -1457,7 +1459,8 @@ static const Strings kStringsFr = {
     "Jeton refusé",
     "Jeton révoqué",
     "Abonnement requis",
-    "Accès refusé"};
+    "Accès refusé",
+    "Indisponible en session à distance : modifiez-le sur le réseau local du panneau."};
 
 static const LocaleProfile kLocaleDe = {
     "de",

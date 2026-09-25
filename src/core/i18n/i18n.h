@@ -527,6 +527,9 @@ struct Strings {
   const char* cloud_status_token_revoked;
   const char* cloud_status_plan_required;
   const char* cloud_status_forbidden;
+  // Answer to a remote Web Admin session (through the cloud tunnel) that tries
+  // to change the connection, install firmware or write files.
+  const char* cloud_remote_blocked;
 
 };
 

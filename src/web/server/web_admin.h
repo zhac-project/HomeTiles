@@ -95,6 +95,12 @@ public:
   void handleCrashLogDownload();
   void handleSdDiagnosticsDownload();
 
+  // A request that came through the ZHAC Cloud tunnel: the transport bridges
+  // it from 127.0.0.1, which no LAN client can be. Remote sessions cannot
+  // change the connection, install firmware or write files.
+  bool isRemoteRequest();
+  void sendRemoteRefused();
+
   // HTML pages, implemented in web_admin_html.cpp.
   String getAdminPage();
   String getSuccessPage();
