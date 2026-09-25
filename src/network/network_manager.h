@@ -3,13 +3,13 @@
 
 #include <Arduino.h>
 #include <Network.h>
-// Vendored (not the global Arduino library): patched to insert a real
-// vTaskDelay() periodically inside the packet-read loop, since
-// readByte()/readPacket() otherwise only yield while WAITING for the next
-// byte -- once a whole TCP segment is already buffered, they can walk
-// through thousands of bytes with zero scheduling points. See
+// The MQTT transport wraps the vendored PubSubClient (not the global Arduino
+// library): patched to insert a real vTaskDelay() periodically inside the
+// packet-read loop, since readByte()/readPacket() otherwise only yield while
+// WAITING for the next byte -- once a whole TCP segment is already buffered,
+// they can walk through thousands of bytes with zero scheduling points. See
 // src/network/vendor/pubsubclient/PubSubClient.cpp for details.
-#include "src/network/vendor/pubsubclient/PubSubClient.h"
+#include "src/network/topic_client.h"
 
 // Single source of the device_id: the full 48-bit MAC as a hex string, with no
 // prefix. Used by network_manager.cpp and mqtt_handlers.cpp so both are
@@ -166,7 +166,10 @@ public:
 
 private:
   NetworkClient net_client;
-  PubSubClient mqtt_client;  // After init(), accessed only by the worker task.
+  PubSubClientAdapter mqtt_transport;  // MQTT broker (upstream behaviour).
+  // The selected topic transport. It keeps the name mqtt_client so the
+  // single-owner call sites stay unchanged. After init(), worker only.
+  SelectedTopicClient mqtt_client{mqtt_transport};
 
   uint32_t wifi_retry_at = 0;
   uint32_t wired_ip_wait_until = 0;

@@ -389,7 +389,7 @@ static bool streamLogDue(uint32_t now_ms) {
 
 // Retained commands would replay a snapshot request after every reconnect.
 // The flag is only visible inside the client callback, so filter there.
-static bool dropRetainedLocalCameraCommand(PubSubClient& client,
+static bool dropRetainedLocalCameraCommand(TopicClient& client,
                                            const char* topic) {
   if (!client.lastPublishRetained() || !local_camera::isCommandTopic(topic)) {
     return false;
