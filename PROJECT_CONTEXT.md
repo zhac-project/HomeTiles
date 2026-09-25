@@ -49,7 +49,7 @@ Issue: https://github.com/GalusPeres/HomeTiles/issues/30
 
 ## ZHAC Cloud transport (fork)
 
-- `feat/cloud-remote-admin`: link, apply, states, remote editor OK on Sunton 8048S070C (`feat/sunton-8048s070c`, unpublished) via LAN ws 2026-09-25; TLS soak pending.
+- `feat/cloud-remote-admin`: link, states, taps, remote editor OK on Sunton 8048S070C (`feat/sunton-8048s070c`, unpublished) via LAN ws 2026-09-25; TLS soak pending.
 
 ## Issue #38
 

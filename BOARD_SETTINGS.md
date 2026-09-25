@@ -428,10 +428,10 @@ Used for:
 - build profile `sunton_esp32_8048s070c` (not published; not in the CI release matrix)
 
 Important:
-- Experimental. First boot on the owner's unit (2026-09-25): board init,
-  display init, GT911 at 0x5D, LittleFS, WiFi and the ZHAC Cloud transport
-  work; the physical display colours/geometry and touch are not yet
-  confirmed by eye.
+- Experimental. On the owner's unit (2026-09-25) the display, touch (GT911
+  at 0x5D), LittleFS, WiFi and the ZHAC Cloud transport work: tiles show
+  live states and taps reach the devices; the remote Web Admin works through
+  the cloud. Not yet soak-tested.
 - ESP32-S3-WROOM-1 N16R8: `16MB` flash and `8MB` octal PSRAM.
 - 7-inch `800x480` RGB panel without a command bus or init table. Pin map and
   timing follow openHASP's `sunton-8048s070c_16MB` environment (HSYNC 8/10/43,

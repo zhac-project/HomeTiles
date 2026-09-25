@@ -19,5 +19,9 @@ The display, storage-write and update-check handling is the Guition
 ESP32-4848S040 driver's (same S3 + direct PSRAM framebuffer design); only the
 board wiring differs.
 
+Hardware check on the owner's unit (2026-09-25): display, touch, WiFi and the
+ZHAC Cloud transport (tile states, taps to commands, remote Web Admin) work.
+Not soak-tested yet.
+
 Not supported yet: the microSD slot (pins not verified) and the speaker
 output. The backlight's 1 % floor (`backlight_input_min`) is not calibrated.
