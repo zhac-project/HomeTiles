@@ -409,7 +409,8 @@ static GithubUpdate::CheckResult perform_fw_check() {
 #if defined(DEVICE_ESP32_S3_RGB_480)
   const bool s3_rgb_network_active = networkTransport.isConnected();
 #endif
-#if defined(DEVICE_GUITION_ESP32_4848S040)
+#if defined(DEVICE_GUITION_ESP32_4848S040) || \
+    defined(DEVICE_SUNTON_ESP32_8048S070C)
   if (s3_rgb_network_active) {
     // Reduce continuous RGB scanout bandwidth before TLS/WiFi starts using
     // memory bandwidth. The device guard applies the PCLK change at VSYNC.
@@ -417,7 +418,8 @@ static GithubUpdate::CheckResult perform_fw_check() {
   }
 #endif
   GithubUpdate::CheckResult res = GithubUpdate::checkLatest();
-#if defined(DEVICE_GUITION_ESP32_4848S040)
+#if defined(DEVICE_GUITION_ESP32_4848S040) || \
+    defined(DEVICE_SUNTON_ESP32_8048S070C)
   if (s3_rgb_network_active) {
     // Restore normal scanout speed and finish with one canonical FB0 restart.
     Device::displayUpdateCheckGuardEnd();

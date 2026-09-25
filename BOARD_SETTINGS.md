@@ -421,6 +421,39 @@ Arduino IDE:
 - Upload Speed: `921600`
 - USB Mode: `Hardware CDC and JTAG`
 
+## Sunton ESP32-8048S070C (experimental)
+
+Used for:
+- `src/devices/sunton_esp32_8048s070c`
+- build profile `sunton_esp32_8048s070c` (not published; not in the CI release matrix)
+
+Important:
+- Experimental. First boot on the owner's unit (2026-09-25): board init,
+  display init, GT911 at 0x5D, LittleFS, WiFi and the ZHAC Cloud transport
+  work; the physical display colours/geometry and touch are not yet
+  confirmed by eye.
+- ESP32-S3-WROOM-1 N16R8: `16MB` flash and `8MB` octal PSRAM.
+- 7-inch `800x480` RGB panel without a command bus or init table. Pin map and
+  timing follow openHASP's `sunton-8048s070c_16MB` environment (HSYNC 8/10/43,
+  VSYNC 8/8/12, both polarity 0, falling-edge PCLK); HomeTiles runs 12MHz.
+- Capacitive touch is GT911 on SDA 19 / SCL 20, reset GPIO 38, INT not wired.
+- Backlight PWM is active-high on GPIO 2.
+- The microSD slot and speaker are not used yet (pins unverified), so
+  screenshots are unavailable on this profile.
+- The CH340 USB-UART on UART0 carries flashing and `Serial`. Opening the port
+  resets the board through its auto-reset circuit.
+- Use the repository's `partitions.csv`; HomeTiles needs two 6.5MB OTA slots.
+
+Arduino IDE:
+- Board: `ESP32S3 Dev Module`
+- USB CDC On Boot: `Disabled`
+- CPU Frequency: `240MHz (WiFi)`
+- Flash Mode: `QIO 80MHz`
+- Flash Size: `16MB (128Mb)`
+- Partition Scheme: `Custom`
+- PSRAM: `OPI PSRAM`
+- Upload Speed: `921600`
+
 ## Waveshare ESP32-S3-Touch-LCD-4 Rev 4.0
 
 Used for:

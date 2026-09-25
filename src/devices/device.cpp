@@ -129,13 +129,15 @@ void prepareForRestart() {
 }
 
 void displayUpdateCheckGuardBegin() {
-#if defined(DEVICE_GUITION_ESP32_4848S040)
+#if defined(DEVICE_GUITION_ESP32_4848S040) || \
+    defined(DEVICE_SUNTON_ESP32_8048S070C)
   DeviceImpl::displayUpdateCheckGuardBegin();
 #endif
 }
 
 void displayUpdateCheckGuardEnd() {
-#if defined(DEVICE_GUITION_ESP32_4848S040)
+#if defined(DEVICE_GUITION_ESP32_4848S040) || \
+    defined(DEVICE_SUNTON_ESP32_8048S070C)
   DeviceImpl::displayUpdateCheckGuardEnd();
 #endif
 }

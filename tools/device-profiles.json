@@ -139,6 +139,20 @@
       }
     },
     {
+      "buildProfile": "sunton_esp32_8048s070c",
+      "key": "sunton_esp32_8048s070c",
+      "metadataDeviceKey": "sunton_esp32_8048s070c",
+      "define": "DEVICE_SUNTON_ESP32_8048S070C",
+      "chipFamily": "ESP32-S3",
+      "flashSize": 16777216,
+      "siliconVariant": "default",
+      "minimumRevision": 0,
+      "maximumRevision": 65535,
+      "rxVariant": "native-s3",
+      "elfFlags": "",
+      "publish": false
+    },
+    {
       "buildProfile": "waveshare_7",
       "key": "waveshare_touch_lcd_7",
       "metadataDeviceKey": "waveshare_touch_lcd_7",

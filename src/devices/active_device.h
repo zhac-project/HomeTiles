@@ -23,6 +23,9 @@ namespace DeviceImpl = DeviceGuitionJC4880P443Portrait;
 #elif defined(DEVICE_GUITION_ESP32_4848S040)
 #include "src/devices/guition_esp32_4848s040/device_guition_esp32_4848s040.h"
 namespace DeviceImpl = DeviceGuitionESP324848S040;
+#elif defined(DEVICE_SUNTON_ESP32_8048S070C)
+#include "src/devices/sunton_esp32_8048s070c/device_sunton_esp32_8048s070c.h"
+namespace DeviceImpl = DeviceSuntonESP328048S070C;
 #elif defined(DEVICE_WAVESHARE_S3_TOUCH_LCD_4)
 #include "src/devices/waveshare_s3_touch_lcd_4/device_waveshare_s3_touch_lcd_4.h"
 namespace DeviceImpl = DeviceWaveshareS3TouchLCD4;
