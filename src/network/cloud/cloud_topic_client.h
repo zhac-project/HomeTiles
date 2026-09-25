@@ -91,9 +91,9 @@ class CloudTopicClient final : public TopicClient {
   CloudWebSocket* ws_ = nullptr;
   cloud_config::Endpoint endpoint_{};
   bool configured_ = false;
-  // "Authorization: Bearer " + token + the feature header; passed to the
-  // handshake only.
-  char auth_header_[24 + cloud_config::kTokenMax + 40] = {};
+  // "Authorization: Bearer " + token + the feature and firmware headers
+  // (<= 64 bytes, asserted in the .cpp); passed to the handshake only.
+  char auth_header_[24 + cloud_config::kTokenMax + 104] = {};
   Callback callback_;
 
   volatile Phase phase_ = Phase::Idle;

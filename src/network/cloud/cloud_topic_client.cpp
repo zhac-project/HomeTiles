@@ -9,6 +9,7 @@
 #include <new>
 #include <unistd.h>
 
+#include "src/core/firmware/firmware_version.h"
 #include "src/network/cloud/cloud_frame.h"
 #include "src/network/vendor/arduinowebsockets/WebSocketsClient.h"
 
@@ -21,6 +22,10 @@ namespace {
 constexpr char kSubprotocol[] = "hometiles.v1";
 // Tells the cloud this panel serves its Web Admin through the tunnel.
 constexpr char kFeatureHeader[] = "X-HomeTiles-Features: tunnel";
+// Shown to the owner next to the panel in ZHAC Cloud.
+constexpr char kFirmwareHeader[] = "X-HomeTiles-Firmware: " FW_VERSION;
+static_assert(sizeof(kFirmwareHeader) <= 64,
+              "FW_VERSION must fit auth_header_ in cloud_topic_client.h");
 // Bounded like PubSubClient's socket timeout (TCP + TLS + HTTP upgrade).
 constexpr uint32_t kConnectTimeoutMs = 15000;
 // Panel pings every 15 s; three unanswered pings close the socket. The cloud
@@ -158,7 +163,8 @@ bool CloudTopicClient::configure(const char* url, const char* token) {
     return false;
   }
   snprintf(auth_header_, sizeof(auth_header_),
-           "Authorization: Bearer %s\r\n%s", token, kFeatureHeader);
+           "Authorization: Bearer %s\r\n%s\r\n%s", token, kFeatureHeader,
+           kFirmwareHeader);
   if (!ws_) {
     ws_ = new (std::nothrow) CloudWebSocket(*this);
     if (!ws_) return false;

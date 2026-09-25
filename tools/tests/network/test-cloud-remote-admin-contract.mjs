@@ -24,8 +24,19 @@ assert.equal(port, Number(webAdmin.match(/: server\((\d+)\)/)?.[1]), 'the tunnel
 const client = read('src/network/cloud/cloud_topic_client.cpp');
 assert.match(client, /htonl\(INADDR_LOOPBACK\)/, 'the tunnel connects to 127.0.0.1 only');
 assert.match(client, /kFeatureHeader\[\] = "X-HomeTiles-Features: tunnel"/);
-assert.match(fn(client, 'CloudTopicClient::configure'), /Authorization: Bearer %s\\r\\n%s/,
-  'the feature header travels with the Authorization header');
+assert.match(fn(client, 'CloudTopicClient::configure'), /Authorization: Bearer %s\\r\\n%s\\r\\n%s", token, kFeatureHeader,\s*kFirmwareHeader\)/,
+  'the feature and firmware headers travel with the Authorization header');
+assert.match(client, /kFirmwareHeader\[\] = "X-HomeTiles-Firmware: " FW_VERSION;/);
+{
+  // "Authorization: Bearer " + token + CRLF + feature + CRLF + firmware (<= 64 incl. NUL) must fit.
+  const cfg = read('src/network/cloud/cloud_config.h');
+  const tokenMax = Number(cfg.match(/kTokenMax = (\d+);/)[1]);
+  const extra = Number(read('src/network/cloud/cloud_topic_client.h')
+    .match(/auth_header_\[24 \+ cloud_config::kTokenMax \+ (\d+)\]/)[1]);
+  const need = 'Authorization: Bearer '.length + tokenMax + 2 + 'X-HomeTiles-Features: tunnel'.length + 2 + 64;
+  assert.ok(24 + tokenMax + extra >= need, `auth_header_ holds ${24 + tokenMax + extra}, needs ${need}`);
+  assert.match(client, /static_assert\(sizeof\(kFirmwareHeader\) <= 64/);
+}
 assert.match(fn(client, 'CloudTopicClient::deliver'), /kOpTunOpen[\s\S]*kOpTunData[\s\S]*kOpTunClose[\s\S]*onTunnelFrame/);
 assert.match(fn(client, 'CloudTopicClient::loop'), /serviceTunnels\(\);[\s\S]*closeAllTunnels\(\);/,
   'loop() services the tunnel and closes it when the link drops');
