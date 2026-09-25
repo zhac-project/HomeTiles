@@ -506,6 +506,28 @@ struct Strings {
   // Image control: upper limit of the sensor plus digital gain (percent).
   const char* local_camera_gain;
 
+  // Web Admin: ZHAC Cloud transport section in the network tab. The token
+  // input is write-only; its placeholder only says whether one is stored.
+  const char* admin_settings_cloud;
+  const char* cloud_transport_label;
+  const char* cloud_transport_mqtt;
+  const char* cloud_transport_cloud;
+  const char* cloud_url_label;
+  const char* cloud_token_label;
+  const char* cloud_token_stored;
+  const char* cloud_token_missing;
+  const char* cloud_note;
+  const char* cloud_url_invalid;
+  const char* cloud_token_invalid;
+  // Inline status of the cloud link, including why the cloud refused it.
+  const char* cloud_status_off;
+  const char* cloud_status_connecting;
+  const char* cloud_status_connected;
+  const char* cloud_status_unauthorized;
+  const char* cloud_status_token_revoked;
+  const char* cloud_status_plan_required;
+  const char* cloud_status_forbidden;
+
 };
 
 // Locale-specific display rules and short runtime strings shared by

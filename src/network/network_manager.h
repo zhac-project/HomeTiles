@@ -10,6 +10,9 @@
 // they can walk through thousands of bytes with zero scheduling points. See
 // src/network/vendor/pubsubclient/PubSubClient.cpp for details.
 #include "src/network/topic_client.h"
+#include "src/network/cloud/cloud_topic_client.h"
+
+struct DeviceConfig;
 
 // Single source of the device_id: the full 48-bit MAC as a hex string, with no
 // prefix. Used by network_manager.cpp and mqtt_handlers.cpp so both are
@@ -44,6 +47,21 @@ public:
   // task may read it at any time (one writer, many readers).
   bool isMqttConnected() const { return mqtt_connected_flag; }
   uint16_t getMqttBufferSize() const { return mqtt_buffer_size; }
+
+  // ZHAC Cloud link for the Web Admin status; Off with the MQTT transport.
+  // Written by the worker only.
+  enum class CloudStatus : uint8_t {
+    Off,
+    Connecting,
+    Connected,
+    Unauthorized,
+    TokenRevoked,
+    PlanRequired,
+    Forbidden,
+  };
+  CloudStatus cloudStatus() const {
+    return static_cast<CloudStatus>(cloud_status_);
+  }
   // Reclaimable ESP-Hosted DMA reserve currently held by the MQTT worker.
   // Camera/network guards count it as protected headroom without freeing it.
   size_t mqttDmaReserveBytes() const;
@@ -167,9 +185,18 @@ public:
 private:
   NetworkClient net_client;
   PubSubClientAdapter mqtt_transport;  // MQTT broker (upstream behaviour).
+  CloudTopicClient cloud_transport;    // ZHAC Cloud over WebSocket.
   // The selected topic transport. It keeps the name mqtt_client so the
   // single-owner call sites stay unchanged. After init(), worker only.
   SelectedTopicClient mqtt_client{mqtt_transport};
+  volatile uint8_t cloud_status_ = 0;  // CloudStatus, worker-written.
+
+  // Worker only (or init() before the worker starts): picks the transport
+  // from the configuration, and turns a cloud refusal into the long retry
+  // and the Web Admin status.
+  void selectTopicTransport(const DeviceConfig& cfg);
+  bool cloudRefused();
+  void updateCloudStatus();
 
   uint32_t wifi_retry_at = 0;
   uint32_t wired_ip_wait_until = 0;

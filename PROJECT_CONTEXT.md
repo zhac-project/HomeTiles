@@ -1,6 +1,6 @@
 # HomeTiles shared project context
 
-Last reviewed: 2026-09-11
+Last reviewed: 2026-09-25
 
 ## Sources of truth
 
@@ -42,15 +42,14 @@ Issue: https://github.com/GalusPeres/HomeTiles/issues/30
 
 ## ESP32-P4 network history
 
-- The repository already backports ESP-Hosted allocation/PSRAM fixes,
-  synchronous RPC UID routing, Espressif's `a8204f9` dropped-RX recovery, and
-  sparse diagnostics. Exact patches, variants, hashes, and limitations are in
-  `tools/esp-hosted-3.3.7-rx-fix/README.md`; do not duplicate them here.
-- The `repo-a8204` variant is the release-safe baseline. The short-tail receive
-  variant was an experimental field path and is not proof of a universal fix.
+- ESP-Hosted backports (allocation/PSRAM, RPC UID routing, `a8204f9` RX recovery, diagnostics): see `tools/esp-hosted-3.3.7-rx-fix/README.md`, do not duplicate.
+- `repo-a8204` is the release-safe baseline; the short-tail RX variant was experimental, not a universal fix.
 - Failed P4 OTA approaches: throttling, PSRAM staging, TLS-to-flash streaming, Hosted restart, permanent SDIO buffers. Require new evidence before retrying.
-- Network wedge safeguards are recovery, not
-  proof that the transport defect is solved.
+- Wedge safeguards are recovery, not proof the transport defect is solved.
+
+## ZHAC Cloud transport (fork)
+
+- `feat/zhac-cloud-transport`: `transport=cloud` uses `CloudTopicClient` (`hometiles.v1`/wss, ARCHITECTURE.md). Compile-only; P4/S3 TLS soak and cloud end-to-end pending.
 
 ## Issue #38
 

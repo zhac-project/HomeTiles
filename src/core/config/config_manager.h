@@ -21,6 +21,12 @@
 #define CONFIG_HA_PREFIX_MAX     48
 #define CONFIG_LANG_MAX          8
 #define CONFIG_TIMEZONE_MAX      24
+#define CONFIG_CLOUD_URL_MAX     129  // 128 characters + terminator
+#define CONFIG_CLOUD_TOKEN_MAX   97   // 96 characters + terminator
+
+// Topic transport: an MQTT broker (upstream) or ZHAC Cloud over WebSocket.
+static constexpr uint8_t kTransportMqtt = 0;
+static constexpr uint8_t kTransportCloud = 1;
 
 static constexpr uint16_t kSleepOptionsSec[] = {5, 15, 30, 60, 300, 900, 1800, 3600};
 static constexpr size_t kSleepOptionsSecCount = sizeof(kSleepOptionsSec) / sizeof(kSleepOptionsSec[0]);
@@ -69,6 +75,10 @@ struct DeviceConfig {
   char mqtt_client_id[CONFIG_MQTT_CLIENT_ID_MAX];
   char mqtt_base_topic[CONFIG_MQTT_BASE_MAX];
   char ha_prefix[CONFIG_HA_PREFIX_MAX];
+  uint8_t transport;  // kTransportMqtt or kTransportCloud
+  char cloud_url[CONFIG_CLOUD_URL_MAX];
+  // Write-only: never returned by an HTTP endpoint, HTML page or log line.
+  char cloud_token[CONFIG_CLOUD_TOKEN_MAX];
   char language[CONFIG_LANG_MAX];
   char timezone[CONFIG_TIMEZONE_MAX];
   uint8_t global_time_format;
@@ -155,7 +165,13 @@ public:
   // Reports whether a valid configuration is stored.
   bool isConfigured() const { return config.configured; }
   bool hasWifiCredentials() const { return config.wifi_ssid[0] != '\0'; }
-  bool hasMqttConfig() const { return config.mqtt_host[0] != '\0'; }
+  // A topic connection is configured: a broker host, or with the ZHAC Cloud
+  // transport a cloud URL and a panel token.
+  bool hasMqttConfig() const {
+    return config.transport == kTransportCloud
+               ? config.cloud_url[0] != '\0' && config.cloud_token[0] != '\0'
+               : config.mqtt_host[0] != '\0';
+  }
   bool bootStaticAddressingEnabled() const { return boot_static_enabled; }
 
   // Accessors for the configuration data.

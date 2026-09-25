@@ -2,6 +2,7 @@
 #include "src/core/i18n/i18n.h"
 #include "src/core/config/pin_access.h"
 #include "src/network/bridge/device_entities.h"
+#include "src/network/cloud/cloud_config.h"
 #include "src/network/network_manager.h"
 #include "src/network/transport/network_transport.h"
 #include "src/network/mqtt/mqtt_handlers.h"
@@ -127,6 +128,45 @@ void WebAdminServer::handleSaveMQTT() {
     while (prefix.endsWith("/")) prefix.remove(prefix.length() - 1);
     if (prefix.isEmpty()) prefix = "ha/statestream";
     copyToBuffer(cfg.ha_prefix, sizeof(cfg.ha_prefix), prefix);
+  }
+  // ZHAC Cloud transport. The token is write-only: an empty field keeps the
+  // stored token, a new value replaces it, and no response ever echoes it.
+  if (server.hasArg("transport")) {
+    cfg.transport = server.arg("transport").equalsIgnoreCase("cloud")
+                        ? kTransportCloud
+                        : kTransportMqtt;
+  }
+  cloud_config::Endpoint cloud_endpoint{};
+  if (server.hasArg("cloud_url")) {
+    String url = server.arg("cloud_url");
+    url.trim();
+    if (url.length() && !cloud_config::parseUrl(url.c_str(), &cloud_endpoint)) {
+      sendSaveError(400, i18n::strings(cfg.language).cloud_url_invalid);
+      return;
+    }
+    copyToBuffer(cfg.cloud_url, sizeof(cfg.cloud_url), url);
+  }
+  if (server.hasArg("cloud_token")) {
+    String token = server.arg("cloud_token");
+    token.trim();
+    if (token.length()) {
+      if (!cloud_config::tokenValid(token.c_str())) {
+        sendSaveError(400, i18n::strings(cfg.language).cloud_token_invalid);
+        return;
+      }
+      copyToBuffer(cfg.cloud_token, sizeof(cfg.cloud_token), token);
+    }
+  }
+  if (cfg.transport == kTransportCloud) {
+    // The cloud transport needs both, or the panel would sit disconnected.
+    if (!cloud_config::parseUrl(cfg.cloud_url, &cloud_endpoint)) {
+      sendSaveError(400, i18n::strings(cfg.language).cloud_url_invalid);
+      return;
+    }
+    if (!cloud_config::tokenValid(cfg.cloud_token)) {
+      sendSaveError(400, i18n::strings(cfg.language).cloud_token_invalid);
+      return;
+    }
   }
   if (server.hasArg("language")) {
     String language = server.arg("language");

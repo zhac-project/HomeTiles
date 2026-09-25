@@ -28,11 +28,14 @@ const keys = ['local_camera_section', 'local_camera_enable', 'local_camera_note'
   'local_camera_stream_mode_custom', 'local_camera_custom_fps', 'local_camera_custom_quality',
   'local_camera_indicator_section', 'local_camera_stream_section', 'local_camera_gain'];
 const members = [...header.matchAll(/^\s*const char\* (\w+);/gm)].map(match => match[1]);
-const stringsMembers = members.slice(0, members.indexOf('settings_tile_parking') + keys.length + 1);
+// The camera keys follow settings_tile_parking in declaration order; texts of
+// later features are appended after them. Every Strings member is one string
+// literal, so a member index is also the index into each positional table.
+const cameraStart = members.indexOf('settings_tile_parking') + 1;
+const stringsMembers = members.slice(0, cameraStart + keys.length);
 for (const key of keys) {
   assert.ok(stringsMembers.includes(key), `${key} must be part of i18n::Strings`);
 }
-// The positional tables end with the new keys, in declaration order.
 const lastKeys = stringsMembers.slice(-keys.length);
 assert.deepEqual(lastKeys, keys);
 const tails = {};
@@ -41,7 +44,7 @@ for (const table of ['kStringsDe', 'kStringsEn', 'kStringsFr']) {
   assert.notEqual(start, -1, table);
   const end = i18n.indexOf('};', start);
   const values = [...i18n.slice(start, end).matchAll(/"((?:\\.|[^"\\])*)"/g)].map(match => match[1]);
-  tails[table] = values.slice(-keys.length);
+  tails[table] = values.slice(cameraStart, cameraStart + keys.length);
   for (const [index, value] of tails[table].entries()) {
     assert.ok(value.trim().length > 0, `${table}.${keys[index]} must not be empty`);
   }

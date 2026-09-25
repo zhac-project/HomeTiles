@@ -46,6 +46,9 @@ static bool persisted_config_equal(const DeviceConfig& a,
          strcmp(a.mqtt_client_id, b.mqtt_client_id) == 0 &&
          strcmp(a.mqtt_base_topic, b.mqtt_base_topic) == 0 &&
          strcmp(a.ha_prefix, b.ha_prefix) == 0 &&
+         a.transport == b.transport &&
+         strcmp(a.cloud_url, b.cloud_url) == 0 &&
+         strcmp(a.cloud_token, b.cloud_token) == 0 &&
          strcmp(a.language, b.language) == 0 &&
          strcmp(a.timezone, b.timezone) == 0 &&
          a.global_time_format == b.global_time_format &&
@@ -334,6 +337,11 @@ bool ConfigManager::load() {
   prefs.getString("mqtt_client_id", config.mqtt_client_id, CONFIG_MQTT_CLIENT_ID_MAX);
   prefs.getString("mqtt_base", config.mqtt_base_topic, CONFIG_MQTT_BASE_MAX);
   prefs.getString("ha_prefix", config.ha_prefix, CONFIG_HA_PREFIX_MAX);
+  config.transport = prefs.getUChar("transport", kTransportMqtt) == kTransportCloud
+                         ? kTransportCloud
+                         : kTransportMqtt;
+  prefs.getString("cloud_url", config.cloud_url, CONFIG_CLOUD_URL_MAX);
+  prefs.getString("cloud_token", config.cloud_token, CONFIG_CLOUD_TOKEN_MAX);
   char stored_language[CONFIG_LANG_MAX] = {0};
   prefs.getString("lang", stored_language, CONFIG_LANG_MAX);
   set_language_code(config.language, sizeof(config.language), stored_language);
@@ -631,6 +639,9 @@ bool ConfigManager::save(const DeviceConfig& cfg) {
   prefs.putString("mqtt_client_id", normalized.mqtt_client_id);
   prefs.putString("mqtt_base", normalized.mqtt_base_topic);
   prefs.putString("ha_prefix", normalized.ha_prefix);
+  prefs.putUChar("transport", normalized.transport);
+  prefs.putString("cloud_url", normalized.cloud_url);
+  prefs.putString("cloud_token", normalized.cloud_token);
   prefs.putString("lang", normalized.language);
   prefs.putString("tz", normalized.timezone);
   prefs.putUChar("time_fmt", normalized.global_time_format);

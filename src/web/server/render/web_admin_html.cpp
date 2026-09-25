@@ -8,6 +8,7 @@
 #include <nvs_flash.h>
 #include "src/core/config/config_manager.h"
 #include "src/network/bridge/ha_bridge_config.h"
+#include "src/network/network_manager.h"
 #include "src/network/transport/network_transport.h"
 #include "src/network/transport/usb_ethernet_backend.h"
 #include "src/web/server/render/web_admin_scripts.h"
@@ -173,6 +174,89 @@ static const char* localCameraStateText(const char* state,
   if (strcmp(state, "ready") == 0) return tr.local_camera_status_ready;
   if (strcmp(state, "not_found") == 0) return tr.local_camera_status_not_found;
   return tr.local_camera_status_error;
+}
+
+static const char* cloudStatusText(const i18n::Strings& tr) {
+  switch (networkManager.cloudStatus()) {
+    case HomeTilesNetworkManager::CloudStatus::Connecting:
+      return tr.cloud_status_connecting;
+    case HomeTilesNetworkManager::CloudStatus::Connected:
+      return tr.cloud_status_connected;
+    case HomeTilesNetworkManager::CloudStatus::Unauthorized:
+      return tr.cloud_status_unauthorized;
+    case HomeTilesNetworkManager::CloudStatus::TokenRevoked:
+      return tr.cloud_status_token_revoked;
+    case HomeTilesNetworkManager::CloudStatus::PlanRequired:
+      return tr.cloud_status_plan_required;
+    case HomeTilesNetworkManager::CloudStatus::Forbidden:
+      return tr.cloud_status_forbidden;
+    case HomeTilesNetworkManager::CloudStatus::Off:
+      break;
+  }
+  return tr.cloud_status_off;
+}
+
+// ZHAC Cloud transport: part of the /mqtt settings form. The panel token is
+// write-only; the page shows only whether one is stored, never the value.
+static void appendCloudSettingsHtml(String& html, const DeviceConfig& cfg,
+                                    const i18n::Strings& tr) {
+  const bool cloud = cfg.transport == kTransportCloud;
+  const bool connected = networkManager.cloudStatus() ==
+                         HomeTilesNetworkManager::CloudStatus::Connected;
+  html += R"html(
+          <div class="settings-section">
+            <div class="section-title-row">
+              <div class="section-title">)html";
+  html += tr.admin_settings_cloud;
+  html += R"html(</div>
+              <div class="wifi-inline-status"><span class="wifi-inline-dot)html";
+  if (!connected) html += " off";
+  html += R"html("></span>)html";
+  html += cloudStatusText(tr);
+  html += R"html(</div>
+            </div>
+            <div class="settings-grid">
+              <div class="settings-full">
+                <label for="transport">)html";
+  html += tr.cloud_transport_label;
+  html += R"html(:</label>
+                <select id="transport" name="transport">
+                  <option value="mqtt")html";
+  if (!cloud) html += " selected";
+  html += ">";
+  html += tr.cloud_transport_mqtt;
+  html += R"html(</option>
+                  <option value="cloud")html";
+  if (cloud) html += " selected";
+  html += ">";
+  html += tr.cloud_transport_cloud;
+  html += R"html(</option>
+                </select>
+              </div>
+              <div class="settings-full">
+                <label for="cloud_url">)html";
+  html += tr.cloud_url_label;
+  html += R"html(:</label>
+                <input type="text" id="cloud_url" name="cloud_url" maxlength="128"
+                       autocomplete="off" spellcheck="false" placeholder="wss://" value=")html";
+  appendHtmlEscaped(html, cfg.cloud_url);
+  html += R"html(">
+              </div>
+              <div class="settings-full">
+                <label for="cloud_token">)html";
+  html += tr.cloud_token_label;
+  html += R"html(:</label>
+                <input type="password" id="cloud_token" name="cloud_token" maxlength="96"
+                       autocomplete="new-password" spellcheck="false" value="" placeholder=")html";
+  html += cfg.cloud_token[0] ? tr.cloud_token_stored : tr.cloud_token_missing;
+  html += R"html(">
+                <div class="settings-note">)html";
+  html += tr.cloud_note;
+  html += R"html(</div>
+              </div>
+            </div>
+          </div>
+)html";
 }
 
 // Built-in camera opt-in. Rendered only on the exact camera profile; the
@@ -1669,6 +1753,9 @@ String WebAdminServer::getAdminPage() {
               </div>
             </div>
           </div>
+)html";
+  appendCloudSettingsHtml(html, cfg, tr);
+  html += R"html(
 
           <div class="settings-section">
             <div class="section-title">)html";
@@ -2057,6 +2144,24 @@ String WebAdminServer::getStatusJSON() {
   json += ",\"mqtt_client_id\":\"" + String(cfg.mqtt_client_id) + "\"";
   json += ",\"mqtt_base\":\"" + String(cfg.mqtt_base_topic) + "\"";
   json += ",\"ha_prefix\":\"" + String(cfg.ha_prefix) + "\"";
+  // ZHAC Cloud: URL and link state only. The token is write-only; report
+  // whether one is stored, never its value.
+  static const char* const kCloudStatusNames[] = {
+      "off", "connecting", "connected", "unauthorized",
+      "token_revoked", "plan_required", "forbidden"};
+  const size_t cloud_status = static_cast<size_t>(networkManager.cloudStatus());
+  json += ",\"transport\":\"";
+  json += cfg.transport == kTransportCloud ? "cloud" : "mqtt";
+  // cloud_url passed cloud_config::parseUrl (RFC 3986 characters only).
+  json += "\",\"cloud_url\":\"";
+  json += cfg.cloud_url;
+  json += "\",\"cloud_token_set\":";
+  json += cfg.cloud_token[0] ? "true" : "false";
+  json += ",\"cloud_status\":\"";
+  json += cloud_status < sizeof(kCloudStatusNames) / sizeof(kCloudStatusNames[0])
+              ? kCloudStatusNames[cloud_status]
+              : "off";
+  json += "\"";
   json += ",\"bridge_configured\":" + String(haBridgeConfig.hasData() ? "true" : "false");
   json += ",\"free_heap\":" + String(ESP.getFreeHeap());
   json += ",\"heap_total\":" + String(ESP.getHeapSize());

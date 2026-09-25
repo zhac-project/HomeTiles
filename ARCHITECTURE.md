@@ -92,6 +92,30 @@ Startup bursts, buffer growth and P4 DMA headroom affect their scheduling.
 Recovery waits for camera socket ownership to end before tearing down transport.
 These restrictions are stability mechanisms, not general-purpose task scheduling.
 
+### Topic transports (ZHAC fork)
+
+The worker's `mqtt_client` is a `SelectedTopicClient` (`src/network/topic_client.h`)
+that forwards to the transport chosen by the `transport` setting; the queues,
+lanes and call sites above are the same for both:
+
+| Transport | Class | Wire |
+|---|---|---|
+| `mqtt` (default) | `PubSubClientAdapter` | the vendored PubSubClient to an MQTT broker, unchanged |
+| `cloud` | `CloudTopicClient` (`src/network/cloud/`) | one WebSocket to ZHAC Cloud, subprotocol `hometiles.v1`, `Authorization: Bearer <panel token>` |
+
+`hometiles.v1` sends one operation per binary message: op byte (`0x01` PUB,
+`0x02` SUB, `0x03` UNSUB, `0x04` WILL, `0x7F` ERR from the cloud), flags byte
+(bit 0 retain), topic length (uint16 big-endian, 1-1024), topic, payload (at
+most 65,535 bytes). The codec in `cloud_frame.h` is pure and host-tested. The
+cloud client is polled by the worker like PubSubClient: `connect()` blocks up
+to 15 s for TCP, TLS (server verified with the core's Mozilla CA bundle) and the
+HTTP upgrade, then registers the last will; received PUB frames reach the
+callback on the worker. HTTP 401/402/403 at the handshake and close codes 1008
+(token revoked) / 4402 (plan required) are refusals: the worker waits 15
+minutes instead of 6-96 s and the Web Admin shows the reason. The panel token
+(`cloud_token`) is write-only. The WebSocket library is a patched, vendored
+client subset of arduinoWebSockets 2.7.2 (LGPL-2.1, see its README).
+
 The media artwork worker owns HTTP download buffers and unpublished results.
 The loop attaches image descriptors to widgets and performs LVGL cache cleanup.
 Freeing an unpublished descriptor differs from releasing an image already used

@@ -87,6 +87,10 @@ static constexpr uint32_t kMqttDmaRecoveryCooldownMs = 30000;
 // space these control packets so SDIO RX can forward each response to the
 // MQTT inbound queue and release its DMA buffer.
 static constexpr uint32_t kMqttSdioControlQuietMs = 50;
+// ZHAC Cloud refused the panel (token rejected or revoked, plan required,
+// forbidden): retrying every 6-96 s cannot succeed, so wait 15 minutes. Saving
+// new cloud settings reconnects at once.
+static constexpr uint32_t kCloudRefusalRetryMs = 15UL * 60UL * 1000UL;
 
 static void applyWifiAutoReconnectPolicy() {
 #if defined(CONFIG_ESP_WIFI_REMOTE_ENABLED) && CONFIG_ESP_WIFI_REMOTE_ENABLED
@@ -687,6 +691,7 @@ void HomeTilesNetworkManager::init() {
   mqtt_enabled = configManager.hasMqttConfig();
   if (mqtt_enabled) {
     // MQTT setup precedes worker startup, so direct client access is safe.
+    selectTopicTransport(cfg);
     mqtt_client.setClient(net_client);
     mqtt_client.setServer(cfg.mqtt_host, cfg.mqtt_port);
     setMqttBufferSize(mqttNormalBufferSize(), "init");
@@ -701,6 +706,7 @@ void HomeTilesNetworkManager::init() {
   } else {
     Serial.println("MQTT: No configuration available - skipping connection");
   }
+  updateCloudStatus();
 
   Serial.println("✓ Network Manager initialized");
 }
@@ -950,7 +956,13 @@ void HomeTilesNetworkManager::connectMqtt() {
     snprintf(client_id, sizeof(client_id), "Tab5_LVGL-%012llX", mac);
   }
 
-  Serial.printf("MQTT: Connecting to %s:%u as %s\n", cfg.mqtt_host, cfg.mqtt_port, client_id);
+  if (mqtt_client.isSelected(cloud_transport)) {
+    Serial.printf("Cloud: Connecting to %s as %s\n", cloud_transport.host(),
+                  client_id);
+  } else {
+    Serial.printf("MQTT: Connecting to %s:%u as %s\n", cfg.mqtt_host,
+                  cfg.mqtt_port, client_id);
+  }
 
   const char* stat_topic = mqttTopics.topic(TopicKey::STAT_CONN);
   if (!stat_topic || !*stat_topic) {
@@ -974,10 +986,13 @@ void HomeTilesNetworkManager::connectMqtt() {
     if (mqtt_connect_failures < 255) ++mqtt_connect_failures;
     const uint32_t shift =
         mqtt_connect_failures < 5 ? mqtt_connect_failures : 5;
-    mqtt_retry_at = millis() + (3000UL << shift);  // 6s..96s
+    const uint32_t retry_ms =
+        cloudRefused() ? kCloudRefusalRetryMs : (3000UL << shift);  // 6s..96s
+    mqtt_retry_at = millis() + retry_ms;
     Serial.printf("MQTT: Connection failed, state=%d (retry in %lus)\n",
                   mqtt_client.state(),
-                  static_cast<unsigned long>((3000UL << shift) / 1000));
+                  static_cast<unsigned long>(retry_ms / 1000));
+    updateCloudStatus();
     return;
   }
 
@@ -985,6 +1000,13 @@ void HomeTilesNetworkManager::connectMqtt() {
   Serial.println("✓ MQTT connected");
   mqtt_connected_at = millis();
   logNetworkHeap("after-MQTT-connect");
+  if (mqtt_client.isSelected(cloud_transport)) {
+    // Evidence for the TLS memory gate: the handshake ran on this worker.
+    Serial.printf("[Cloud] Connected to %s (worker stack free min %u B)\n",
+                  cloud_transport.host(),
+                  static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+  }
+  updateCloudStatus();
 
   // Publish status and subscribe to reply topics directly. Client access
   // is safe because connectMqtt() runs only on the owning worker.
@@ -1128,6 +1150,7 @@ void HomeTilesNetworkManager::serviceMqttWorker() {
     mqtt_enabled = configManager.hasMqttConfig();
     if (mqtt_enabled) {
       const DeviceConfig& cfg = configManager.getConfig();
+      selectTopicTransport(cfg);
       mqtt_client.setClient(net_client);
       mqtt_client.setServer(cfg.mqtt_host, cfg.mqtt_port);
       mqtt_client.setCallback([this](char* topic, uint8_t* payload, unsigned int length) {
@@ -1142,6 +1165,7 @@ void HomeTilesNetworkManager::serviceMqttWorker() {
     } else {
       Serial.println("[MQTT] Reconfigure: no host configured, remaining disconnected");
     }
+    updateCloudStatus();
     return;
   }
 
@@ -1244,6 +1268,9 @@ void HomeTilesNetworkManager::serviceMqttWorker() {
     Serial.printf("[MQTT] Connection lost in loop, state=%d\n",
                   mqtt_client.state());
     mqtt_connected_flag = false;
+    // Closed by the cloud with 1008 (token revoked) or 4402 (plan required).
+    if (cloudRefused()) mqtt_retry_at = millis() + kCloudRefusalRetryMs;
+    updateCloudStatus();
   }
 }
 
@@ -1807,6 +1834,55 @@ bool HomeTilesNetworkManager::setMqttBufferSize(uint16_t size, const char* reaso
                 reason ? reason : "?",
                 mqtt_client.bufferInExternalRam() ? "PSRAM" : "internal");
   return true;
+}
+
+void HomeTilesNetworkManager::selectTopicTransport(const DeviceConfig& cfg) {
+  TopicClient& wanted =
+      cfg.transport == kTransportCloud
+          ? static_cast<TopicClient&>(cloud_transport)
+          : static_cast<TopicClient&>(mqtt_transport);
+  if (&wanted == &cloud_transport &&
+      !cloud_transport.configure(cfg.cloud_url, cfg.cloud_token)) {
+    // Web Admin validates both before saving; connect() keeps failing with
+    // the normal backoff until the settings are corrected.
+    Serial.println("[Cloud] Invalid cloud URL or token in the settings");
+  }
+  if (mqtt_client.isSelected(wanted)) return;
+  mqtt_client.select(wanted);
+  // The new transport starts with its own buffer bookkeeping.
+  setMqttBufferSize(mqttNormalBufferSize(), "transport");
+  Serial.printf("[Network] Topic transport: %s\n",
+                &wanted == &cloud_transport ? "ZHAC Cloud" : "MQTT");
+}
+
+bool HomeTilesNetworkManager::cloudRefused() {
+  return mqtt_client.isSelected(cloud_transport) &&
+         cloud_transport.refusal() != CloudTopicClient::Refusal::None;
+}
+
+void HomeTilesNetworkManager::updateCloudStatus() {
+  CloudStatus status = CloudStatus::Off;
+  if (mqtt_enabled && mqtt_client.isSelected(cloud_transport)) {
+    switch (cloud_transport.refusal()) {
+      case CloudTopicClient::Refusal::Unauthorized:
+        status = CloudStatus::Unauthorized;
+        break;
+      case CloudTopicClient::Refusal::TokenRevoked:
+        status = CloudStatus::TokenRevoked;
+        break;
+      case CloudTopicClient::Refusal::PlanRequired:
+        status = CloudStatus::PlanRequired;
+        break;
+      case CloudTopicClient::Refusal::Forbidden:
+        status = CloudStatus::Forbidden;
+        break;
+      case CloudTopicClient::Refusal::None:
+        status = mqtt_client.connected() ? CloudStatus::Connected
+                                         : CloudStatus::Connecting;
+        break;
+    }
+  }
+  cloud_status_ = static_cast<uint8_t>(status);
 }
 
 void HomeTilesNetworkManager::restoreMqttBufferNormal() {
