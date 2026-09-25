@@ -1521,7 +1521,7 @@ String WebAdminServer::getAdminPage() {
 
       <!-- Tab 3: Settings (Network/MQTT Configuration) -->
       <div id="tab-network" class="tab-content">
-        <form id="admin_settings_form" action="/mqtt" method="POST" autocomplete="on">
+        <form id="admin_settings_form" action="mqtt" method="POST" autocomplete="on">
           <div class="settings-section">
             <div class="section-title-row">
               <div class="section-title">)html";
@@ -1814,7 +1814,7 @@ String WebAdminServer::getAdminPage() {
   html += tr.crash_log_download;
   html += R"html(</button>
 )html";
-  html += R"html(                  <button class="btn btn-secondary" type="button" onclick="window.open('/api/sd-diagnostics?ts=' + Date.now(), '_blank')">)html";
+  html += R"html(                  <button class="btn btn-secondary" type="button" onclick="window.open('api/sd-diagnostics?ts=' + Date.now(), '_blank')">)html";
   html += tr.sd_diagnostics_open;
   html += R"html(</button>
 )html";
@@ -1842,7 +1842,7 @@ String WebAdminServer::getAdminPage() {
     }
     html += R"html(
                 <div class="settings-actions" id="coredump_actions">
-                  <button class="btn btn-secondary" type="button" onclick="window.location.href='/api/coredump'">)html";
+                  <button class="btn btn-secondary" type="button" onclick="window.location.href='api/coredump'">)html";
     html += tr.coredump_download;
     html += R"html(</button>
                   <button class="btn btn-secondary" type="button" onclick="eraseCoreDump()">)html";
@@ -2007,7 +2007,7 @@ String WebAdminServer::getAdminPage() {
           </div>
         </form>
 
-        <form id="admin_restart_form" action="/restart" method="POST" onsubmit="return confirm('Gerät wirklich neu starten?');" class="admin-hidden-form"></form>
+        <form id="admin_restart_form" action="restart" method="POST" onsubmit="return confirm('Gerät wirklich neu starten?');" class="admin-hidden-form"></form>
         <div class="admin-footer-actions">
           <button class="btn btn-go admin-footer-btn" type="submit" form="admin_settings_form">Speichern</button>
           <button class="btn btn-secondary admin-footer-btn" type="submit" form="admin_restart_form">Gerät neu starten</button>
@@ -2048,7 +2048,7 @@ String WebAdminServer::getSuccessPage() {
     h1 { margin:0 0 10px; color:#ffffff; font-size:22px; }
     p { margin:0; color:#8a8a8a; }
   </style>
-  <script>setTimeout(function(){window.location.href='/'},1500);</script>
+  <script>setTimeout(function(){window.location.href='./'},1500);</script>
 </head>
 <body>
   <div class="box">
@@ -2083,7 +2083,7 @@ String WebAdminServer::getBridgeSuccessPage() {
     h1 { margin:0 0 10px; color:#ffffff; font-size:22px; }
     p { margin:0; color:#8a8a8a; }
   </style>
-  <script>setTimeout(function(){window.location.href='/'},1500);</script>
+  <script>setTimeout(function(){window.location.href='./'},1500);</script>
 </head>
 <body>
   <div class="box">

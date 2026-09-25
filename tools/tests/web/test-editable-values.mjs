@@ -241,7 +241,7 @@ for (const [index,[kind, camel, entity, state, unit]] of types.entries()) {
   let request;
   sandbox.fetch=async (url,options)=>{request={url,fields:Object.fromEntries(options.body)};return {json:async()=>({success:true})}};
   await run(`postTile(1,3,{type:${type},title:${JSON.stringify('Desk\nOffice')},sensor_entity:'${entity}',sensor_value_font:4,popup_open_mode:0,col:1,row:1,span_w:1,span_h:1})`);
-  assert.equal(request.url,'/api/tiles');assert.equal(request.fields[kind+'_entity'],entity);assert.equal(request.fields.popup_open_mode,'0');
+  assert.equal(request.url,'api/tiles');assert.equal(request.fields[kind+'_entity'],entity);assert.equal(request.fields.popup_open_mode,'0');
   assert.equal(request.fields.sensor_value_font,'4');assert.equal(request.fields.title,'Desk\nOffice');
   run(`reset${camel}Fields('folder1');`);assert.equal(select.value,'');assert.equal(popup.value,'1');assert.equal(font.value,'2');
 }

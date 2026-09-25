@@ -44,7 +44,7 @@ function t(key) {
     const sequence = ++normalTileBordersSaveSequence;
     applyNormalTileBordersPreview(wanted);
     try {
-      const response = await fetch('/api/display/tile-borders', {
+      const response = await fetch('api/display/tile-borders', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: 'enabled=' + (wanted ? '1' : '0')
@@ -106,7 +106,7 @@ async function queueTileRadius(value, persist) {
       const revision = tileRadiusRevision;
       tileRadiusWanted = null;
       try {
-        const response = await fetch('/api/display/tile-radius', {
+        const response = await fetch('api/display/tile-radius', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({ radius: String(wanted.radius), preview: wanted.persist ? '0' : '1' }).toString()
@@ -587,7 +587,7 @@ function syncTileRadiusControls(tabEl) {
 
     if (pinApply && hasNewPin) pinApply.disabled = true;
     try {
-      const response = await fetch('/mqtt', {
+      const response = await fetch('mqtt', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'},
         body
@@ -722,7 +722,7 @@ function syncTileRadiusControls(tabEl) {
       try {
         const body = new URLSearchParams(new FormData(form));
         body.set('_ajax', '1');
-        const response = await fetch('/mqtt', {
+        const response = await fetch('mqtt', {
           method: 'POST',
           headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'},
           body
@@ -770,14 +770,14 @@ function syncTileRadiusControls(tabEl) {
   async function createScreenshotAndDownload() {
     showNotification(t('screenshotCreating'));
     try {
-      const res = await fetch('/api/screenshot', { method: 'POST' });
+      const res = await fetch('api/screenshot', { method: 'POST' });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success) {
         throw new Error(data.error || t('screenshotFailed'));
       }
       showNotification(t('screenshotSaved'));
       const link = document.createElement('a');
-      link.href = '/api/screenshot/download?ts=' + Date.now();
+      link.href = 'api/screenshot/download?ts=' + Date.now();
       link.download = 'ui_screenshot.jpg';
       document.body.appendChild(link);
       link.click();
@@ -846,7 +846,7 @@ function syncTileRadiusControls(tabEl) {
   async function refreshLocalCameraStatus() {
     if (!document.getElementById('local_camera_status')) return;
     try {
-      const response = await fetch('/api/local-camera', {cache: 'no-store'});
+      const response = await fetch('api/local-camera', {cache: 'no-store'});
       if (!response.ok) return;
       applyLocalCameraStatus(await response.json());
     } catch (error) {
@@ -859,7 +859,7 @@ function syncTileRadiusControls(tabEl) {
     const sequence = ++localCameraSaveSequence;
     const toggle = document.getElementById('local_camera_enabled');
     try {
-      const response = await fetch('/api/local-camera', {
+      const response = await fetch('api/local-camera', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: 'enabled=' + (wanted ? '1' : '0')
@@ -880,7 +880,7 @@ function syncTileRadiusControls(tabEl) {
     const sequence = ++localCameraMirrorSequence;
     const toggle = document.getElementById('local_camera_mirror');
     try {
-      const response = await fetch('/api/local-camera', {
+      const response = await fetch('api/local-camera', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: 'mirror=' + (wanted ? '1' : '0')
@@ -924,7 +924,7 @@ function syncTileRadiusControls(tabEl) {
     if (pill) pill.disabled = style === 0;
     const saved = line && line.dataset.saved !== undefined ? parseInt(line.dataset.saved, 10) : null;
     try {
-      const response = await fetch('/api/local-camera', {
+      const response = await fetch('api/local-camera', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: 'indicator=' + style
@@ -987,7 +987,7 @@ function syncTileRadiusControls(tabEl) {
     localCameraCustomInput(slider);
     const sequence = ++localCameraCustomSequence;
     try {
-      const response = await fetch('/api/local-camera', {
+      const response = await fetch('api/local-camera', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: 'custom_' + key + '=' + value
@@ -1010,7 +1010,7 @@ function syncTileRadiusControls(tabEl) {
     const previous = select && select.dataset.saved !== undefined ? select.dataset.saved : null;
     showLocalCameraCustom(mode);
     try {
-      const response = await fetch('/api/local-camera', {
+      const response = await fetch('api/local-camera', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: 'mode=' + encodeURIComponent(mode)
@@ -1106,7 +1106,7 @@ function syncTileRadiusControls(tabEl) {
     localCameraImageInFlight = values;
     const body = keys.map(key => key + '=' + encodeURIComponent(String(values[key]))).join('&');
     try {
-      const response = await fetch('/api/local-camera', {
+      const response = await fetch('api/local-camera', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body
@@ -1146,7 +1146,7 @@ function syncTileRadiusControls(tabEl) {
 
   async function downloadCrashLog() {
     try {
-      const res = await fetch('/api/crashlog?ts=' + Date.now());
+      const res = await fetch('api/crashlog?ts=' + Date.now());
       if (res.status === 404) {
         showNotification(fileManagerText('Kein Absturz aufgezeichnet.', 'No crash recorded.'));
         return;
@@ -1169,7 +1169,7 @@ function syncTileRadiusControls(tabEl) {
   async function eraseCoreDump() {
     if (!confirm(fileManagerText('Gespeicherten Core-Dump wirklich l\u00f6schen?', 'Really delete the stored core dump?'))) return;
     try {
-      const res = await fetch('/api/coredump/erase', { method: 'POST' });
+      const res = await fetch('api/coredump/erase', { method: 'POST' });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success) {
         throw new Error(data.error || fileManagerText('L\u00f6schen fehlgeschlagen.', 'Delete failed.'));
@@ -1481,7 +1481,7 @@ function syncTileRadiusControls(tabEl) {
     setFileManagerStatus(fileManagerText('Lade Dateien...', 'Loading files...'));
 
     try {
-      const res = await fetch(fileManagerUrl('/api/files/list', {
+      const res = await fetch(fileManagerUrl('api/files/list', {
         fs: fileManagerState.fs,
         path: fileManagerState.path
       }), { cache: 'no-store' });
@@ -1512,7 +1512,7 @@ function syncTileRadiusControls(tabEl) {
   }
 
   function downloadFileManagerFile(path) {
-    window.location.href = fileManagerUrl('/api/files/download', {
+    window.location.href = fileManagerUrl('api/files/download', {
       fs: fileManagerState.fs,
       path: path
     });
@@ -1560,7 +1560,7 @@ function syncTileRadiusControls(tabEl) {
     const trimmed = String(name || '').trim();
     if (!trimmed) return;
     try {
-      await postFileManagerForm('/api/files/mkdir', {
+      await postFileManagerForm('api/files/mkdir', {
         fs: fileManagerState.fs,
         path: fileManagerState.path || '/',
         name: trimmed
@@ -1578,7 +1578,7 @@ function syncTileRadiusControls(tabEl) {
     const trimmed = String(name || '').trim();
     if (!trimmed || trimmed === currentName) return;
     try {
-      await postFileManagerForm('/api/files/rename', {
+      await postFileManagerForm('api/files/rename', {
         fs: fileManagerState.fs,
         path,
         name: trimmed
@@ -1597,7 +1597,7 @@ function syncTileRadiusControls(tabEl) {
       : fileManagerText('Datei wirklich l\u00f6schen: ', 'Delete file: ');
     if (!confirm(message + (name || path))) return;
     try {
-      await postFileManagerForm('/api/files/delete', {
+      await postFileManagerForm('api/files/delete', {
         fs: fileManagerState.fs,
         path
       });
@@ -1642,7 +1642,7 @@ function syncTileRadiusControls(tabEl) {
           setFileManagerStatus(
             fileManagerText('Upload ', 'Upload ') + (fileIndex + 1) + '/' + files.length +
             ': ' + file.name + ' - ' + pct + '%');
-          const res = await fetch(fileManagerUrl('/api/files/upload', {
+          const res = await fetch(fileManagerUrl('api/files/upload', {
             fs: fileManagerState.fs,
             path: fileManagerState.path || '/',
             append: firstPart ? '0' : '1'
@@ -1707,7 +1707,7 @@ function syncTileRadiusControls(tabEl) {
     const startedAt = Date.now();
     const poll = async () => {
       try {
-        const res = await fetch('/api/ota/github/status?ts=' + Date.now(), {
+        const res = await fetch('api/ota/github/status?ts=' + Date.now(), {
           method: 'GET',
           cache: 'no-store',
           credentials: 'same-origin'
@@ -1744,7 +1744,7 @@ function syncTileRadiusControls(tabEl) {
     setGithubOtaUi(t('otaGithubDownloading'), 'busy');
     showNotification(t('otaGithubDownloading'));
     try {
-      const res = await fetch('/api/ota/github/install', {
+      const res = await fetch('api/ota/github/install', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'tag=' + encodeURIComponent(tag),
@@ -1776,7 +1776,7 @@ function syncTileRadiusControls(tabEl) {
     if (button) button.textContent = t('otaGithubChecking');
     setGithubOtaUi(t('otaGithubChecking'));
     try {
-      const res = await fetch('/api/ota/github/check', {
+      const res = await fetch('api/ota/github/check', {
         method: 'POST',
         cache: 'no-store',
         credentials: 'same-origin'
@@ -1883,7 +1883,7 @@ function syncTileRadiusControls(tabEl) {
     try {
       const otaSize = encodeURIComponent(String(file.size || 0));
       const otaFilename = encodeURIComponent(String(file.name || ''));
-      const prepRes = await fetch('/api/ota/prepare?size=' + otaSize + '&filename=' + otaFilename, {
+      const prepRes = await fetch('api/ota/prepare?size=' + otaSize + '&filename=' + otaFilename, {
         method: 'POST',
         cache: 'no-store',
         credentials: 'same-origin'
@@ -1910,7 +1910,7 @@ function syncTileRadiusControls(tabEl) {
     const xhr = new XMLHttpRequest();
     const otaSize = encodeURIComponent(String(file.size || 0));
     const otaFilename = encodeURIComponent(String(file.name || ''));
-    xhr.open('POST', '/api/ota/upload/raw?size=' + otaSize + '&filename=' + otaFilename, true);
+    xhr.open('POST', 'api/ota/upload/raw?size=' + otaSize + '&filename=' + otaFilename, true);
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
     xhr.setRequestHeader('X-HomeTiles-OTA-Filename', otaFilename);
 
@@ -2038,7 +2038,7 @@ function syncTileRadiusControls(tabEl) {
     if (!force && sensorMetaCache.loaded && (now - lastSensorMetaFetchMs) < 15000) {
       return Promise.resolve(sensorMetaCache);
     }
-    sensorMetaFetchInFlight = fetch('/api/sensor_values')
+    sensorMetaFetchInFlight = fetch('api/sensor_values')
       .then(res => res.json())
       .then(raw => {
         sensorMetaCache = normalizeSensorMetaPayload(raw || {});
@@ -2057,7 +2057,7 @@ function syncTileRadiusControls(tabEl) {
         (now - lastEntityOptionsFetchMs) < ENTITY_OPTIONS_CACHE_MS) {
       return Promise.resolve(entityOptionsCache);
     }
-    entityOptionsFetchInFlight = fetch('/api/entity_options')
+    entityOptionsFetchInFlight = fetch('api/entity_options')
       .then(res => {
         if (!res.ok) throw new Error('Entity options HTTP ' + res.status);
         return res.json();
@@ -2666,7 +2666,7 @@ function syncTileRadiusControls(tabEl) {
 
     folderTabLoadPromises[folderNum] = (async () => {
       const res = await fetch(
-        '/api/folders/tab?folder_id=' + encodeURIComponent(folderNum));
+        'api/folders/tab?folder_id=' + encodeURIComponent(folderNum));
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success || !data.tab_id || !data.tab_html) {
         return false;
@@ -4357,7 +4357,7 @@ function syncTileRadiusControls(tabEl) {
     const folderId = getFolderIdForTab(tab);
     if (folderId === undefined) return;
     const baseline = JSON.stringify(cached);
-    fetch('/api/tiles?folder=' + encodeURIComponent(folderId) + '&index=' + index)
+    fetch('api/tiles?folder=' + encodeURIComponent(folderId) + '&index=' + index)
       .then(res => res.json())
       .then(data => {
         const current = getTilesData(tab)[index];
@@ -4554,7 +4554,7 @@ function syncTileRadiusControls(tabEl) {
     }
     const formData = new FormData();
     formData.append('folder_id', folderId);
-    fetch('/api/folders/delete', { method: 'POST', body: formData })
+    fetch('api/folders/delete', { method: 'POST', body: formData })
       .then(res => res.json())
       .then(data => {
         if (data.success) {
@@ -4647,7 +4647,7 @@ function syncTileRadiusControls(tabEl) {
     const draftRev = Number(snapshot._rev || 0);
     markLatestSaveRequest(tab, tileIndex, requestId);
     saveInFlightByTile[saveKey] = true;
-    fetch('/api/tiles', { method:'POST', body:formData })
+    fetch('api/tiles', { method:'POST', body:formData })
       .then(res => res.json())
       .then(data => {
         if (!isLatestSaveRequest(tab, tileIndex, requestId)) return;
@@ -4758,7 +4758,7 @@ function syncTileRadiusControls(tabEl) {
 
   async function exportTilesConfig() {
     try {
-      const foldersRequest = fetch('/api/folders').then(async res => {
+      const foldersRequest = fetch('api/folders').then(async res => {
         const data = await res.json();
         if (!res.ok || !Array.isArray(data)) {
           throw new Error('Folder export failed');
@@ -4770,13 +4770,13 @@ function syncTileRadiusControls(tabEl) {
           icon_name: String(folder?.icon_name || '')
         }));
       });
-      const screensaverConfigRequest = fetch('/api/screensaver').then(async res => {
+      const screensaverConfigRequest = fetch('api/screensaver').then(async res => {
         const data = await res.json();
         if (!res.ok || !data?.success) throw new Error('Screensaver config export failed');
         return data;
       });
       const screensaverGridRequest = fetch(
-        '/api/tiles?folder=' + encodeURIComponent(SCREENSAVER_FOLDER_ID)
+        'api/tiles?folder=' + encodeURIComponent(SCREENSAVER_FOLDER_ID)
       ).then(async res => {
         const data = await res.json();
         if (!res.ok || !Array.isArray(data)) throw new Error('Screensaver grid export failed');
@@ -4792,7 +4792,7 @@ function syncTileRadiusControls(tabEl) {
       ]);
       const tilesLists = await Promise.all(folders.map(async folder => {
         const response = await fetch(
-          '/api/tiles?folder=' + encodeURIComponent(folder.id));
+          'api/tiles?folder=' + encodeURIComponent(folder.id));
         const data = await response.json();
         if (!response.ok || !Array.isArray(data)) {
           throw new Error('Folder grid export failed');
@@ -4868,14 +4868,14 @@ function syncTileRadiusControls(tabEl) {
   }
 
   async function fetchFoldersForImport() {
-    const res = await fetch('/api/folders');
+    const res = await fetch('api/folders');
     if (!res.ok) throw new Error('Folder fetch failed');
     const data = await res.json();
     return Array.isArray(data) ? data : [];
   }
 
   async function fetchTilesForImport(folderId) {
-    const res = await fetch('/api/tiles?folder=' + encodeURIComponent(folderId));
+    const res = await fetch('api/tiles?folder=' + encodeURIComponent(folderId));
     if (!res.ok) throw new Error('Tile fetch failed');
     const data = await res.json();
     return Array.isArray(data) ? data : [];
@@ -5043,7 +5043,7 @@ function syncTileRadiusControls(tabEl) {
   }
 
   async function importScreensaverConfig(config) {
-    const res = await fetch('/api/screensaver', {
+    const res = await fetch('api/screensaver', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config)
@@ -5306,7 +5306,7 @@ function syncTileRadiusControls(tabEl) {
           : (tile.sensor_gauge_max || '100'));
     }
 
-    const res = await fetch('/api/tiles', { method: 'POST', body: fd });
+    const res = await fetch('api/tiles', { method: 'POST', body: fd });
     const data = await res.json();
     if (!data.success) {
       throw new Error('Tile speichern fehlgeschlagen');
@@ -5576,7 +5576,7 @@ function syncTileRadiusControls(tabEl) {
 
     const baseline = getTilesData(tab).map(tile => JSON.stringify(tile));
     tileDataLoadPromises[tab] = fetch(
-      '/api/tiles?folder=' + encodeURIComponent(folderId))
+      'api/tiles?folder=' + encodeURIComponent(folderId))
       .then(async response => {
         if (!response.ok) throw new Error('Tiles HTTP ' + response.status);
         const tiles = await response.json();
@@ -6868,7 +6868,7 @@ function syncTileRadiusControls(tabEl) {
     const localSnapshot = captureTilePositionSnapshot(tab);
     applyLocalTileReorder(tab, previewResult);
     clearDragPlaceholder();
-    fetch('/api/tiles/reorder', {
+    fetch('api/tiles/reorder', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: 'folder=' + encodeURIComponent(folderId) +
@@ -6999,7 +6999,7 @@ function syncTileRadiusControls(tabEl) {
       return;
     }
     screensaverLoading = true;
-    fetch('/api/screensaver').then(r => r.json()).then(config => {
+    fetch('api/screensaver').then(r => r.json()).then(config => {
       if (!config || !config.success) throw new Error('screensaver config');
       screensaverDraft = ssNormalizeLoaded(config);
       screensaverLoaded = true;
@@ -7049,7 +7049,7 @@ function syncTileRadiusControls(tabEl) {
 
   function saveScreensaverNow() {
     if (!screensaverLoaded) return;
-    fetch('/api/screensaver', {
+    fetch('api/screensaver', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(ssPayload())
     }).then(async response => {
@@ -7188,7 +7188,7 @@ function syncTileRadiusControls(tabEl) {
       (devicePx('--screensaver-shadow-6', 6) * scale) + 'px');
     const wallpaper = ssCurrentWallpaper();
     if (d.use_wallpapers && wallpaper && wallpaper.file_name) {
-      const wanted = '/api/screensaver/wallpaper?name=' + encodeURIComponent(wallpaper.file_name);
+      const wanted = 'api/screensaver/wallpaper?name=' + encodeURIComponent(wallpaper.file_name);
       if (image.dataset.src !== wanted) { image.src = wanted; image.dataset.src = wanted; }
       image.hidden = false;
       image.style.display = 'block';
@@ -7778,7 +7778,7 @@ function syncTileRadiusControls(tabEl) {
       window.setTimeout(() => restartForm.submit(), 100);
       return;
     }
-    fetch('/restart', {method: 'POST'}).catch(() => {});
+    fetch('restart', {method: 'POST'}).catch(() => {});
   }
 
   async function saveHardwareIoNow() {
@@ -7804,7 +7804,7 @@ function syncTileRadiusControls(tabEl) {
     setHardwareIoSaveState(t('ioSaving'), 'saving');
     let saved = false;
     try {
-      const response = await fetch('/api/hardware-io', {
+      const response = await fetch('api/hardware-io', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
@@ -7845,7 +7845,7 @@ function syncTileRadiusControls(tabEl) {
     }
     hardwareIoLoading = true;
     try {
-      const response = await fetch('/api/hardware-io');
+      const response = await fetch('api/hardware-io');
       const data = await response.json();
       if (!response.ok || !data?.success) throw new Error(data?.error || ('HTTP ' + response.status));
       data.channels = Array.isArray(data.channels) ? data.channels : [];
@@ -8563,7 +8563,7 @@ function normalizeIconName(value) {
       body.set('folder_id', String(folderId));
       body.set('enabled', toggle?.checked ? '1' : '0');
       body.set('pin', input?.value || '');
-      const response = await fetch('/api/folders/access', {
+      const response = await fetch('api/folders/access', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'},
         body

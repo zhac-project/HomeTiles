@@ -155,7 +155,7 @@ for (const marker of [
   'async function saveSettingsAccess(',
   "body.set('_access_only', '1')",
   "body.set('settings_access_present', '1')",
-  "fetch('/mqtt'",
+  "fetch('mqtt'",
   'function initSettingsAccessControls()',
   "pinApply?.addEventListener('click'",
   "hidden.addEventListener('change'",
@@ -177,7 +177,7 @@ for (const marker of [
   'if (swipe) swipe.disabled = tileHidden;',
   'tileHidden ||',
   "edgeFields?.classList.toggle('is-hidden', !swipeEnabled)",
-  "fetch('/api/folders/access'",
+  "fetch('api/folders/access'",
   "body.set('pin', input?.value || '')",
   "input.value = String(data?.folder_pin || '')",
   "const storedPin = enabled ? String(result.folder_pin || '') : '';",
@@ -330,7 +330,7 @@ const hiddenSaveEnd = admin.indexOf('\n  function saveTile', hiddenSaveStart);
 const hiddenSaveBlock = admin.slice(hiddenSaveStart, hiddenSaveEnd);
 if (hiddenSaveStart < 0 || hiddenSaveEnd < 0 ||
     !hiddenSaveBlock.includes('queueSettingsAccessSave(null, null, snapshot)') ||
-    hiddenSaveBlock.includes("fetch('/api/tiles'")) {
+    hiddenSaveBlock.includes("fetch('api/tiles'")) {
   throw new Error('Hidden Settings autosave must update only the NVS snapshot');
 }
 

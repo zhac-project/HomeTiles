@@ -75,7 +75,7 @@
     const folderId = getFolderIdForTab(tab);
     if (folderId === undefined) return;
     const baseline = JSON.stringify(cached);
-    fetch('/api/tiles?folder=' + encodeURIComponent(folderId) + '&index=' + index)
+    fetch('api/tiles?folder=' + encodeURIComponent(folderId) + '&index=' + index)
       .then(res => res.json())
       .then(data => {
         const current = getTilesData(tab)[index];

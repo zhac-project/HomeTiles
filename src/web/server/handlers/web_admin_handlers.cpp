@@ -469,7 +469,7 @@ void WebAdminServer::handleSaveMQTT() {
       response += "\"}";
       server.send(200, "application/json", response);
     } else {
-      server.sendHeader("Location", "/");
+      server.sendHeader("Location", "./");
       server.send(303, "text/plain", "");
     }
     // Reply first, as handleRestart() does, before requesting the MQTT worker.
@@ -575,7 +575,7 @@ void WebAdminServer::handleSaveBridge() {
   }
 
   if (!changed) {
-    server.sendHeader("Location", "/");
+    server.sendHeader("Location", "./");
     server.send(303, "text/plain", "");
     return;
   }
@@ -584,7 +584,7 @@ void WebAdminServer::handleSaveBridge() {
     // Reload grids from the main loop.
     tiles_request_reload_all();
     mqttReloadDynamicSlots();
-    server.sendHeader("Location", "/");
+    server.sendHeader("Location", "./");
     server.send(303, "text/plain", "");
   } else {
     const auto& tr = i18n::strings(configManager.getConfig().language);
@@ -599,7 +599,7 @@ void WebAdminServer::handleBridgeRefresh() {
     return;
   }
   networkManager.publishBridgeRequest(true);
-  server.sendHeader("Location", "/");
+  server.sendHeader("Location", "./");
   server.send(303, "text/plain", "");
 }
 
@@ -609,7 +609,7 @@ void WebAdminServer::handleStatus() {
 }
 
 void WebAdminServer::handleRestart() {
-  server.sendHeader("Location", "/");
+  server.sendHeader("Location", "./");
   server.send(303, "text/plain", "");
   Serial.println("[WebAdmin] Restart requested");
   prepareDisplayForRestart();

@@ -217,7 +217,7 @@ const defaults = {brightness: 0, contrast: 0, saturation: 100, red: 0, blue: 0, 
   assert.equal(live[0].ms, 300);
   await live[0].fn();
   assert.equal(harness.requests.length, 1);
-  assert.equal(harness.requests[0].url, '/api/local-camera');
+  assert.equal(harness.requests[0].url, 'api/local-camera');
   assert.equal(harness.requests[0].options.method, 'POST');
   assert.equal(harness.requests[0].options.headers['Content-Type'], 'application/x-www-form-urlencoded');
   assert.equal(harness.requests[0].options.body, 'brightness=20');

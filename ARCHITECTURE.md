@@ -128,7 +128,10 @@ streams; the worker reads the loopback socket eagerly into PSRAM (at most
 held up by the internet link, and sends at most one 16 KiB TUN_DATA frame per
 stream and pass so tile states interleave. A stream ends with TUN_CLOSE `done`
 after the response, `busy`, `refused`, `timeout` (30 s idle) or `error`; a
-dropped cloud socket closes every stream.
+dropped cloud socket closes every stream. The Web Admin uses only relative
+URLs (it is one page at `/`, and its redirects go to `./`), so it also works
+under the cloud proxy's path prefix;
+`tools/tests/web/test-web-admin-relative-urls.mjs` guards that.
 
 The media artwork worker owns HTTP download buffers and unpublished results.
 The loop attaches image descriptors to widgets and performs LVGL cache cleanup.

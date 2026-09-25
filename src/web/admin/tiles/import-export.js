@@ -55,7 +55,7 @@
 
   async function exportTilesConfig() {
     try {
-      const foldersRequest = fetch('/api/folders').then(async res => {
+      const foldersRequest = fetch('api/folders').then(async res => {
         const data = await res.json();
         if (!res.ok || !Array.isArray(data)) {
           throw new Error('Folder export failed');
@@ -67,13 +67,13 @@
           icon_name: String(folder?.icon_name || '')
         }));
       });
-      const screensaverConfigRequest = fetch('/api/screensaver').then(async res => {
+      const screensaverConfigRequest = fetch('api/screensaver').then(async res => {
         const data = await res.json();
         if (!res.ok || !data?.success) throw new Error('Screensaver config export failed');
         return data;
       });
       const screensaverGridRequest = fetch(
-        '/api/tiles?folder=' + encodeURIComponent(SCREENSAVER_FOLDER_ID)
+        'api/tiles?folder=' + encodeURIComponent(SCREENSAVER_FOLDER_ID)
       ).then(async res => {
         const data = await res.json();
         if (!res.ok || !Array.isArray(data)) throw new Error('Screensaver grid export failed');
@@ -89,7 +89,7 @@
       ]);
       const tilesLists = await Promise.all(folders.map(async folder => {
         const response = await fetch(
-          '/api/tiles?folder=' + encodeURIComponent(folder.id));
+          'api/tiles?folder=' + encodeURIComponent(folder.id));
         const data = await response.json();
         if (!response.ok || !Array.isArray(data)) {
           throw new Error('Folder grid export failed');
@@ -165,14 +165,14 @@
   }
 
   async function fetchFoldersForImport() {
-    const res = await fetch('/api/folders');
+    const res = await fetch('api/folders');
     if (!res.ok) throw new Error('Folder fetch failed');
     const data = await res.json();
     return Array.isArray(data) ? data : [];
   }
 
   async function fetchTilesForImport(folderId) {
-    const res = await fetch('/api/tiles?folder=' + encodeURIComponent(folderId));
+    const res = await fetch('api/tiles?folder=' + encodeURIComponent(folderId));
     if (!res.ok) throw new Error('Tile fetch failed');
     const data = await res.json();
     return Array.isArray(data) ? data : [];
@@ -340,7 +340,7 @@
   }
 
   async function importScreensaverConfig(config) {
-    const res = await fetch('/api/screensaver', {
+    const res = await fetch('api/screensaver', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config)
@@ -603,7 +603,7 @@
           : (tile.sensor_gauge_max || '100'));
     }
 
-    const res = await fetch('/api/tiles', { method: 'POST', body: fd });
+    const res = await fetch('api/tiles', { method: 'POST', body: fd });
     const data = await res.json();
     if (!data.success) {
       throw new Error('Tile speichern fehlgeschlagen');

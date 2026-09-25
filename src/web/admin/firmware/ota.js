@@ -33,7 +33,7 @@
     const startedAt = Date.now();
     const poll = async () => {
       try {
-        const res = await fetch('/api/ota/github/status?ts=' + Date.now(), {
+        const res = await fetch('api/ota/github/status?ts=' + Date.now(), {
           method: 'GET',
           cache: 'no-store',
           credentials: 'same-origin'
@@ -70,7 +70,7 @@
     setGithubOtaUi(t('otaGithubDownloading'), 'busy');
     showNotification(t('otaGithubDownloading'));
     try {
-      const res = await fetch('/api/ota/github/install', {
+      const res = await fetch('api/ota/github/install', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'tag=' + encodeURIComponent(tag),
@@ -102,7 +102,7 @@
     if (button) button.textContent = t('otaGithubChecking');
     setGithubOtaUi(t('otaGithubChecking'));
     try {
-      const res = await fetch('/api/ota/github/check', {
+      const res = await fetch('api/ota/github/check', {
         method: 'POST',
         cache: 'no-store',
         credentials: 'same-origin'
@@ -209,7 +209,7 @@
     try {
       const otaSize = encodeURIComponent(String(file.size || 0));
       const otaFilename = encodeURIComponent(String(file.name || ''));
-      const prepRes = await fetch('/api/ota/prepare?size=' + otaSize + '&filename=' + otaFilename, {
+      const prepRes = await fetch('api/ota/prepare?size=' + otaSize + '&filename=' + otaFilename, {
         method: 'POST',
         cache: 'no-store',
         credentials: 'same-origin'
@@ -236,7 +236,7 @@
     const xhr = new XMLHttpRequest();
     const otaSize = encodeURIComponent(String(file.size || 0));
     const otaFilename = encodeURIComponent(String(file.name || ''));
-    xhr.open('POST', '/api/ota/upload/raw?size=' + otaSize + '&filename=' + otaFilename, true);
+    xhr.open('POST', 'api/ota/upload/raw?size=' + otaSize + '&filename=' + otaFilename, true);
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
     xhr.setRequestHeader('X-HomeTiles-OTA-Filename', otaFilename);
 

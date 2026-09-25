@@ -725,7 +725,7 @@
     const localSnapshot = captureTilePositionSnapshot(tab);
     applyLocalTileReorder(tab, previewResult);
     clearDragPlaceholder();
-    fetch('/api/tiles/reorder', {
+    fetch('api/tiles/reorder', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: 'folder=' + encodeURIComponent(folderId) +

@@ -371,7 +371,7 @@
       window.setTimeout(() => restartForm.submit(), 100);
       return;
     }
-    fetch('/restart', {method: 'POST'}).catch(() => {});
+    fetch('restart', {method: 'POST'}).catch(() => {});
   }
 
   async function saveHardwareIoNow() {
@@ -397,7 +397,7 @@
     setHardwareIoSaveState(t('ioSaving'), 'saving');
     let saved = false;
     try {
-      const response = await fetch('/api/hardware-io', {
+      const response = await fetch('api/hardware-io', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
@@ -438,7 +438,7 @@
     }
     hardwareIoLoading = true;
     try {
-      const response = await fetch('/api/hardware-io');
+      const response = await fetch('api/hardware-io');
       const data = await response.json();
       if (!response.ok || !data?.success) throw new Error(data?.error || ('HTTP ' + response.status));
       data.channels = Array.isArray(data.channels) ? data.channels : [];

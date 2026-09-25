@@ -475,7 +475,7 @@ await vm.runInContext(`postTile(1, 3, {
   span_w: 1,
   span_h: 1
 })`, sandbox);
-if (importRequest?.url !== '/api/tiles' ||
+if (importRequest?.url !== 'api/tiles' ||
     importRequest?.method !== 'POST' ||
     importRequest?.fields?.type !== '20' ||
     importRequest?.fields?.binary_sensor_entity !== 'binary_sensor.door' ||

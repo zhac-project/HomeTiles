@@ -233,7 +233,7 @@
 
     folderTabLoadPromises[folderNum] = (async () => {
       const res = await fetch(
-        '/api/folders/tab?folder_id=' + encodeURIComponent(folderNum));
+        'api/folders/tab?folder_id=' + encodeURIComponent(folderNum));
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success || !data.tab_id || !data.tab_html) {
         return false;

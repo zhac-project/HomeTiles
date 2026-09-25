@@ -8,7 +8,7 @@
 
   async function downloadCrashLog() {
     try {
-      const res = await fetch('/api/crashlog?ts=' + Date.now());
+      const res = await fetch('api/crashlog?ts=' + Date.now());
       if (res.status === 404) {
         showNotification(fileManagerText('Kein Absturz aufgezeichnet.', 'No crash recorded.'));
         return;
@@ -31,7 +31,7 @@
   async function eraseCoreDump() {
     if (!confirm(fileManagerText('Gespeicherten Core-Dump wirklich l\u00f6schen?', 'Really delete the stored core dump?'))) return;
     try {
-      const res = await fetch('/api/coredump/erase', { method: 'POST' });
+      const res = await fetch('api/coredump/erase', { method: 'POST' });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success) {
         throw new Error(data.error || fileManagerText('L\u00f6schen fehlgeschlagen.', 'Delete failed.'));
@@ -343,7 +343,7 @@
     setFileManagerStatus(fileManagerText('Lade Dateien...', 'Loading files...'));
 
     try {
-      const res = await fetch(fileManagerUrl('/api/files/list', {
+      const res = await fetch(fileManagerUrl('api/files/list', {
         fs: fileManagerState.fs,
         path: fileManagerState.path
       }), { cache: 'no-store' });
@@ -374,7 +374,7 @@
   }
 
   function downloadFileManagerFile(path) {
-    window.location.href = fileManagerUrl('/api/files/download', {
+    window.location.href = fileManagerUrl('api/files/download', {
       fs: fileManagerState.fs,
       path: path
     });
@@ -422,7 +422,7 @@
     const trimmed = String(name || '').trim();
     if (!trimmed) return;
     try {
-      await postFileManagerForm('/api/files/mkdir', {
+      await postFileManagerForm('api/files/mkdir', {
         fs: fileManagerState.fs,
         path: fileManagerState.path || '/',
         name: trimmed
@@ -440,7 +440,7 @@
     const trimmed = String(name || '').trim();
     if (!trimmed || trimmed === currentName) return;
     try {
-      await postFileManagerForm('/api/files/rename', {
+      await postFileManagerForm('api/files/rename', {
         fs: fileManagerState.fs,
         path,
         name: trimmed
@@ -459,7 +459,7 @@
       : fileManagerText('Datei wirklich l\u00f6schen: ', 'Delete file: ');
     if (!confirm(message + (name || path))) return;
     try {
-      await postFileManagerForm('/api/files/delete', {
+      await postFileManagerForm('api/files/delete', {
         fs: fileManagerState.fs,
         path
       });
@@ -504,7 +504,7 @@
           setFileManagerStatus(
             fileManagerText('Upload ', 'Upload ') + (fileIndex + 1) + '/' + files.length +
             ': ' + file.name + ' - ' + pct + '%');
-          const res = await fetch(fileManagerUrl('/api/files/upload', {
+          const res = await fetch(fileManagerUrl('api/files/upload', {
             fs: fileManagerState.fs,
             path: fileManagerState.path || '/',
             append: firstPart ? '0' : '1'

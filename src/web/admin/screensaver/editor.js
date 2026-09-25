@@ -78,7 +78,7 @@
       return;
     }
     screensaverLoading = true;
-    fetch('/api/screensaver').then(r => r.json()).then(config => {
+    fetch('api/screensaver').then(r => r.json()).then(config => {
       if (!config || !config.success) throw new Error('screensaver config');
       screensaverDraft = ssNormalizeLoaded(config);
       screensaverLoaded = true;
@@ -128,7 +128,7 @@
 
   function saveScreensaverNow() {
     if (!screensaverLoaded) return;
-    fetch('/api/screensaver', {
+    fetch('api/screensaver', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(ssPayload())
     }).then(async response => {
@@ -267,7 +267,7 @@
       (devicePx('--screensaver-shadow-6', 6) * scale) + 'px');
     const wallpaper = ssCurrentWallpaper();
     if (d.use_wallpapers && wallpaper && wallpaper.file_name) {
-      const wanted = '/api/screensaver/wallpaper?name=' + encodeURIComponent(wallpaper.file_name);
+      const wanted = 'api/screensaver/wallpaper?name=' + encodeURIComponent(wallpaper.file_name);
       if (image.dataset.src !== wanted) { image.src = wanted; image.dataset.src = wanted; }
       image.hidden = false;
       image.style.display = 'block';

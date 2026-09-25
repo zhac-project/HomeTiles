@@ -107,8 +107,8 @@ const browserUpload = functionBody(
   'async function uploadOtaFirmware()',
   '// Tile Editor State');
 requireOrder(browserUpload, [
-  "fetch('/api/ota/prepare?size=' + otaSize + '&filename=' + otaFilename",
-  "xhr.open('POST', '/api/ota/upload/raw?size=' + otaSize + '&filename=' + otaFilename",
+  "fetch('api/ota/prepare?size=' + otaSize + '&filename=' + otaFilename",
+  "xhr.open('POST', 'api/ota/upload/raw?size=' + otaSize + '&filename=' + otaFilename",
   "xhr.setRequestHeader('Content-Type', 'application/octet-stream');",
   "xhr.setRequestHeader('X-HomeTiles-OTA-Filename', otaFilename);",
   'xhr.send(file);',

@@ -249,7 +249,7 @@
 
     if (pinApply && hasNewPin) pinApply.disabled = true;
     try {
-      const response = await fetch('/mqtt', {
+      const response = await fetch('mqtt', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'},
         body
@@ -384,7 +384,7 @@
       try {
         const body = new URLSearchParams(new FormData(form));
         body.set('_ajax', '1');
-        const response = await fetch('/mqtt', {
+        const response = await fetch('mqtt', {
           method: 'POST',
           headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'},
           body

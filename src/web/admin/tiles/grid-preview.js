@@ -262,7 +262,7 @@
 
     const baseline = getTilesData(tab).map(tile => JSON.stringify(tile));
     tileDataLoadPromises[tab] = fetch(
-      '/api/tiles?folder=' + encodeURIComponent(folderId))
+      'api/tiles?folder=' + encodeURIComponent(folderId))
       .then(async response => {
         if (!response.ok) throw new Error('Tiles HTTP ' + response.status);
         const tiles = await response.json();

@@ -14,7 +14,7 @@
     const sequence = ++normalTileBordersSaveSequence;
     applyNormalTileBordersPreview(wanted);
     try {
-      const response = await fetch('/api/display/tile-borders', {
+      const response = await fetch('api/display/tile-borders', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: 'enabled=' + (wanted ? '1' : '0')
@@ -76,7 +76,7 @@ async function queueTileRadius(value, persist) {
       const revision = tileRadiusRevision;
       tileRadiusWanted = null;
       try {
-        const response = await fetch('/api/display/tile-radius', {
+        const response = await fetch('api/display/tile-radius', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({ radius: String(wanted.radius), preview: wanted.persist ? '0' : '1' }).toString()

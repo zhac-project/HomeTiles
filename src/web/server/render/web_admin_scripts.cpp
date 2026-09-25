@@ -160,7 +160,8 @@ void appendAdminScripts(String& html) {
   append_tile_type_scripts(html);
 
   html += R"html(  <script defer src=")html";
-  html += adminJsAssetPath();
+  // Relative (no leading '/'), so the page also works behind the cloud proxy.
+  html += adminJsAssetPath() + 1;
   html += R"html("></script>
 )html";
 }

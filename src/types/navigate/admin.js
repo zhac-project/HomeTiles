@@ -153,7 +153,7 @@ function normalizeIconName(value) {
       body.set('folder_id', String(folderId));
       body.set('enabled', toggle?.checked ? '1' : '0');
       body.set('pin', input?.value || '');
-      const response = await fetch('/api/folders/access', {
+      const response = await fetch('api/folders/access', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'},
         body

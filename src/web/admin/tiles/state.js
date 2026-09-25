@@ -66,7 +66,7 @@
     if (!force && sensorMetaCache.loaded && (now - lastSensorMetaFetchMs) < 15000) {
       return Promise.resolve(sensorMetaCache);
     }
-    sensorMetaFetchInFlight = fetch('/api/sensor_values')
+    sensorMetaFetchInFlight = fetch('api/sensor_values')
       .then(res => res.json())
       .then(raw => {
         sensorMetaCache = normalizeSensorMetaPayload(raw || {});
@@ -85,7 +85,7 @@
         (now - lastEntityOptionsFetchMs) < ENTITY_OPTIONS_CACHE_MS) {
       return Promise.resolve(entityOptionsCache);
     }
-    entityOptionsFetchInFlight = fetch('/api/entity_options')
+    entityOptionsFetchInFlight = fetch('api/entity_options')
       .then(res => {
         if (!res.ok) throw new Error('Entity options HTTP ' + res.status);
         return res.json();

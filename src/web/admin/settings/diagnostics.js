@@ -19,14 +19,14 @@
   async function createScreenshotAndDownload() {
     showNotification(t('screenshotCreating'));
     try {
-      const res = await fetch('/api/screenshot', { method: 'POST' });
+      const res = await fetch('api/screenshot', { method: 'POST' });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success) {
         throw new Error(data.error || t('screenshotFailed'));
       }
       showNotification(t('screenshotSaved'));
       const link = document.createElement('a');
-      link.href = '/api/screenshot/download?ts=' + Date.now();
+      link.href = 'api/screenshot/download?ts=' + Date.now();
       link.download = 'ui_screenshot.jpg';
       document.body.appendChild(link);
       link.click();

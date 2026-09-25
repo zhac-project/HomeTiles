@@ -83,7 +83,7 @@
     }
     const formData = new FormData();
     formData.append('folder_id', folderId);
-    fetch('/api/folders/delete', { method: 'POST', body: formData })
+    fetch('api/folders/delete', { method: 'POST', body: formData })
       .then(res => res.json())
       .then(data => {
         if (data.success) {
@@ -176,7 +176,7 @@
     const draftRev = Number(snapshot._rev || 0);
     markLatestSaveRequest(tab, tileIndex, requestId);
     saveInFlightByTile[saveKey] = true;
-    fetch('/api/tiles', { method:'POST', body:formData })
+    fetch('api/tiles', { method:'POST', body:formData })
       .then(res => res.json())
       .then(data => {
         if (!isLatestSaveRequest(tab, tileIndex, requestId)) return;

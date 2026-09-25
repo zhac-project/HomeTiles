@@ -281,7 +281,7 @@ const json = body => ({ok: true, status: 200, json: async () => body});
   const harness = createHarness({fetchImpl: async () => json({
     supported: true, enabled: true, state: 'ready', sensor: 'ov02c10', chip_id: '0x5602'})});
   await harness.context.saveLocalCameraEnabled(true);
-  assert.equal(harness.requests[0].url, '/api/local-camera');
+  assert.equal(harness.requests[0].url, 'api/local-camera');
   assert.equal(harness.requests[0].options.method, 'POST');
   assert.equal(harness.requests[0].options.body, 'enabled=1');
   assert.equal(harness.note.textContent, 'Status: Sensor erkannt (OV02C10, 0x5602)');
@@ -332,7 +332,7 @@ const json = body => ({ok: true, status: 200, json: async () => body});
     supported: true, enabled: true, state: 'ready', stream_mode: 3})});
   harness.modeSelect.value = '3';
   await harness.context.saveLocalCameraStreamMode('3');
-  assert.equal(harness.requests[0].url, '/api/local-camera');
+  assert.equal(harness.requests[0].url, 'api/local-camera');
   assert.equal(harness.requests[0].options.method, 'POST');
   assert.equal(harness.requests[0].options.body, 'mode=3');
   assert.equal(harness.modeSelect.value, '3');

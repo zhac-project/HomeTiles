@@ -58,7 +58,7 @@
   async function refreshLocalCameraStatus() {
     if (!document.getElementById('local_camera_status')) return;
     try {
-      const response = await fetch('/api/local-camera', {cache: 'no-store'});
+      const response = await fetch('api/local-camera', {cache: 'no-store'});
       if (!response.ok) return;
       applyLocalCameraStatus(await response.json());
     } catch (error) {
@@ -71,7 +71,7 @@
     const sequence = ++localCameraSaveSequence;
     const toggle = document.getElementById('local_camera_enabled');
     try {
-      const response = await fetch('/api/local-camera', {
+      const response = await fetch('api/local-camera', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: 'enabled=' + (wanted ? '1' : '0')
@@ -92,7 +92,7 @@
     const sequence = ++localCameraMirrorSequence;
     const toggle = document.getElementById('local_camera_mirror');
     try {
-      const response = await fetch('/api/local-camera', {
+      const response = await fetch('api/local-camera', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: 'mirror=' + (wanted ? '1' : '0')
@@ -136,7 +136,7 @@
     if (pill) pill.disabled = style === 0;
     const saved = line && line.dataset.saved !== undefined ? parseInt(line.dataset.saved, 10) : null;
     try {
-      const response = await fetch('/api/local-camera', {
+      const response = await fetch('api/local-camera', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: 'indicator=' + style
@@ -199,7 +199,7 @@
     localCameraCustomInput(slider);
     const sequence = ++localCameraCustomSequence;
     try {
-      const response = await fetch('/api/local-camera', {
+      const response = await fetch('api/local-camera', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: 'custom_' + key + '=' + value
@@ -222,7 +222,7 @@
     const previous = select && select.dataset.saved !== undefined ? select.dataset.saved : null;
     showLocalCameraCustom(mode);
     try {
-      const response = await fetch('/api/local-camera', {
+      const response = await fetch('api/local-camera', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: 'mode=' + encodeURIComponent(mode)
@@ -318,7 +318,7 @@
     localCameraImageInFlight = values;
     const body = keys.map(key => key + '=' + encodeURIComponent(String(values[key]))).join('&');
     try {
-      const response = await fetch('/api/local-camera', {
+      const response = await fetch('api/local-camera', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body
