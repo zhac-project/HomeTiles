@@ -398,7 +398,7 @@ const failed = async () => ({ok: false, status: 400, json: async () => ({})});
   const harness = createHarness(async () => json({supported: true, enabled: true, state: 'ready', rotation: 2}));
   harness.element('local_camera_rotation').value = '2';
   await harness.context.saveLocalCameraRotation('2');
-  assert.equal(harness.requests[0].url, '/api/local-camera');
+  assert.equal(harness.requests[0].url, 'api/local-camera');
   assert.equal(harness.requests[0].options.method, 'POST');
   assert.equal(harness.requests[0].options.headers['Content-Type'], 'application/x-www-form-urlencoded');
   assert.equal(harness.requests[0].options.body, 'rotation=2');

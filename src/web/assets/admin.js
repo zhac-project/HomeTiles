@@ -74,7 +74,7 @@ async function saveIconDiscs(enabled) {
   const sequence = ++iconDiscsSaveSequence;
   applyIconDiscsPreview(wanted);
   try {
-    const response = await fetch('/api/display/icon-discs', {
+    const response = await fetch('api/display/icon-discs', {
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
       body: 'enabled=' + (wanted ? '1' : '0')
@@ -111,7 +111,7 @@ async function saveIconGlow(value) {
   const percent = previewIconGlowLive(value);
   const sequence = ++iconGlowSaveSequence;
   try {
-    const response = await fetch('/api/display/icon-glow', {
+    const response = await fetch('api/display/icon-glow', {
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
       body: 'percent=' + percent
@@ -160,7 +160,7 @@ async function saveDefaultTileColor(value) {
   if (!color) return;
   const sequence = ++defaultTileColorSaveSequence;
   try {
-    const response = await fetch('/api/display/tile-color', {
+    const response = await fetch('api/display/tile-color', {
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
       body: new URLSearchParams({color}).toString()
@@ -1047,7 +1047,7 @@ function syncTileRadiusControls(tabEl) {
     const select = document.getElementById('local_camera_rotation');
     const previous = select && select.dataset.saved !== undefined ? select.dataset.saved : null;
     try {
-      const response = await fetch('/api/local-camera', {
+      const response = await fetch('api/local-camera', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: 'rotation=' + encodeURIComponent(rotation)
@@ -1068,7 +1068,7 @@ function syncTileRadiusControls(tabEl) {
     const sequence = ++localCameraRbSwapSequence;
     const toggle = document.getElementById('local_camera_rb_swap');
     try {
-      const response = await fetch('/api/local-camera', {
+      const response = await fetch('api/local-camera', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: 'rb_swap=' + (wanted ? '1' : '0')
@@ -8926,11 +8926,11 @@ function syncTileRadiusControls(tabEl) {
   // away, so the display follows the card even while the Screensaver tab is
   // closed. An open editor syncs and saves through its own load instead.
   function syncScreensaverImages() {
-    fetch('/api/screensaver').then(r => r.json()).then(config => {
+    fetch('api/screensaver').then(r => r.json()).then(config => {
       if (!config || !config.success || screensaverLoaded || screensaverLoading) return;
       const data = ssNormalizeLoaded(config);
       if (!ssSyncCardImages(data)) return;
-      return fetch('/api/screensaver', {
+      return fetch('api/screensaver', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(ssPayload(data, ''))
       });

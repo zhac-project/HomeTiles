@@ -16,7 +16,7 @@ const context = vm.createContext({
   screensaverTimeFontSizes: [20, 24, 28, 32, 40, 48, 56, 64, 72, 80, 96],
   screensaverDateFontSizes: [20, 24, 28, 32, 40, 48, 56, 64, 72],
   fetch: async (url, options) => {
-    assert.equal(url, '/api/screensaver');
+    assert.equal(url, 'api/screensaver');
     if (options?.method === 'POST') {
       posts.push(JSON.parse(options.body));
       return {ok: true, json: async () => ({success: true})};

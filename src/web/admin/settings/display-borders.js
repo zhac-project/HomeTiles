@@ -44,7 +44,7 @@ async function saveIconDiscs(enabled) {
   const sequence = ++iconDiscsSaveSequence;
   applyIconDiscsPreview(wanted);
   try {
-    const response = await fetch('/api/display/icon-discs', {
+    const response = await fetch('api/display/icon-discs', {
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
       body: 'enabled=' + (wanted ? '1' : '0')
@@ -81,7 +81,7 @@ async function saveIconGlow(value) {
   const percent = previewIconGlowLive(value);
   const sequence = ++iconGlowSaveSequence;
   try {
-    const response = await fetch('/api/display/icon-glow', {
+    const response = await fetch('api/display/icon-glow', {
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
       body: 'percent=' + percent
@@ -130,7 +130,7 @@ async function saveDefaultTileColor(value) {
   if (!color) return;
   const sequence = ++defaultTileColorSaveSequence;
   try {
-    const response = await fetch('/api/display/tile-color', {
+    const response = await fetch('api/display/tile-color', {
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
       body: new URLSearchParams({color}).toString()

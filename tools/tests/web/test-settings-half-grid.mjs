@@ -41,7 +41,7 @@ window.fetch = async (url, options) => {
     posts.push({url, ...Object.fromEntries(new URLSearchParams(options.body))});
     return {ok:true, json:async()=>({ok:true,success:true})};
   }
-  if (url === '/api/entity-options') return {ok:true, json:async()=>({})};
+  if (url === 'api/entity-options') return {ok:true, json:async()=>({})};
   throw Error('Unexpected request: ' + url);
 };
 ${inlineScriptSafe(readAdminDeliverySource())}
@@ -77,7 +77,7 @@ ${inlineScriptSafe(readAdminDeliverySource())}
   resize(2, 1.5);
   check($('tile_span_w').value === '2' && $('tile_span_h').value === '1.5', 'Settings grows in half steps');
   await new Promise(resolve => setTimeout(resolve,350));
-  const resized = posts.findLast(post => post.url === '/api/tiles');
+  const resized = posts.findLast(post => post.url === 'api/tiles');
   check(resized?.span_w === '2' && resized?.span_h === '1.5', 'Autosave includes resized Settings geometry');
   renderTileFromData('folder0', 0, tilesData.folder0[0], {});
   check(card.dataset.spanH === '1.5', 'Cached preview preserves the new height');
@@ -90,7 +90,7 @@ ${inlineScriptSafe(readAdminDeliverySource())}
     {bubbles:true,cancelable:true,dataTransfer:transfer,...pointer(2.6,2.1)}));
   card.dispatchEvent(new DragEvent('dragend',{dataTransfer:transfer}));
   await Promise.resolve();
-  const moved = posts.findLast(post => post.url === '/api/tiles/reorder');
+  const moved = posts.findLast(post => post.url === 'api/tiles/reorder');
   check(moved?.target_col === '2.5' && moved?.target_row === '2', 'Drag sends half-cell target coordinates');
   check(tilesData.folder0[0].col === 2.5 && tilesData.folder0[0].row === 2, 'Local drag result matches the saved target');
 

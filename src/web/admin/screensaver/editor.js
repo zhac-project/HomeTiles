@@ -93,11 +93,11 @@
   // away, so the display follows the card even while the Screensaver tab is
   // closed. An open editor syncs and saves through its own load instead.
   function syncScreensaverImages() {
-    fetch('/api/screensaver').then(r => r.json()).then(config => {
+    fetch('api/screensaver').then(r => r.json()).then(config => {
       if (!config || !config.success || screensaverLoaded || screensaverLoading) return;
       const data = ssNormalizeLoaded(config);
       if (!ssSyncCardImages(data)) return;
-      return fetch('/api/screensaver', {
+      return fetch('api/screensaver', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(ssPayload(data, ''))
       });

@@ -126,7 +126,7 @@
     const select = document.getElementById('local_camera_rotation');
     const previous = select && select.dataset.saved !== undefined ? select.dataset.saved : null;
     try {
-      const response = await fetch('/api/local-camera', {
+      const response = await fetch('api/local-camera', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: 'rotation=' + encodeURIComponent(rotation)
@@ -147,7 +147,7 @@
     const sequence = ++localCameraRbSwapSequence;
     const toggle = document.getElementById('local_camera_rb_swap');
     try {
-      const response = await fetch('/api/local-camera', {
+      const response = await fetch('api/local-camera', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: 'rb_swap=' + (wanted ? '1' : '0')

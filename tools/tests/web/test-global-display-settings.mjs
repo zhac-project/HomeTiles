@@ -101,10 +101,10 @@ for (const [field, values] of Object.entries(expected)) {
 const display = read('src/web/admin/settings/display-borders.js');
 for (const marker of [
   "document.documentElement.classList.toggle('icon-discs-off', !enabled);",
-  "fetch('/api/display/icon-discs'",
+  "fetch('api/display/icon-discs'",
   "document.documentElement.style.setProperty('--tile-default-bg', color);",
   'if (meta && meta.sharedBg) meta.defaultBg = color;',
-  "fetch('/api/display/tile-color'",
+  "fetch('api/display/tile-color'",
   'previewDefaultTileColor(defaultTileColorConfirmed || color);',
 ]) assert.ok(display.includes(marker), `display settings: ${marker}`);
 assert.ok(read('src/web/admin/folders/navigation.js').includes('syncGlobalDisplayControls(tabEl);'));
@@ -170,7 +170,7 @@ assert.deepEqual([toOpa(25), toOpa(45), toOpa(10), toOpa(80)], [64, 115, 26, 204
 const displayJs = read('src/web/admin/settings/display-borders.js');
 for (const marker of ["document.documentElement.style.setProperty('--icon-glow-pct', String(percent));",
   "document.querySelectorAll('.tile').forEach(tile => applyIconDiscTint(tile));",
-  "const response = await fetch('/api/display/icon-glow', {", "body: 'percent=' + percent",
+  "const response = await fetch('api/display/icon-glow', {", "body: 'percent=' + percent",
   "tabEl.querySelectorAll('.global-icon-glow').forEach(input => { input.value = String(glow); });"])
   assert.ok(displayJs.includes(marker), `display JS: ${marker}`);
 const glowTint = read('src/web/admin/tiles/grid-preview.js');
