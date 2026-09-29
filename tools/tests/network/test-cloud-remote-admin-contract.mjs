@@ -85,14 +85,21 @@ const html = read('src/web/server/render/web_admin_html.cpp');
 assert.match(fn(html, 'WebAdminServer::getStatusJSON'), /\\"remote\\":[\s\S]*isRemoteRequest\(\)/);
 
 // --- The refusal is translated -------------------------------------------------------
+// The tables are positional: the text sits at the member's index, one literal per member.
 const i18n = read('src/core/i18n/i18n.cpp');
-const lastLiteral = table => {
+const header = read('src/core/i18n/i18n.h');
+const structStart = header.indexOf('struct Strings {');
+const members = [...header.slice(structStart, header.indexOf('\n};', structStart))
+  .matchAll(/^\s*const char\* (\w+);/gm)].map(match => match[1]);
+const blockedAt = members.indexOf('cloud_remote_blocked');
+assert.ok(blockedAt >= 0, 'Strings declares cloud_remote_blocked');
+const blockedText = table => {
   const begin = i18n.indexOf(`static const Strings ${table} = {`);
-  const block = i18n.slice(begin, i18n.indexOf('};', begin));
-  return [...block.matchAll(/"((?:[^"\\]|\\.)*)"/g)].at(-1)[1];
+  const literals = [...i18n.slice(begin, i18n.indexOf('};', begin)).matchAll(/"((?:[^"\\]|\\.)*)"/g)];
+  assert.equal(literals.length, members.length, `${table} has one literal per Strings member`);
+  return literals[blockedAt][1];
 };
-const [de, en, fr] = ['kStringsDe', 'kStringsEn', 'kStringsFr'].map(lastLiteral);
-assert.match(read('src/core/i18n/i18n.h'), /const char\* cloud_remote_blocked;\s*\};/, 'the last Strings field');
+const [de, en, fr] = ['kStringsDe', 'kStringsEn', 'kStringsFr'].map(blockedText);
 assert.match(en, /remote session/);
 assert.notEqual(de, en);
 assert.notEqual(fr, en);

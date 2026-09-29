@@ -83,26 +83,59 @@ assert.match(fn('HomeTilesNetworkManager::serviceMqttWorker'),
   /if \(cloudRefused\(\)\) mqtt_retry_at = millis\(\) \+ kCloudRefusalRetryMs;/,
   'a close with 1008/4402 uses the long retry');
 
-// --- Every language translates the new texts --------------------------------
+// --- Every language translates the new texts, at their members' positions ---
+// The Strings tables are positional. A block merged in another order than in
+// i18n.h still compiles and shows the wrong labels, so every cloud text is
+// pinned to its member by name, in every language.
 const header = read('src/core/i18n/i18n.h');
-const cloudFields = [...header.matchAll(/const char\* ((?:admin_settings_cloud|cloud_[a-z_]+));/g)]
-  .map(match => match[1]);
-assert.equal(cloudFields.length, 19, 'expected the 19 cloud strings');
+const structStart = header.indexOf('struct Strings {');
+const members = [...header.slice(structStart, header.indexOf('\n};', structStart))
+  .matchAll(/^\s*const char\* (\w+);/gm)].map(match => match[1]);
+const cloudFields = members.filter(name => /^(?:admin_settings_cloud|cloud_[a-z_]+)$/.test(name));
 const i18n = read('src/core/i18n/i18n.cpp');
+const languages = ['kStringsDe', 'kStringsEn', 'kStringsFr'];
 const tables = {};
-for (const name of ['kStringsDe', 'kStringsEn', 'kStringsFr']) {
+for (const name of languages) {
   const start = i18n.indexOf(`static const Strings ${name} = {`);
   assert.ok(start >= 0, `${name} must exist`);
-  const end = i18n.indexOf('};', start);
-  const literals = [...i18n.slice(start, end).matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(m => m[1]);
-  tables[name] = literals.slice(-cloudFields.length);
-  for (const [index, text] of tables[name].entries()) {
-    assert.ok(text.length > 0, `${name}.${cloudFields[index]} must not be empty`);
-  }
+  const literals = [...i18n.slice(start, i18n.indexOf('};', start)).matchAll(/"((?:[^"\\]|\\.)*)"/g)]
+    .map(m => m[1]);
+  // One literal per member, so a literal's index is its member's index.
+  assert.equal(literals.length, members.length, `${name} has one literal per Strings member`);
+  tables[name] = Object.fromEntries(members.map((member, index) => [member, literals[index]]));
 }
-const status = cloudFields.indexOf('cloud_status_plan_required');
-assert.notEqual(tables.kStringsDe[status], tables.kStringsEn[status], 'German status is translated');
-assert.notEqual(tables.kStringsFr[status], tables.kStringsEn[status], 'French status is translated');
+const expected = {
+  admin_settings_cloud: ['ZHAC Cloud', 'ZHAC Cloud', 'ZHAC Cloud'],
+  cloud_transport_label: ['Verbindung', 'Connection', 'Connexion'],
+  cloud_transport_mqtt: ['MQTT-Broker', 'MQTT broker', 'Broker MQTT'],
+  cloud_transport_cloud: ['ZHAC Cloud', 'ZHAC Cloud', 'ZHAC Cloud'],
+  cloud_url_label: ['Cloud-URL', 'Cloud URL', 'URL du cloud'],
+  cloud_token_label: ['Panel-Token', 'Panel token', 'Jeton du panneau'],
+  cloud_token_stored: ['Gespeichert – leer lassen, um es zu behalten', 'Stored – leave empty to keep it',
+    'Enregistré – laisser vide pour le conserver'],
+  cloud_token_missing: ['Nicht gesetzt', 'Not set', 'Non défini'],
+  cloud_note: [
+    'URL und Token einfügen, die ZHAC Cloud beim Hinzufügen dieses Panels anzeigt. Das Token wird hier nie wieder angezeigt.',
+    'Paste the URL and token that ZHAC Cloud shows when you add this panel. The token is never shown here again.',
+    "Collez l'URL et le jeton affichés par ZHAC Cloud lors de l'ajout de ce panneau. Le jeton n'est plus jamais affiché ici."],
+  cloud_url_invalid: ['Die Cloud-URL muss mit wss:// oder ws:// beginnen.', 'The cloud URL must start with wss:// or ws://.',
+    "L'URL du cloud doit commencer par wss:// ou ws://."],
+  cloud_token_invalid: ['Das Panel-Token ist ungültig.', 'The panel token is not valid.', "Le jeton du panneau n'est pas valide."],
+  cloud_status_off: ['Nicht verwendet', 'Not used', 'Non utilisé'],
+  cloud_status_connecting: ['Nicht verbunden', 'Not connected', 'Non connecté'],
+  cloud_status_connected: ['Verbunden', 'Connected', 'Connecté'],
+  cloud_status_unauthorized: ['Token abgelehnt', 'Token rejected', 'Jeton refusé'],
+  cloud_status_token_revoked: ['Token widerrufen', 'Token revoked', 'Jeton révoqué'],
+  cloud_status_plan_required: ['Tarif erforderlich', 'Plan required', 'Abonnement requis'],
+  cloud_status_forbidden: ['Zugriff verweigert', 'Access denied', 'Accès refusé'],
+  cloud_remote_blocked: ['In einer Fernsitzung nicht verfügbar: bitte im lokalen Netzwerk des Panels ändern.',
+    "Not available in a remote session: change it on the panel's local network.",
+    'Indisponible en session à distance : modifiez-le sur le réseau local du panneau.'],
+};
+assert.deepEqual(cloudFields, Object.keys(expected), 'the 19 cloud strings, in declaration order');
+for (const [field, texts] of Object.entries(expected)) {
+  languages.forEach((name, language) => assert.equal(tables[name][field], texts[language], `${name}.${field}`));
+}
 const statusText = cppFunctionDefinitions(html).find(item => item.name === 'cloudStatusText')?.body;
 assert.ok(statusText, 'cloudStatusText must exist in web_admin_html.cpp');
 for (const field of cloudFields.filter(f => f.startsWith('cloud_status_'))) {
