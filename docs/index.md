@@ -17,11 +17,12 @@ HomeTiles is free, open-source firmware that turns a supported touch display int
 
 - **Controls:** lights, switches, covers, heating, media, numbers, selections and date/time values.
 - **Sensors & energy:** live values, state history, energy statistics and weather.
-- **Dashboard:** arrange tiles and folders with a live browser preview; open views from Home Assistant.
+- **Dashboard:** arrange tiles and folders in half steps with a live browser preview; open views from Home Assistant.
+- **Colors:** icon circles, tile colors from the icon, and rules that color tiles by an entity's state.
 - **Screensaver:** display a clock, photos and sensor tiles.
 - **Local hardware:** use supported GPIO outputs, relays and temperature sensors.
 - **Updates:** install firmware from the display or your browser.
-- **Camera:** experimental live video on ESP32-P4 displays.
+- **Camera:** live video on ESP32-P4 displays; supported displays share their built-in camera with Home Assistant.
 
 <figure class="ht-screenshot">
 <img src="images/8in-home-new.png" alt="HomeTiles dashboard" width="1308" height="828" loading="lazy">
@@ -36,6 +37,8 @@ HomeTiles is free, open-source firmware that turns a supported touch display int
 [All tile types](tiles.md) and [screensaver configuration](screensaver.md).
 
 ## Demo
+
+This video shows an older version. The current release is faster and looks better; a new demo video will follow soon.
 
 <figure class="ht-screenshot">
 <video class="ht-demo" controls playsinline preload="metadata" poster="images/hometiles-demo-poster.jpg" aria-label="HomeTiles device demo">
@@ -101,9 +104,9 @@ Match the exact hardware revision before flashing. [Open online flasher](install
 
 <div class="ht-device-note" id="device-note-9" popover="auto" role="dialog" aria-labelledby="device-note-9-title"><div class="ht-device-note-title" id="device-note-9-title">Waveshare 7B/7B-C (P4 v3.1)</div><button type="button" class="ht-device-note-close" aria-label="Close support details">×</button><p>Dedicated firmware for exact ESP32-P4 v3.1. Hardware validation for this revision is still pending; v3.2 and newer are unsupported.</p><p class="ht-device-note-links"><a href="https://github.com/GalusPeres/HomeTiles/issues/7">Issue #7</a></p></div>
 
-<div class="ht-device-note" id="device-note-10" popover="auto" role="dialog" aria-labelledby="device-note-10-title"><div class="ht-device-note-title" id="device-note-10-title">Waveshare LCD-10.1 (P4)</div><button type="button" class="ht-device-note-close" aria-label="Close support details">×</button><p>Display, touch, Wi-Fi, MQTT and OTA were reported working. Corrected defaults, SD and Camera still need release validation. From the next release, boards with ESP32-P4 v3.1 or newer get a separate experimental firmware (contributor-tested on v3.2).</p><p class="ht-device-note-links"><a href="https://github.com/GalusPeres/HomeTiles/issues/7">Issue #7</a></p></div>
+<div class="ht-device-note" id="device-note-10" popover="auto" role="dialog" aria-labelledby="device-note-10-title"><div class="ht-device-note-title" id="device-note-10-title">Waveshare LCD-10.1 (P4)</div><button type="button" class="ht-device-note-close" aria-label="Close support details">×</button><p>Display, touch, Wi-Fi, MQTT and OTA were reported working. Corrected defaults, SD and Camera still need release validation. From v0.7.0, boards with ESP32-P4 v3.1 or newer get a separate experimental firmware (contributor-tested on v3.2).</p><p class="ht-device-note-links"><a href="https://github.com/GalusPeres/HomeTiles/issues/7">Issue #7</a></p></div>
 
-<div class="ht-device-note" id="device-note-11" popover="auto" role="dialog" aria-labelledby="device-note-11-title"><div class="ht-device-note-title" id="device-note-11-title">Guition JC8012P4A1 V2</div><button type="button" class="ht-device-note-close" aria-label="Close support details">×</button><p>Maintainer-tested on JC8012P4A1C_I_W_Y1, SKU:10153002-V2. Display, touch, brightness, MQTT and microSD are confirmed. The interface runs smoothly with the v0.6.12 PPA correction. The SD reboot reported on another unit in issue #38 remains under investigation.</p><p class="ht-device-note-links"><a href="https://github.com/GalusPeres/HomeTiles/issues/18">Issue #18</a> <a href="https://github.com/GalusPeres/HomeTiles/releases/tag/v0.6.12">v0.6.12</a> <a href="https://github.com/GalusPeres/HomeTiles/issues/38">Issue #38</a></p></div>
+<div class="ht-device-note" id="device-note-11" popover="auto" role="dialog" aria-labelledby="device-note-11-title"><div class="ht-device-note-title" id="device-note-11-title">Guition JC8012P4A1 V2</div><button type="button" class="ht-device-note-close" aria-label="Close support details">×</button><p>Maintainer-tested on JC8012P4A1C_I_W_Y1, SKU:10153002-V2. Display, touch, brightness, MQTT and microSD are confirmed. The interface runs smoothly with the v0.6.12 PPA correction. The SD reboot reported on another unit in issue #55 remains under investigation.</p><p class="ht-device-note-links"><a href="https://github.com/GalusPeres/HomeTiles/issues/18">Issue #18</a> <a href="https://github.com/GalusPeres/HomeTiles/releases/tag/v0.6.12">v0.6.12</a> <a href="https://github.com/GalusPeres/HomeTiles/issues/55">Issue #55</a></p></div>
 
 <div class="ht-device-note" id="device-note-12" popover="auto" role="dialog" aria-labelledby="device-note-12-title"><div class="ht-device-note-title" id="device-note-12-title">Guition JC1060P470C V1</div><button type="button" class="ht-device-note-close" aria-label="Close support details">×</button><p>Touch, brightness, SD, Wi-Fi/MQTT and OTA were confirmed working since v0.6.5. Requires the exact _I_W_Y model.</p><p class="ht-device-note-links"><a href="https://github.com/GalusPeres/HomeTiles/issues/8">Issue #8</a></p></div>
 
@@ -115,18 +118,19 @@ Match the exact hardware revision before flashing. [Open online flasher](install
 
 <div class="ht-device-note" id="device-note-16" popover="auto" role="dialog" aria-labelledby="device-note-16-title"><div class="ht-device-note-title" id="device-note-16-title">Waveshare LCD-4B (S3)</div><button type="button" class="ht-device-note-close" aria-label="Close support details">×</button><p>Initial hardware testing was reported with PR #29. The adapted release profile still needs confirmation. No microSD or Camera tiles.</p><p class="ht-device-note-links"><a href="https://github.com/GalusPeres/HomeTiles/issues/26">Issue #26</a><a href="https://github.com/GalusPeres/HomeTiles/pull/29">PR #29</a></p></div>
 
-<div class="ht-device-note" id="device-note-17" popover="auto" role="dialog" aria-labelledby="device-note-17-title"><div class="ht-device-note-title" id="device-note-17-title">Guition JC4880P443</div><button type="button" class="ht-device-note-close" aria-label="Close support details">×</button><p>Contributor-tested on JC4880P443C_I_W with a local build: display, touch, rotation, camera, Wi-Fi/MQTT, microSD and OTA. Firmware ships with the next release; release-image validation is pending. Portrait 480×800 layout; uses different firmware from the Waveshare LCD-4.3.</p><p class="ht-device-note-links"><a href="https://github.com/GalusPeres/HomeTiles/pull/46">PR #46</a></p></div>
+<div class="ht-device-note" id="device-note-17" popover="auto" role="dialog" aria-labelledby="device-note-17-title"><div class="ht-device-note-title" id="device-note-17-title">Guition JC4880P443</div><button type="button" class="ht-device-note-close" aria-label="Close support details">×</button><p>Contributor-tested on JC4880P443C_I_W with a local build: display, touch, rotation, camera tile, Wi-Fi/MQTT, microSD and OTA. Firmware is available in v0.7.0; release-image validation is pending. Portrait 480×800 layout; uses different firmware from the Waveshare LCD-4.3.</p><p class="ht-device-note-links"><a href="https://github.com/GalusPeres/HomeTiles/pull/46">PR #46</a></p></div>
 
 <script src="javascripts/device-status.js?v=3" defer></script>
 
-## New In v0.6.12
+## New In v0.7.0
 
-- **Faster Guition UI:** PPA hardware rotation now handles larger ordinary interface updates on JC8012P4A1 V1 and V2. The improvement is confirmed on V2; V1 hardware feedback is pending.
-- **Aligned Weather forecasts:** both Guition revisions now use the same forecast position as Waveshare 8-inch and 10.1-inch.
-- **Correct daily temperatures:** partial hourly forecasts preserve the provider's full-day minimum and maximum.
-- **Bridge:** use v0.6.44 or newer through HACS. Camera remains experimental and ESP32-P4-only.
+- **Flexible layouts:** move and resize tiles in half steps, including Settings and Back tiles down to 1×0.5.
+- **Your dashboard's look:** adjustable corners, icon circles, tile colors and rules that follow entity values or states.
+- **Built-in cameras:** compatible ESP32-P4 displays share snapshots and live video with Home Assistant or another display. Camera support remains experimental and off by default.
+- **Smoother editing and folder navigation:** corrected Settings selection and restoration, fitting copy/paste, and released update buffers that leave more memory for cached folders.
+- **Before updating:** install Bridge **v0.7.0** through HACS and restart Home Assistant, then **export your dashboard**. Read the [update and downgrade guidance](updating.md).
 
-[Read the v0.6.12 release notes](releases/v0.6.12.md)
+[Read the v0.7.0 release notes](releases/v0.7.0.md)
 
 ## How It Works
 

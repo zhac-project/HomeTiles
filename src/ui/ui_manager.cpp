@@ -457,7 +457,7 @@ void UIManager::requestSettingsAccess(const String& title,
 
 void UIManager::requestFolderAccess(uint16_t folder_id, const String& title,
                                     const String& icon_name,
-                                    uint32_t bg_color) {
+                                    uint32_t bg_color, uint32_t icon_color) {
   if (!tileConfig.isFolderPinEnabled(folder_id)) {
     switchToFolder(folder_id);
     return;
@@ -472,6 +472,7 @@ void UIManager::requestFolderAccess(uint16_t folder_id, const String& title,
   init.title = make_unlock_title(tr.pin_popup_unlock_format, source_title);
   init.icon_name = icon_name.length() ? icon_name : String("folder");
   init.bg_color = bg_color;
+  init.icon_color = icon_color;
   init.hide_on_success = false;
   init.verify = verify_pending_access;
   init.success = complete_pending_access;
@@ -670,9 +671,9 @@ void UIManager::processSettingsGestureMotion(lv_indev_t* input,
   const bool use_snapshot = config.settings_tile_hidden && snapshot.valid;
   const uint32_t bg_color =
       use_snapshot
-          ? (snapshot_color != 0
-                 ? (snapshot_color & TILE_BG_COLOR_RGB_MASK)
-                 : 0x2A2A2A)
+          ? (tileBgColorFollowsDefault(snapshot_color)
+                 ? tileDefaultBgColor()
+                 : (snapshot_color & TILE_BG_COLOR_RGB_MASK))
           : settings_gesture_bg_color;
   const String title = use_snapshot ? String(snapshot.title)
                                     : settings_gesture_title;

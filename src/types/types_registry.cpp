@@ -80,6 +80,7 @@
 #include "src/types/camera/web_scripts.h"
 #include "src/types/pixelanim/web_scripts.h"
 #include "src/types/settings/web_scripts.h"
+#include "src/web/server/render/tile_icon_colors_html.h"
 
 #include "src/types/clock/web_styles.h"
 #include "src/types/navigate/web_styles.h"
@@ -398,13 +399,16 @@ bool apply_settings_wrapper(WebServer&, Tile& tile, const TileTypeApplyContext&)
   return true;
 }
 
-bool apply_back_wrapper(WebServer&, Tile& tile, const TileTypeApplyContext&) {
+bool apply_back_wrapper(WebServer& server, Tile& tile, const TileTypeApplyContext&) {
   if (!tile.icon_name.length()) tile.icon_name = "arrow-left";
   tile.sensor_decimals = 0xFF;
   tile.key_code = 0;
   tile.key_modifier = 0;
   tile.sensor_value_font = 0;
-  tile.sensor_display_mode = 0;
+  // Same per-tile border flag as Clock/Text: 1 hides the border.
+  if (server.hasArg("tile_border")) {
+    tile.sensor_display_mode = server.arg("tile_border").toInt() == 0 ? 1 : 0;
+  }
   tile.sensor_gauge_min = 0;
   tile.sensor_gauge_max = 100;
   return true;
@@ -426,6 +430,10 @@ void append_scene_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
 
 void append_navigate_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
   append_navigate_fields_html(html, safeString(ctx.tab_id), safeString(ctx.navigate_options_html));
+}
+
+void append_back_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
+  append_back_fields_html(html, safeString(ctx.tab_id));
 }
 
 void append_switch_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
@@ -789,17 +797,17 @@ const TileTypeDescriptor kTileTypes[] = {
     TILE_BACK,
     "Zurück",
     "navigate",
-    "navigate",
+    "back",
     "none",
     nullptr,
-    nullptr,
-    nullptr,
-    "resetNavigateFields",
+    "loadBackFields",
+    "saveBackFields",
+    "resetBackFields",
     0x2A2A2A,
     true,
     render_navigate_wrapper,
     apply_back_wrapper,
-    nullptr,
+    append_back_fields_wrapper,
     nullptr,
     nullptr
   }
@@ -812,6 +820,17 @@ const TileTypeDescriptor* find_descriptor(TileType type) {
   return nullptr;
 }
 
+// Types with the standard default background follow the global default tile
+// color; the animation tile keeps its own black default.
+bool follows_default_tile_color(const TileTypeDescriptor& entry) {
+  return tile_color::isDefaultGrey(entry.default_bg_color);
+}
+
+uint32_t effective_default_bg(const TileTypeDescriptor& entry) {
+  return follows_default_tile_color(entry) ? tileDefaultBgColor()
+                                           : entry.default_bg_color;
+}
+
 }  // namespace
 
 const TileTypeDescriptor* get_tile_type_descriptor(TileType type) {
@@ -820,7 +839,12 @@ const TileTypeDescriptor* get_tile_type_descriptor(TileType type) {
 
 uint32_t get_tile_type_default_bg(TileType type) {
   const TileTypeDescriptor* desc = find_descriptor(type);
-  return desc ? desc->default_bg_color : 0;
+  return desc ? effective_default_bg(*desc) : 0;
+}
+
+bool tile_type_follows_default_tile_color(TileType type) {
+  const TileTypeDescriptor* desc = find_descriptor(type);
+  return desc && follows_default_tile_color(*desc);
 }
 
 const char* get_tile_type_css_class(TileType type) {
@@ -839,6 +863,9 @@ void append_tile_type_fields_html(String& html, const TileTypeWebContext& ctx) {
       entry.append_fields(html, ctx);
     }
   }
+  // Shared by the Sensor family, Binary sensor, Energy and the icon-and-title
+  // tiles (fixed color only); the editor shows it for those types only.
+  if (ctx.tab_id) append_tile_icon_color_fields_html(html, *ctx.tab_id);
 }
 
 void append_tile_type_styles(String& html) {
@@ -957,11 +984,13 @@ void append_tile_type_registry_js(String& html) {
     // tile to grey on edit.
     if (entry.default_bg_color || entry.type == TILE_PIXELANIM) {
       char color_hex[10] = {0};
-      const uint32_t color24 = static_cast<uint32_t>(entry.default_bg_color) & 0x00FFFFFFu;
+      const uint32_t color24 = effective_default_bg(entry) & 0x00FFFFFFu;
       snprintf(color_hex, sizeof(color_hex), "#%06" PRIX32, color24);
       html += "defaultBg:\"";
       html += color_hex;
       html += "\",";
+      // The browser repaints these defaults when the global color changes.
+      if (follows_default_tile_color(entry)) html += "sharedBg:true,";
     }
     html += "locked:";
     html += entry.locked ? "true" : "false";

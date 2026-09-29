@@ -2,6 +2,9 @@
 #include "src/types/navigate/renderer.h"
 #include "src/tiles/runtime/tile_renderer_shared.h"
 #include "src/tiles/runtime/tile_renderer_fonts.h"
+#include "src/tiles/runtime/tile_icon_disc.h"
+#include "src/tiles/runtime/compact_sensor_layout.h"
+#include "src/tiles/runtime/tile_icon_source.h"
 #include "src/tiles/icons/mdi_icons.h"
 #include "src/tiles/config/tile_config.h"
 #include "src/ui/ui_manager.h"
@@ -24,10 +27,9 @@ lv_obj_t* render_navigate_tile(lv_obj_t* parent, int col, int row, const Tile& t
   ui_surface_style::apply_radius(btn, tile_layout::scale_480(22), 0);
   lv_obj_set_style_border_width(btn, 0, 0);
 
-  // Without an explicit color, all navigation types use the same neutral
-  // background as the other HomeTiles tiles.
-  const uint32_t default_color = 0x2A2A2A;
-  uint32_t btn_color = tileBgColorOrDefault(tile, default_color);
+  // Without an explicit color, all navigation types use the global default
+  // tile color like the other HomeTiles tiles.
+  uint32_t btn_color = tileBgColorOrDefault(tile, tileDefaultBgColor());
   lv_obj_set_style_bg_color(btn, lv_color_hex(btn_color), LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_set_style_bg_color(btn, lv_color_hex(btn_color), LV_PART_MAIN | LV_STATE_FOCUSED);
   lv_obj_set_style_bg_grad_color(btn, lv_color_hex(btn_color), LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -66,38 +68,50 @@ lv_obj_t* render_navigate_tile(lv_obj_t* parent, int col, int row, const Tile& t
   }
   bool has_icon = iconChar.length() > 0;
   bool has_title = tile.title.length() > 0;
+  // A half-height navigation tile uses the half-height Sensor header: the
+  // icon in the concentric corner disc and the title, if any, beside it.
+  const bool compact = tile_geometry::compact_icon_title(tile.type, tile.span_w, tile.span_h);
 
   if (has_icon) {
     icon_lbl = lv_label_create(btn);
     if (icon_lbl) {
       set_label_style(icon_lbl, lv_color_white(), FONT_MDI_ICONS);
       lv_label_set_text(icon_lbl, iconChar.c_str());
+      tile_icon_source::apply_initial(icon_lbl, tile);
 
       // Center icon and title on two lines, or the icon alone on one line.
-      if (has_title) {
-        lv_obj_align(icon_lbl, LV_ALIGN_CENTER, 0,
-                     tile_layout::scale_i16(-20));
-      } else {
-        lv_obj_center(icon_lbl);  // Center the icon when there is no title.
+      if (!compact) {
+        if (has_title) {
+          lv_obj_align(icon_lbl, LV_ALIGN_CENTER, 0,
+                       tile_layout::scale_i16(-20));
+        } else {
+          lv_obj_center(icon_lbl);  // Center the icon when there is no title.
+        }
+        tile_icon_disc::add_round(btn, icon_lbl);
       }
     }
   }
 
   // Show the title label only when a title is set.
+  lv_obj_t* title_lbl = nullptr;
   if (has_title) {
     lv_obj_t* l = lv_label_create(btn);
+    title_lbl = l;
     if (l) {
       set_label_style(l, lv_color_white(), tile_layout::header_title_font());
       hometiles_title::tile(l, tile.title.c_str(), false);
 
       // Position below the icon, or center when there is no icon.
-      if (icon_lbl) {
+      if (compact) {
+        // compact_sensor_layout places it beside the disc below.
+      } else if (icon_lbl) {
         lv_obj_align(l, LV_ALIGN_CENTER, 0, tile_layout::scale(35));
       } else {
         lv_obj_center(l);  // Center the title when there is no icon.
       }
     }
   }
+  if (compact) compact_sensor_layout::apply(btn, icon_lbl, title_lbl, nullptr, tile);
 
   // Event handler for tab navigation.
   static constexpr uint8_t NAV_KIND_FOLDER = 0;
@@ -145,9 +159,19 @@ lv_obj_t* render_navigate_tile(lv_obj_t* parent, int col, int row, const Tile& t
         } else {
           Serial.printf("[Tile] Navigation CLICKED! Folder %u, title: %s\n",
                         static_cast<unsigned>(data->target_folder_id), data->title.c_str());
+          // A PIN popup shows the icon in the color the tile shows right now
+          // (fixed or from the source entity).
+          lv_obj_t* icon = tile_icon_source::card_icon(
+              static_cast<lv_obj_t*>(lv_event_get_current_target(e)));
+          const uint32_t icon_color =
+              icon ? lv_color_to_u32(lv_obj_get_style_text_color(icon, LV_PART_MAIN)) & 0xFFFFFF
+                   : 0xFFFFFF;
+          // The PIN popup also inherits a rules tint of the tile.
+          const uint32_t popup_color = tile_icon_source::popup_background(
+              static_cast<lv_obj_t*>(lv_event_get_current_target(e)), data->bg_color);
           uiManager.requestFolderAccess(data->target_folder_id, data->title,
                                         data->icon_name,
-                                        data->bg_color);
+                                        popup_color, icon_color);
         }
       },
       LV_EVENT_CLICKED,
@@ -164,5 +188,4 @@ lv_obj_t* render_navigate_tile(lv_obj_t* parent, int col, int row, const Tile& t
 
   return btn;
 }
-
 

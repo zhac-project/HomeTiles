@@ -1,4 +1,6 @@
 #include "src/tiles/runtime/compact_sensor_layout.h"
+#include "src/tiles/runtime/tile_icon_disc.h"
+#include "src/tiles/runtime/tile_icon_source.h"
 #include "src/ui/shared/ui_surface_style.h"
 #include "src/types/sensor/renderer.h"
 #include "src/tiles/runtime/tile_renderer_shared.h"
@@ -23,6 +25,8 @@ struct SensorEventData {
   uint8_t decimals = 0xFF;
   uint32_t bg_color = 0;
   bool editable = false;
+  // Per-tile icon colors for the popup header icon.
+  String icon_colors;
 };
 
 static bool is_disabled_token(const String& value) {
@@ -56,8 +60,8 @@ lv_obj_t* render_sensor_tile(lv_obj_t* parent, int col, int row, const Tile& til
     return nullptr;
   }
 
-  // Use the configured color; default to 0x2A2A2A when color is 0.
-  uint32_t card_color = tileBgColorOrDefault(tile, 0x2A2A2A);
+  // Use the configured color, else the global default tile color.
+  uint32_t card_color = tileBgColorOrDefault(tile, tileDefaultBgColor());
   lv_obj_set_style_bg_color(card, lv_color_hex(card_color), LV_PART_MAIN | LV_STATE_DEFAULT);
 lv_obj_set_style_bg_grad_color(card, lv_color_hex(card_color), LV_PART_MAIN | LV_STATE_DEFAULT);
 lv_obj_set_style_bg_grad_dir(card, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -257,12 +261,15 @@ lv_obj_set_style_bg_grad_dir(card, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_PRE
 
   if (tile_geometry::compact(tile.type, tile.span_w, tile.span_h) && display_mode == 0) {
     compact_sensor_layout::apply(card, icon_lbl, title_label, v, tile);
+  } else {
+    tile_icon_disc::add_round(card, icon_lbl);
   }
 
   // Store for later updates.
   SensorTileWidgets* target = tile_renderer_get_sensor_widgets(grid_type);
   if (target && index < TILES_PER_GRID) {
     target[index].value_label = v;
+    target[index].icon_label = icon_lbl;
     target[index].unit_label = nullptr;
     target[index].gauge = gauge;
     target[index].gauge_min = gauge_min;
@@ -287,8 +294,9 @@ lv_obj_set_style_bg_grad_dir(card, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_PRE
       icon_override,
       tile.sensor_unit,
       tile.sensor_decimals,
-      tileBgColorOrDefault(tile, 0x2A2A2A),
-      tileTypeIsEditableValue(tile.type)
+      tileBgColorOrDefault(tile, tileDefaultBgColor()),
+      tileTypeIsEditableValue(tile.type),
+      tile.icon_colors
     };
 
     const lv_event_code_t popup_event =
@@ -333,7 +341,8 @@ lv_obj_set_style_bg_grad_dir(card, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_PRE
           init.unit = unit;
           init.lock_unit = lock_unit;
           init.decimals = data->decimals;
-          init.bg_color = data->bg_color;
+          // The popup inherits the tile background, including a rules tint.
+          init.bg_color = tile_icon_source::popup_background(static_cast<lv_obj_t*>(lv_event_get_current_target(e)), data->bg_color);
           init.value = haBridgeConfig.findSensorInitialValue(data->entity_id);
           String state_kind =
               haBridgeConfig.findSensorStateKind(data->entity_id);
@@ -349,10 +358,18 @@ lv_obj_set_style_bg_grad_dir(card, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_PRE
                 sensor_popup_should_use_state_history(init.value, init.unit);
           }
           init.editable = data->editable;
+          init.icon_colors = data->icon_colors;
           if (init.editable) {
             const EditableValue value = parse_editable_value(haBridgeConfig.findEditableValue(data->entity_id));
             init.value = value.state; init.unit = value.unit;
             init.state_history_mode = value.kind != "number";
+          }
+          // Rules that force the tile icon color also color the header icon.
+          lv_color_t forced;
+          if (tile_icon_disc::forced_color(
+                  tile_icon_source::card_icon(static_cast<lv_obj_t*>(lv_event_get_current_target(e))), forced)) {
+            init.forced_icon = true;
+            init.forced_icon_color = lv_color_to_u32(forced) & 0xFFFFFF;
           }
           finish_press_before_popup(e);
           show_sensor_popup(init);

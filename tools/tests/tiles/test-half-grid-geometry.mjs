@@ -28,10 +28,12 @@ extern "C" { LV_FONT_DECLARE(ui_font_12); LV_FONT_DECLARE(ui_font_14); LV_FONT_D
 constexpr int GRID_COLS=Device::kGridCols,GRID_ROWS=Device::kGridRows;
 constexpr int GRID_CELL_W=Device::kGridCellW,GRID_CELL_H=Device::kGridCellH,GRID_GAP=Device::kGridGap;
 ${radiusPolicyHost(root,'Device::kGridCellH','Device::kGridGap')}
-struct Config{int tile_radius=tile_radius::kMinimum;bool tile_borders=true;};
+#include "src/core/config/icon_glow.h"
+struct Config{int tile_radius=tile_radius::kMinimum;bool tile_borders=true;bool icon_discs=true;uint8_t icon_glow=icon_glow::kDefault;};
 struct Manager{Config config;const Config& getConfig(){return config;}}configManager;
 ${surfaceStyleHost(root)}
-struct Tile{int type=TILE_SENSOR;float col=0,row=0,span_w=1,span_h=1;uint8_t sensor_display_mode=0;};
+struct Tile{int type=TILE_SENSOR;float col=0,row=0,span_w=1,span_h=1;uint8_t sensor_display_mode=0;uint8_t sensor_value_font=0;};
+${read('src/tiles/config/tile_config.h').match(/static constexpr uint8_t SENSOR_VALUE_FONT_MAX = \d+;/)[0]}
 ${fn('src/tiles/config/tile_config.h','tileBorderEnabled')}
 struct PackedQuarterGridV7{uint8_t version=7,quarter_index=0,reserved[2]={};};
 template<class P,class S>void clamp_media_tile_layout(int,P&,P&,S&,S&){}
@@ -40,6 +42,7 @@ ${fn('src/tiles/config/tile_config.cpp','packGeometry')}
 ${fn('src/tiles/config/tile_config.cpp','unpackGeometry')}
 ${fn('src/tiles/runtime/tile_renderer_shared.h','apply_fractional_tile_geometry')}
 ${fn('src/tiles/runtime/tile_renderer.cpp','set_tile_grid_cell')}
+${strip(read('src/tiles/runtime/tile_icon_disc.h'))}
 ${strip(read('src/tiles/runtime/compact_sensor_layout.h'))}
 int main(){
  assert(tile_layout::value_font_for_choice(0,nullptr)==nullptr);
@@ -48,7 +51,7 @@ int main(){
  assert(tile_layout::value_font_for_choice(2,nullptr)==tile_layout::content_font_24());
  assert(tile_layout::value_font_for_choice(3,nullptr)==tile_layout::content_font_32());
  assert(tile_layout::value_font_for_choice(4,nullptr)==tile_layout::content_font_40());
- for(int type:{TILE_SENSOR,TILE_BINARY_SENSOR,TILE_ENERGY}) {
+ for(int type:{TILE_SENSOR,TILE_BINARY_SENSOR,TILE_ENERGY,TILE_SETTINGS}) {
   for(float row:{0.f,0.5f,1.f,1.5f}) {
    Tile input{type,0.5f,row,2,0.5f};
    PackedQuarterGridV7 record; Tile loaded{type,0,std::floor(row),2,1};
@@ -102,9 +105,9 @@ int main(){
  assert(!tile_geometry::compact(TILE_CLOCK,1,.5f));
  assert(tile_geometry::compact(TILE_SENSOR,2,.5f));
  assert(!tile_geometry::compact(TILE_SENSOR,2,1));
- for(int type:{TILE_SENSOR,TILE_BINARY_SENSOR,TILE_ENERGY}) for(float width:{1.f,1.5f,2.f,2.5f}) {
+ for(int type:{TILE_SENSOR,TILE_BINARY_SENSOR,TILE_ENERGY}) for(float width:{1.f,1.5f,2.f,2.5f}) for(int choice:{0,1,2,3,4,5}) {
   const float height=.5f;
-  Tile tile{type,0,0,width,height};
+  Tile tile{type,0,0,width,height};tile.sensor_value_font=choice;
   auto*card=lv_button_create(lv_screen_active());lv_obj_remove_style_all(card);
   lv_obj_set_size(card,tile_geometry::extent(0,width,GRID_CELL_W,GRID_GAP),tile_geometry::extent(0,height,GRID_CELL_H,GRID_GAP));
   auto*icon=lv_label_create(card);lv_label_set_text(icon,"i");
@@ -120,8 +123,10 @@ int main(){
   assert(lv_obj_get_style_text_align(value,LV_PART_MAIN)==LV_TEXT_ALIGN_LEFT);
   lv_obj_add_state(card,LV_STATE_PRESSED);lv_obj_update_layout(card);
   lv_area_t pressed;lv_obj_get_coords(value,&pressed);assert(memcmp(&pressed,&v,sizeof(v))==0);
-  // Half-height values always use the 20 px title size, whatever size was chosen.
-  assert(lv_obj_get_style_text_font(value, LV_PART_MAIN)==tile_layout::content_font_20());
+  // Half-height values use the title size by default and for 20, 24 for 24,
+  // and 28 for 28, 32 and 40; every size fits below the title.
+  const lv_font_t* expected=choice==2?tile_layout::content_font_24():choice>=3?tile_layout::content_font_28():tile_layout::content_font_20();
+  assert(lv_obj_get_style_text_font(value, LV_PART_MAIN)==expected&&compact_sensor_layout::value_font(choice)==expected);
   lv_obj_delete(card);
  }
  auto* grid=lv_obj_create(lv_screen_active());lv_obj_remove_style_all(grid);

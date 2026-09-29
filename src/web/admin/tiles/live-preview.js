@@ -26,6 +26,10 @@
     const iconInput = document.getElementById(prefix + '_tile_icon');
     const switchStyle = document.getElementById(prefix + '_switch_style')?.value || '0';
     const isEnergyType = type === '14';
+    // Half-height tiles offer only the value sizes that fit.
+    const halfHeight = Number(document.getElementById(prefix + '_tile_span_h')?.value || 1) === 0.5;
+    for (const id of ['_sensor_value_font', '_binary_sensor_value_font', '_energy_value_font'])
+      syncCompactValueFontOptions(document.getElementById(prefix + id), halfHeight);
     const sensorValueFont = isEnergyType
       ? (document.getElementById(prefix + '_energy_value_font')?.value || '0')
       : (document.getElementById(prefix + (type === '20' ? '_binary_sensor_value_font' : '_sensor_value_font'))?.value || '0');
@@ -58,6 +62,10 @@
                 ? coverEntity
                 : (previewKind === 'camera' ? cameraEntity : '')))))));
     if (isEditablePreview(previewKind)) iconEntity = document.getElementById(prefix + '_' + previewKind + '_entity')?.value || '';
+    if (type === '2') {
+      const alias = document.getElementById(prefix + '_scene_alias')?.value || '';
+      iconEntity = sensorMetaCache.sceneEntities?.[alias] || '';
+    }
     const rawIcon = iconInput ? iconInput.value : '';
     let iconName = resolveIconName(
       rawIcon,
@@ -100,7 +108,13 @@
     if (type === '5' && switchStyle === '1') tileElem.classList.add('switch-toggle');
     tileElem.style.background = '';
     tileElem.dataset.type = type;
-    tileElem.classList.toggle('tile-border-hidden', ['9','10'].includes(type) && document.getElementById(prefix + (type === '9' ? '_clock_tile_border' : '_text_tile_border'))?.checked === false);
+    tileElem.dataset.iconDisc = tileTypeHasDiscToggle(type)
+      && document.getElementById(prefix + '_tile_icon_disc')?.checked === false ? '2' : '0';
+    tileElem.dataset.iconGlow = tileTypeHasColoredIcon(type)
+      && document.getElementById(prefix + '_tile_icon_glow')?.checked === false ? '0' : '1';
+    const borderToggle = type === '8' ? '_back_tile_border'
+      : (type === '9' ? '_clock_tile_border' : (type === '10' ? '_text_tile_border' : ''));
+    tileElem.classList.toggle('tile-border-hidden', !!borderToggle && document.getElementById(prefix + borderToggle)?.checked === false);
 
     if (type === '0') {
       tileElem.classList.add('empty');
@@ -111,21 +125,30 @@
       updateLayoutFromInputs(tab);
     applyCompactSensorPreview(tileElem, type, {span_w:Number(document.getElementById(prefix + '_tile_span_w')?.value || 1),
       span_h:Number(document.getElementById(prefix + '_tile_span_h')?.value || 1)},
-      document.getElementById(prefix + '_sensor_display_mode')?.value || 0);
+      document.getElementById(prefix + '_sensor_display_mode')?.value || 0, sensorValueFont);
       return;
     }
 
     const defaultBg = meta.defaultBg || '#353535';
-    if (tileColorInputIsDefault(tab)) {
+    // Tiles without their own color (or with the stored default grey) show
+    // and keep following the global default tile color.
+    const isDefaultBg = tileColorInputIsDefault(tab);
+    if (isDefaultBg) {
       const colorInput = document.getElementById(prefix + '_tile_color');
-      if (colorInput) colorInput.value = defaultBg;
+      if (colorInput) {
+        colorInput.value = defaultBg;
+        colorInput.dataset.bgColorDefault = '1';
+      }
     }
-    const tileBg = tileColorInputIsDefault(tab) ? defaultBg : (color || defaultBg);
+    syncTileColorMode(tab);
+    const tileBg = tileBackgroundCss(meta, isDefaultBg,
+      isDefaultBg ? defaultBg : (color || defaultBg));
     if (isScreensaverTileTab(tab)) {
       const opacity = clampInt(
         document.getElementById('screensaver_tile_opacity')?.value,
         0, 255, 0);
-      tileElem.style.background = tileBg + opacity.toString(16).padStart(2, '0');
+      tileElem.style.background = tileBackgroundCss(meta, isDefaultBg,
+        isDefaultBg ? defaultBg : (color || defaultBg), opacity);
     } else {
       tileElem.style.background = tileBg;
     }
@@ -139,14 +162,16 @@
     let html = '';
 
     if (iconName) {
-      const iconStyle = previewKind === 'climate'
-        ? ' style="color:' + climatePreviewColor(climatePreviewState) + '"'
-        : (previewKind === 'cover'
-          ? ' style="color:' + coverPreviewColor(coverPreviewState) + '"'
-          : (previewKind === 'binary_sensor'
-            ? ' style="color:' + binarySensorPreviewColor(
-                binarySensorPreviewState) + '"'
-            : ''));
+      const iconRecord = typeof collectIconColorRecord === 'function' ? collectIconColorRecord(prefix) : '';
+      const iconColor = previewIconColor(type, iconRecord, iconEntity, sensorMetaCache,
+        binarySensorPreviewState, previewKind === 'climate'
+          ? climatePreviewColor(climatePreviewState)
+          : (previewKind === 'cover'
+            ? coverPreviewColor(coverPreviewState)
+            : (previewKind === 'binary_sensor'
+              ? binarySensorPreviewColor(binarySensorPreviewState)
+              : '')));
+      const iconStyle = iconColor ? ' style="color:' + escapeHtml(iconColor) + '"' : '';
       html += '<i class="mdi mdi-' + escapeHtml(iconName) + ' tile-icon"' + iconStyle + '></i>';
     }
 
@@ -238,6 +263,11 @@
 
     html += getTileResizeHandlesHtml(type);
     tileElem.innerHTML = html;
+    if (typeof applyTileRulesTint === 'function' && typeof collectIconColorRecord === 'function' &&
+        typeof iconColorOwnEntity === 'function') {
+      applyTileRulesTint(tileElem, type, collectIconColorRecord(prefix), iconColorOwnEntity(prefix, String(type)), sensorMetaCache);
+    }
+    applyIconDiscTint(tileElem);
     if (wasActive) tileElem.classList.add('active');
     if (typeWas !== type && wasActive) {
       tileElem.classList.add('active');
@@ -248,7 +278,7 @@
     updateLayoutFromInputs(tab);
     applyCompactSensorPreview(tileElem, type, {span_w:Number(document.getElementById(prefix + '_tile_span_w')?.value || 1),
       span_h:Number(document.getElementById(prefix + '_tile_span_h')?.value || 1)},
-      document.getElementById(prefix + '_sensor_display_mode')?.value || 0);
+      document.getElementById(prefix + '_sensor_display_mode')?.value || 0, sensorValueFont);
     if (previewKind === 'climate' &&
         typeof mountClimateMiniEditor === 'function') {
       mountClimateMiniEditor(tab);

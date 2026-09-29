@@ -61,7 +61,8 @@ class String : public std::string { public: using std::string::string; using std
 String normalizeMdiIconName(const String& name){return name;}
 String getMdiChar(const String& name){if(name=="window-close")return ${JSON.stringify(iconChar('window-close'))};if(name=="clock-end")return ${JSON.stringify(iconChar('clock-end'))};return name=="plus"?${JSON.stringify(iconChar('plus'))}:${JSON.stringify(iconChar('minus'))};}
 ${radiusPolicyHost(root)}
-struct Config {bool tile_borders=true;int tile_radius=tile_radius::kMinimum;const char* language="en";}; struct Manager {Config cfg;const Config& getConfig(){return cfg;}} configManager;
+#include "src/core/config/icon_glow.h"
+struct Config {bool tile_borders=true;bool icon_discs=true;uint8_t icon_glow=icon_glow::kDefault;int tile_radius=tile_radius::kMinimum;const char* language="en";}; struct Manager {Config cfg;const Config& getConfig(){return cfg;}} configManager;
 ${surfaceStyleHost(root)}
 namespace i18n {
 struct Profile {const char* decimal_separator;const char* editable_labels[19];};
@@ -104,6 +105,8 @@ struct SensorPopupContext {
  lv_obj_t *overlay=nullptr,*card=nullptr,*title_label=nullptr,*icon_label=nullptr,*control_row=nullptr,*range_day_btn=nullptr,*range_week_btn=nullptr;int chart_height=kChartHeight;SensorHistoryRange history_range=SensorHistoryRange::Day24;
  lv_obj_t *body_box,*chart_wrap,*chart,*binary_body,*binary_activity_title,*binary_activity_date,*binary_activity_viewport,*binary_activity_status,*binary_history_title,*binary_timeline,*binary_history_status,*y_min_label,*y_max_label,*y_min_line,*y_max_line;
  lv_obj_t *binary_time_labels[8],*time_lines[8],*time_labels[8];lv_chart_series_t* series;
+ // The graph readout is covered by test-editable-history-lvgl.mjs.
+ struct {void cancel(){}} readout;
 };
 void clear_chart(SensorPopupContext* ctx,int points){lv_chart_set_point_count(ctx->chart,points);lv_chart_set_range(ctx->chart,LV_CHART_AXIS_PRIMARY_Y,99,101);lv_chart_set_all_value(ctx->chart,ctx->series,100);}
 struct Range{int hours,points;};Range get_history_range_config(SensorHistoryRange range){return range==SensorHistoryRange::Day7?Range{168,288}:Range{24,288};}

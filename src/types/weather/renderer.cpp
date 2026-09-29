@@ -1,7 +1,9 @@
 #include "src/ui/shared/ui_surface_style.h"
+#include "src/tiles/runtime/tile_icon_source.h"
 #include "src/types/weather/renderer.h"
 #include "src/tiles/runtime/tile_renderer_shared.h"
 #include "src/tiles/runtime/tile_renderer_fonts.h"
+#include "src/tiles/runtime/tile_icon_disc.h"
 #include "src/tiles/icons/mdi_icons.h"
 #include "src/types/types_registry.h"
 #include "src/network/bridge/ha_bridge_config.h"
@@ -80,9 +82,7 @@ lv_obj_t* render_weather_tile(lv_obj_t* parent, int col, int row, const Tile& ti
   lv_obj_t* card = lv_button_create(parent);
   if (!card) return nullptr;
 
-  uint32_t default_color = get_tile_type_default_bg(tile.type);
-  if (default_color == 0) default_color = 0x2A2A2A;
-  uint32_t card_color = tileBgColorOrDefault(tile, default_color);
+  uint32_t card_color = tileBgColorOrDefault(tile, tileDefaultBgColor());
   lv_obj_set_style_bg_color(card, lv_color_hex(card_color), LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_set_style_bg_grad_color(card, lv_color_hex(card_color), LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_set_style_bg_grad_dir(card, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -146,6 +146,8 @@ lv_obj_t* render_weather_tile(lv_obj_t* parent, int col, int row, const Tile& ti
       lv_obj_add_flag(icon_label, LV_OBJ_FLAG_HIDDEN);
     }
   }
+  // The disc takes over the icon's hidden state; state updates toggle both.
+  tile_icon_disc::add_round(card, icon_label);
 
   lv_obj_t* value_row = lv_obj_create(card);
   lv_obj_remove_style_all(value_row);
@@ -341,7 +343,11 @@ lv_obj_t* render_weather_tile(lv_obj_t* parent, int col, int row, const Tile& ti
       WeatherPopupInit init;
       init.entity_id = data->entity_id;
       init.title = title;
-      init.bg_color = data->bg_color;
+      init.bg_color = tile_icon_source::popup_background(static_cast<lv_obj_t*>(lv_event_get_current_target(e)), data->bg_color);
+      // The popup header icon shows the tile icon's current color.
+      if (lv_obj_t* icon = tile_icon_source::card_icon(static_cast<lv_obj_t*>(lv_event_get_current_target(e)))) {
+        init.icon_color = lv_color_to_u32(lv_obj_get_style_text_color(icon, LV_PART_MAIN)) & 0xFFFFFF;
+      }
       finish_press_before_popup(e);
       show_weather_popup(init);
     };

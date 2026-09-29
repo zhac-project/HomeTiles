@@ -1,6 +1,7 @@
 #include "src/types/value/value_control.h"
 #include "src/web/server/web_admin.h"
 #include "src/web/server/web_admin_utils.h"
+#include "src/web/server/render/tile_icon_colors_html.h"
 #include <WiFi.h>
 #include <math.h>
 #include <stdlib.h>
@@ -24,6 +25,8 @@
 #include "src/devices/device.h"
 #include "src/types/clock/clock_format.h"
 #include "src/types/binary_sensor/renderer.h"
+#include "src/tiles/icons/mdi_icons.h"
+#include "src/tiles/runtime/tile_icon_disc.h"
 #include "src/types/energy/energy_data.h"
 #include "src/ui/screensaver/screensaver_config.h"
 #include "src/video/local_camera/local_camera.h"
@@ -309,9 +312,9 @@ static void appendLocalCameraSettingsHtml(String& html, const i18n::Strings& tr)
               </div>
               <div class="local-camera-group" id="local_camera_stream">
                 <div class="network-settings-heading">)html";
-  // Two columns: the live stream (mode, Custom sliders, mirror) on the left,
-  // the experimental indicator on the right, the image controls below over
-  // the full width. Narrow screens stack them (.settings-grid).
+  // Two columns: the live stream (mode, Custom sliders) on the left, the
+  // experimental indicator on the right, the collapsed Advanced block below
+  // over the full width. Narrow screens stack them (.settings-grid).
   appendHtmlEscaped(html, tr.local_camera_stream_section);
   html += R"html(</div>
                 <div>
@@ -368,14 +371,6 @@ static void appendLocalCameraSettingsHtml(String& html, const i18n::Strings& tr)
                                 local_camera_stream::kMaxQuality, custom.quality);
   html += R"html(
                 </div>
-                <label class="settings-checkbox">
-                  <input type="checkbox" id="local_camera_mirror" onchange="saveLocalCameraMirror(this.checked)")html";
-  if (local_camera::mirror()) html += " checked";
-  html += R"html(>
-                  <span>)html";
-  appendHtmlEscaped(html, tr.local_camera_mirror);
-  html += R"html(</span>
-                </label>
               </div>
               <div class="local-camera-group local-camera-indicator" id="local_camera_indicator">
                 <div class="network-settings-heading">)html";
@@ -403,6 +398,57 @@ static void appendLocalCameraSettingsHtml(String& html, const i18n::Strings& tr)
                   </label>
                 <div class="settings-note">)html";
   appendHtmlEscaped(html, tr.local_camera_indicator_note);
+  html += R"html(</div>
+              </div>
+              <details class="settings-full local-camera-advanced" id="local_camera_advanced">
+                <summary class="network-settings-heading">)html";
+  // Fine-tuning controls, collapsed by default: rotation and mirror (left),
+  // red/blue swap (right), the image controls below. Every control keeps
+  // saving immediately through /api/local-camera.
+  appendHtmlEscaped(html, tr.local_camera_advanced);
+  html += R"html(</summary>
+                <div class="settings-grid">
+              <div class="local-camera-group" id="local_camera_orientation">
+                <div>
+                <label for="local_camera_rotation">)html";
+  appendHtmlEscaped(html, tr.local_camera_rotation);
+  html += R"html(:</label>
+                <select id="local_camera_rotation" onchange="saveLocalCameraRotation(this.value)">)html";
+  const uint8_t rotation = local_camera::rotation();
+  for (uint8_t turns = 0; turns <= local_camera_contract::kRotationMax; ++turns) {
+    html += R"html(
+                  <option value=")html";
+    html += String(static_cast<unsigned>(turns));
+    html += "\"";
+    if (turns == rotation) html += " selected";
+    html += ">";
+    // Clockwise degrees: untranslated numbers.
+    html += String(static_cast<unsigned>(turns) * 90u);
+    html += "\xC2\xB0</option>";
+  }
+  html += R"html(
+                </select>
+                </div>
+                <label class="settings-checkbox">
+                  <input type="checkbox" id="local_camera_mirror" onchange="saveLocalCameraMirror(this.checked)")html";
+  if (local_camera::mirror()) html += " checked";
+  html += R"html(>
+                  <span>)html";
+  appendHtmlEscaped(html, tr.local_camera_mirror);
+  html += R"html(</span>
+                </label>
+              </div>
+              <div class="local-camera-group" id="local_camera_color">
+                <label class="settings-checkbox">
+                  <input type="checkbox" id="local_camera_rb_swap" onchange="saveLocalCameraRbSwap(this.checked)")html";
+  if (local_camera::redBlueSwap()) html += " checked";
+  html += R"html(>
+                  <span>)html";
+  appendHtmlEscaped(html, tr.local_camera_rb_swap);
+  html += R"html(</span>
+                </label>
+                <div class="settings-note">)html";
+  appendHtmlEscaped(html, tr.local_camera_rb_swap_note);
   html += R"html(</div>
               </div>
               <div class="settings-full local-camera-image" id="local_camera_image">
@@ -435,6 +481,8 @@ static void appendLocalCameraSettingsHtml(String& html, const i18n::Strings& tr)
   html += R"html(</button>
                 </div>
               </div>
+                </div>
+              </details>
             </div>
           </div>
 )html";
@@ -533,7 +581,18 @@ static void appendTileTabHTML(
       cssClass += " empty";
     }
 
-    if (tile.type != TILE_EMPTY) {
+    if (tile.type != TILE_EMPTY &&
+        tileBgColorFollowsDefault(tile.bg_color) && tile_type_follows_default_tile_color(tile.type)) {
+      // Tiles without their own color follow the global default tile color
+      // through one CSS variable, so the preview repaints them live.
+      if (screensaver_mode) {
+        tileStyle = "background:color-mix(in srgb,var(--tile-default-bg) ";
+        tileStyle += String(tile.background_opacity * 100.0f / 255.0f, 2);
+        tileStyle += "%,transparent)";
+      } else {
+        tileStyle = "background:var(--tile-default-bg)";
+      }
+    } else if (tile.type != TILE_EMPTY) {
       uint32_t bg_color = tileBgColorIsSet(tile)
                               ? tileBgColorRgb(tile)
                               : (type_desc ? type_desc->default_bg_color : 0);
@@ -576,6 +635,9 @@ static void appendTileTabHTML(
       if (span_h == 0.5f) cssClass += " sensor-half";
     }
     if (tile_geometry::compact_clock(tile.type, span_w, span_h)) cssClass += " clock-compact";
+    if (tile_geometry::compact_icon_title(tile.type, span_w, span_h)) {
+      cssClass += " sensor-compact sensor-half compact-title-only";
+    }
     html += "<div class=\"";
     html += cssClass;
     html += "\" data-index=\"";
@@ -590,6 +652,10 @@ static void appendTileTabHTML(
     html += String(span_h);
     html += "\" data-type=\"";
     html += String(static_cast<unsigned>(tile.type));
+    html += "\" data-icon-disc=\"";
+    html += String(tile.icon_disc_mode);
+    html += "\" data-icon-glow=\"";
+    html += tile.icon_glow ? "1" : "0";
     if (tile.type == TILE_FOLDER) {
       html += "\" data-navigate-target=\"";
       html += String(getNavigateTargetId(tile));
@@ -634,13 +700,26 @@ static void appendTileTabHTML(
       if (binary_sensor_preview) {
         iconName = binary_sensor_resolve_icon(tile, binary_sensor_state);
       }
+      // Scene tiles without an icon use their scene entity's icon, as on the device.
+      if (tile.type == TILE_SCENE && !iconName.length() &&
+          !isMdiIconDisabled(tile.icon_name) && tile.scene_alias.length()) {
+        const String scene_entity = haBridgeConfig.findSceneEntity(tile.scene_alias);
+        if (scene_entity.length()) {
+          iconName = normalizeMdiIconName(haBridgeConfig.findEntityIcon(scene_entity));
+        }
+      }
 
       bool hasIcon = iconName.length() > 0;
 
       if (hasIcon) {
         html += "<i class=\"mdi mdi-";
         appendHtmlEscaped(html, iconName);
-        html += " tile-icon\"";
+        html += " tile-icon";
+        if (binary_sensor_preview && tile.icon_glow &&
+            tile_icon_disc::icon_color_tints(binary_sensor_visual_color(binary_sensor_state))) {
+          html += " tile-icon-tinted";
+        }
+        html += "\"";
         if (binary_sensor_preview) {
           char color_hex[8];
           snprintf(color_hex, sizeof(color_hex), "#%06X",
@@ -775,9 +854,9 @@ static void appendTileTabHTML(
     if (hidden_icon.startsWith("mdi:")) hidden_icon.remove(0, 4);
     else if (hidden_icon.startsWith("mdi-")) hidden_icon.remove(0, 4);
     const uint32_t hidden_color =
-        snapshot.valid && snapshot.bg_color != 0
+        snapshot.valid && !tileBgColorFollowsDefault(snapshot.bg_color)
             ? (snapshot.bg_color & TILE_BG_COLOR_RGB_MASK)
-            : 0x2A2A2A;
+            : tileDefaultBgColor();
     char hidden_color_hex[8];
     snprintf(hidden_color_hex, sizeof(hidden_color_hex), "#%06X",
              static_cast<unsigned>(hidden_color));
@@ -818,38 +897,95 @@ static void appendTileTabHTML(
     html += "</div></div>";
   }
   html += R"html(          <div class="folder-footer">
-            <div class="folder-footer-options">
 )html";
-  if (screensaver_mode) {
-    html += R"html(              <label class="inline-checkbox"><input id="screensaverTileBorder" type="checkbox"> )html";
-  } else {
-    html += R"html(              <label class="inline-checkbox"><input class="normal-tile-border-toggle" type="checkbox" onchange="saveNormalTileBorders(this.checked)" )html";
-    if (configManager.getConfig().tile_borders) html += "checked";
+  const String radius_value = String(configManager.getConfig().tile_radius);
+  auto append_radius_input = [&](const String& id) {
+    html += "<input class=\"global-tile-radius\"";
+    if (id.length()) html += " id=\"" + id + "\"";
+    html += " type=\"range\" min=\"";
+    html += String(tile_radius::kMinimum);
+    html += "\" max=\"";
+    html += String(tile_radius::kMaximum);
+    html += "\" step=\"1\" value=\"";
+    html += radius_value;
+    html += "\" oninput=\"previewTileRadiusLive(this.value)\" onchange=\"saveTileRadius(this.value)\"><output class=\"global-tile-radius-value\">";
+    html += radius_value;
+    html += "</output>";
+  };
+  if (!screensaver_mode) {
+    // Global display settings in the Tile Settings style: two compact
+    // columns, checkboxes like Glow, fields with a small label above them
+    // like Column/Row, and the Color field with its reset button.
+    const DeviceConfig& display = configManager.getConfig();
+    const String borders_id = tab_id + "_global_tile_borders";
+    const String discs_id = tab_id + "_global_icon_discs";
+    const String radius_id = tab_id + "_global_tile_radius";
+    const String color_id = tab_id + "_global_tile_color";
+    const String glow_id = tab_id + "_global_icon_glow";
+    const String glow_value = String(icon_glow::clamp(display.icon_glow));
+    html += "<section class=\"global-settings-panel\"><h3>";
+    appendHtmlEscaped(html, tr.global_settings_heading);
+    html += "</h3><div class=\"global-settings-grid\"><label class=\"inline-checkbox\">"
+            "<input class=\"normal-tile-border-toggle\" id=\"" +
+            borders_id + "\" type=\"checkbox\" onchange=\"saveNormalTileBorders(this.checked)\"";
+    if (display.tile_borders) html += " checked";
     html += "> ";
-  }
-  html += tr.screensaver_tile_border;
-  html += R"html(</label>
+    appendHtmlEscaped(html, tr.screensaver_tile_border);
+    html += "</label><label class=\"inline-checkbox\"><input class=\"global-icon-disc-toggle\" id=\"" +
+            discs_id + "\" type=\"checkbox\" onchange=\"saveIconDiscs(this.checked)\"";
+    if (display.icon_discs) html += " checked";
+    html += "> ";
+    appendHtmlEscaped(html, tr.icon_discs);
+    html += "</label><div class=\"global-settings-field\"><label for=\"" + radius_id + "\">";
+    appendHtmlEscaped(html, tr.tile_radius);
+    html += "</label><div class=\"global-radius-field\">";
+    append_radius_input(radius_id);
+    html += "</div></div><div class=\"global-settings-field\"><label for=\"" + glow_id + "\">";
+    appendHtmlEscaped(html, tr.icon_glow_strength);
+    html += "</label><div class=\"global-radius-field\"><input class=\"global-icon-glow\" id=\"" + glow_id +
+            "\" type=\"range\" min=\"" + String(icon_glow::kMinimum) + "\" max=\"" +
+            String(icon_glow::kMaximum) + "\" step=\"" + String(icon_glow::kStep) + "\" value=\"" + glow_value +
+            "\" oninput=\"previewIconGlowLive(this.value)\" onchange=\"saveIconGlow(this.value)\">"
+            "<output class=\"global-icon-glow-value\">" + glow_value + " %</output>"
+            "<button type=\"button\" class=\"tile-color-reset-btn global-icon-glow-reset\" title=\"Reset\" "
+            "onclick=\"saveIconGlow(" + String(icon_glow::kDefault) + ")\"><i class=\"mdi mdi-restore\"></i></button>"
+            "</div></div>";
+    html += "<div class=\"global-settings-field\"><label for=\"" + color_id + "\">";
+    appendHtmlEscaped(html, tr.default_tile_color);
+    char default_color_hex[8];
+    snprintf(default_color_hex, sizeof(default_color_hex), "#%06X",
+             static_cast<unsigned>(tileDefaultBgColor()));
+    char factory_color_hex[8];
+    snprintf(factory_color_hex, sizeof(factory_color_hex), "#%06X",
+             static_cast<unsigned>(tile_color::kDefault));
+    html += "</label><div class=\"tile-color-row\"><input class=\"global-tile-color\" id=\"" + color_id +
+            "\" type=\"color\" value=\"";
+    html += default_color_hex;
+    html += "\" oninput=\"previewDefaultTileColor(this.value)\" "
+            "onchange=\"saveDefaultTileColor(this.value)\">"
+            "<button type=\"button\" class=\"tile-color-reset-btn\" title=\"Reset\" "
+            "onclick=\"saveDefaultTileColor('";
+    html += factory_color_hex;
+    html += "')\"><i class=\"mdi mdi-restore\"></i></button></div></div></div></section>\n";
+    html += R"html(            <p class="hint">)html";
+  } else {
+    html += R"html(            <div class="folder-footer-options">
+              <label class="inline-checkbox"><input id="screensaverTileBorder" type="checkbox"> )html";
+    html += tr.screensaver_tile_border;
+    html += R"html(</label>
 )html";
-  html += "<label class=\"tile-radius-control\"><span>";
-  appendHtmlEscaped(html, tr.tile_radius);
-  html += "</span><input class=\"global-tile-radius\" type=\"range\" min=\"";
-  html += String(tile_radius::kMinimum);
-  html += "\" max=\"";
-  html += String(tile_radius::kMaximum);
-  html += "\" step=\"1\" value=\"";
-  html += String(configManager.getConfig().tile_radius);
-  html += "\" oninput=\"previewTileRadiusLive(this.value)\" onchange=\"saveTileRadius(this.value)\"><output class=\"global-tile-radius-value\">";
-  html += String(configManager.getConfig().tile_radius);
-  html += "</output></label>";
-
-  if (screensaver_mode) {
+    html += "<label class=\"tile-radius-control\"><span>";
+    appendHtmlEscaped(html, tr.tile_radius);
+    html += "</span>";
+    append_radius_input(String());
+    html += "</label>";
     html += R"html(              <label class="inline-checkbox"><input id="screensaverTileShadow" type="checkbox"> )html";
     html += tr.screensaver_tile_shadow;
     html += R"html(</label>
 )html";
-  }
-  html += R"html(            </div>
+    html += R"html(            </div>
             <p class="hint">)html";
+  }
   if (screensaver_mode) {
     html += tr.screensaver_hint;
   } else {
@@ -1041,6 +1177,9 @@ static void appendTileTabHTML(
   html += tr.admin_tile_title_placeholder;
   html += R"html("></textarea>
 
+            <div class="tile-settings-group">)html";
+  appendHtmlEscaped(html, tr.tile_group_icon);
+  html += R"html(</div>
             <label>)html";
   html += tr.admin_icon_label;
   html += R"html(</label>
@@ -1054,8 +1193,31 @@ static void appendTileTabHTML(
   html += tr.admin_icon_list;
   html += R"html(</a>
             </div>
+)html";
+  append_tile_icon_color_fixed_html(html, tab_id);
+  html += R"html(            <div class="tile-icon-disc-fields" id=")html";
+  html += tab_id;
+  html += R"html(_tile_icon_disc_fields">
+              <label class="inline-checkbox" id=")html";
+  html += tab_id;
+  html += R"html(_tile_icon_disc_row"><input type="checkbox" id=")html";
+  html += tab_id;
+  html += R"html(_tile_icon_disc" checked> )html";
+  appendHtmlEscaped(html, tr.icon_disc_label);
+  html += R"html(</label>
+              <label class="inline-checkbox" id=")html";
+  html += tab_id;
+  html += R"html(_tile_icon_glow_row"><input type="checkbox" id=")html";
+  html += tab_id;
+  html += R"html(_tile_icon_glow" checked> )html";
+  appendHtmlEscaped(html, tr.icon_glow);
+  html += R"html(</label>
+            </div>
 
-            <div class="tile-color-label-row)html";
+            <div class="tile-settings-group">)html";
+  appendHtmlEscaped(html, tr.tile_group_tile);
+  html += R"html(</div>
+            <div class="tile-color-label-row no-reset)html";
   if (screensaver_mode) html += " has-opacity";
   html += R"html("><span>)html";
   html += tr.admin_color;
@@ -1063,12 +1225,41 @@ static void appendTileTabHTML(
   if (screensaver_mode) {
     html += R"html(<span>)html";
     html += tr.screensaver_background_opacity;
-    html += R"html(</span><span aria-hidden="true"></span>)html";
+    html += R"html(</span>)html";
   }
   html += R"html(</div>
-            <div class="tile-color-row)html";
+            <div class="icon-color-segmented tile-color-modes" role="group" id=")html";
+  html += tab_id;
+  html += R"html(_tile_color_modes">)html";
+  // Tile color is one choice: the global tile color, an own color, or a tint
+  // that follows the icon color (only for tiles with icon colors).
+  const struct {
+    const char* mode;
+    const char* label;
+  } tile_color_modes[] = {{"global", tr.tile_color_mode_global},
+                          {"custom", tr.tile_color_mode_custom},
+                          {"icon", tr.tile_color_mode_from_icon}};
+  for (const auto& entry : tile_color_modes) {
+    html += R"html(<button type="button" id=")html";
+    html += tab_id;
+    html += "_tile_color_mode_";
+    html += entry.mode;
+    html += R"html(" data-tile-color-mode=")html";
+    html += entry.mode;
+    html += R"html(" onclick="setTileColorMode(')html";
+    html += tab_id;
+    html += "', '";
+    html += entry.mode;
+    html += R"html(')">)html";
+    appendHtmlEscaped(html, entry.label);
+    html += "</button>";
+  }
+  html += R"html(</div>
+            <div class="tile-color-row no-reset)html";
   if (screensaver_mode) html += " has-opacity";
-  html += R"html(">
+  html += R"html(" id=")html";
+  html += tab_id;
+  html += R"html(_tile_color_row">
             <input type="color" id=")html";
   html += tab_id;
   html += R"html(_tile_color" value="#2A2A2A">
@@ -1077,10 +1268,10 @@ static void appendTileTabHTML(
     html += R"html(              <input type="range" id="screensaver_tile_opacity" min="0" max="255" step="1" value="0">
 )html";
   }
-  html += R"html(              <button type="button" class="tile-color-reset-btn" title="Reset" onclick="resetTileColor(')html";
-  html += tab_id;
-  html += R"html(')"><i class="mdi mdi-restore"></i></button>
-            </div>
+  html += R"html(            </div>
+)html";
+  append_tile_color_from_icon_html(html, tab_id);
+  html += R"html(
 
             <div class="tile-layout">
               <div class="layout-field">
@@ -1394,6 +1585,9 @@ String WebAdminServer::getAdminPage() {
   html.reserve(192 * 1024);
   html += "<!DOCTYPE html>\n<html lang=\"";
   html += tr.html_lang;
+  // The global icon disc option is a root class, so every preview grid,
+  // including lazily inserted folders, follows it without re-rendering.
+  if (!configManager.getConfig().icon_discs) html += "\" class=\"icon-discs-off";
   html += R"html(">
 <head>
   <meta charset="utf-8">

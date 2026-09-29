@@ -25,9 +25,11 @@ using namespace web_admin_handlers;
 namespace {
 
 static String dynamicMqttEntityForTile(const Tile& tile) {
-  if (!tileTypeHasDynamicMqttRoute(tile.type)) return "";
-  String entity = tile.sensor_entity;
+  // The tile's own route plus the other entity of its rules.
+  String entity = tileTypeHasDynamicMqttRoute(tile.type) ? tile.sensor_entity : String();
   entity.trim();
+  const String rule_entity = tileIconSourceEntity(tile.type, tile.icon_colors);
+  if (rule_entity.length()) entity += "|" + rule_entity;
   return entity;
 }
 
@@ -278,7 +280,7 @@ static bool applySmartReorder(
     const float preferred_col = (displaced_index == displaced_indices.front()) ? from_col : grid.tiles[displaced_index].col;
     const float preferred_row = (displaced_index == displaced_indices.front()) ? from_row : grid.tiles[displaced_index].row;
     const TileType displaced_type = grid.tiles[displaced_index].type;
-    const float step = fractional_grid && displaced_type != TILE_SETTINGS && displaced_type != TILE_BACK ? 0.5f : 1.0f;
+    const float step = fractional_grid && displaced_type != TILE_BACK ? 0.5f : 1.0f;
     if (findPlacementForTile(grid, displaced_index, preferred_col, preferred_row,
                              floating_indices, first_row, step)) {
       continue;
@@ -349,7 +351,14 @@ void WebAdminServer::handleGetTiles() {
     return;
   }
 
-  TileGridConfig grid{};
+  // A full folder grid is too large for the WebServer/loop task stack; keep
+  // it on the heap (saving no longer adds a second copy, see saveGridInPlace).
+  std::unique_ptr<TileGridConfig> grid_storage(new (std::nothrow) TileGridConfig{});
+  if (!grid_storage) {
+    server.send(500, "application/json", "{\"success\":false,\"error\":\"No memory\"}");
+    return;
+  }
+  TileGridConfig& grid = *grid_storage;
   bool loaded = true;
   if (screensaver_grid) {
     grid = screensaverConfig.tileGrid();
@@ -368,7 +377,14 @@ void WebAdminServer::handleGetTiles() {
     appendJsonEscaped(out, tile.title);
     out += "\",\"icon_name\":\"";
     appendJsonEscaped(out, tile.icon_name);
-    out += "\",\"bg_color\":";
+    out += "\",\"icon_disc\":";
+    out += String(tile.icon_disc_mode);
+    out += ",\"icon_glow\":";
+    out += tile.icon_glow ? "1" : "0";
+    out += ",\"icon_colors\":\"";
+    appendJsonEscaped(out, tile.icon_colors);
+    out += "\"";
+    out += ",\"bg_color\":";
     out += String(tile.bg_color);
     out += ",\"background_opacity\":";
     out += String(tile.background_opacity);
@@ -584,10 +600,20 @@ void WebAdminServer::handleSaveTiles() {
 
   // Update tile data
   if (tile.type != static_cast<TileType>(type)) tile.view_id = 0;
-  if (tile.type != static_cast<TileType>(type) && (type == TILE_CLOCK || type == TILE_TEXT)) tile.sensor_display_mode = 0;
+  if (tile.type != static_cast<TileType>(type) && (type == TILE_CLOCK || type == TILE_TEXT || type == TILE_BACK)) tile.sensor_display_mode = 0;
   tile.type = static_cast<TileType>(type);
   tile.title = hometiles_title::normalize(server.hasArg("title") ? server.arg("title").c_str() : "").c_str();
   tile.icon_name = server.hasArg("icon_name") ? server.arg("icon_name") : "";
+  // Partial requests keep the stored disc override.
+  if (server.hasArg("icon_disc")) {
+    tile.icon_disc_mode = normalizeTileIconDiscMode(server.arg("icon_disc").toInt());
+  }
+  if (server.hasArg("icon_glow")) tile.icon_glow = server.arg("icon_glow").toInt() != 0;
+  // Icon colors: partial requests keep the stored record; the record is
+  // normalized (clamped, unknown lines dropped) and cleared for types
+  // without icon colors.
+  if (server.hasArg("icon_colors")) tile.icon_colors = server.arg("icon_colors");
+  tile.icon_colors = normalizeTileIconColors(tile.type, tile.icon_colors.c_str());
   // Parse color. bg_color_default keeps legacy/default tiles as true defaults;
   // bg_color=0 is reserved for an explicitly selected black background.
   if (server.hasArg("bg_color_default") && server.arg("bg_color_default").toInt() != 0) {
@@ -764,7 +790,14 @@ void WebAdminServer::handleReorderTiles() {
     return;
   }
 
-  TileGridConfig grid{};
+  // A full folder grid is too large for the WebServer/loop task stack; keep
+  // it on the heap (saving no longer adds a second copy, see saveGridInPlace).
+  std::unique_ptr<TileGridConfig> grid_storage(new (std::nothrow) TileGridConfig{});
+  if (!grid_storage) {
+    server.send(500, "application/json", "{\"success\":false,\"error\":\"No memory\"}");
+    return;
+  }
+  TileGridConfig& grid = *grid_storage;
   // Abort rather than overwrite the whole folder if the current grid can't be loaded.
   bool grid_loaded = true;
   if (screensaver_grid) {
@@ -922,6 +955,21 @@ void WebAdminServer::handleGetSensorValues() {
     appendJsonEscaped(json, id);
     json += "\":\"";
     appendJsonEscaped(json, unit);
+    json += '"';
+  }
+  json += "}";
+  // Scene tiles store an alias; the device resolves its entity (and the
+  // entity's icon) through the bridge scene list. The preview needs the same
+  // alias -> entity map to show the scene's Home Assistant icon.
+  json += ",\"scene_entities\":{";
+  bool first_scene = true;
+  for (const auto& scene : parseSceneList(ha.scene_alias_text)) {
+    if (!first_scene) json += ',';
+    first_scene = false;
+    json += '"';
+    appendJsonEscaped(json, scene.alias);
+    json += "\":\"";
+    appendJsonEscaped(json, scene.entity);
     json += '"';
   }
   json += "}";
@@ -1238,8 +1286,9 @@ void WebAdminServer::handleDeleteFolder() {
 
   // Find parent folder and clear the tile that references this folder
   uint16_t parent_id = tileConfig.getFolderParent(folder_id);
-  TileGridConfig parent_grid{};
-  if (tileConfig.loadFolderGrid(parent_id, parent_grid)) {
+  std::unique_ptr<TileGridConfig> parent_storage(new (std::nothrow) TileGridConfig{});
+  if (parent_storage && tileConfig.loadFolderGrid(parent_id, *parent_storage)) {
+    TileGridConfig& parent_grid = *parent_storage;
     for (size_t i = 0; i < TILES_PER_GRID; ++i) {
       Tile& t = parent_grid.tiles[i];
       if (t.type == TILE_FOLDER) {

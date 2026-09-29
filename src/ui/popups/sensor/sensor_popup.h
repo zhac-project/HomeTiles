@@ -19,6 +19,13 @@ struct SensorPopupInit {
   uint64_t binary_last_changed = 0;
   bool binary_available = true;
   bool binary_icon_override = false;
+  // The tile's per-tile icon colors (tile_icon_colors.h): the header icon
+  // takes the same color as the tile icon for the current state.
+  String icon_colors;
+  // Rules that force the tile icon color (another entity, entity color):
+  // the header shows the tile icon's color from the opening.
+  bool forced_icon = false;
+  uint32_t forced_icon_color = 0xFFFFFF;
 };
 
 // Ordinary HA sensors with textual states use the same discrete history view
@@ -30,6 +37,7 @@ bool sensor_popup_should_use_state_history(const String& value,
 void show_sensor_popup(const SensorPopupInit& init);
 void preload_sensor_popup();
 void hide_sensor_popup();
+void sensor_popup_follow_tile_color(uint32_t color);
 
 // Main-loop queue helpers for state/history dispatched from inbound MQTT.
 // These shared pending values are not synchronized for worker-task access.

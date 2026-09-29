@@ -38,7 +38,7 @@
 
   function normalizeSensorValueFont(value) {
     const v = String(value || '0');
-    return (['1','2','3','4'].includes(v)) ? v : '0';
+    return (['1','2','3','4','5'].includes(v)) ? v : '0';
   }
 
   function getSensorValueFontClass(value) {
@@ -78,6 +78,7 @@
   }
 
   function loadSensorFields(tab, data) {
+    loadIconColorFields(tab, data);
     const prefix = tab;
     const entityEl = document.getElementById(prefix + '_sensor_entity');
     if (entityEl) entityEl.value = data.sensor_entity || '';
@@ -106,9 +107,13 @@
     const graphHeightEl = document.getElementById(prefix + '_sensor_graph_height');
     if (graphHeightEl) graphHeightEl.value = (data.sensor_graph_height !== undefined && data.sensor_graph_height !== null) ? String(data.sensor_graph_height) : '';
     syncGaugeUi(tab);
+    // The entity is known now: numeric states show the color bar, text
+    // states the state list.
+    syncIconColorFields(tab);
   }
 
   function saveSensorFields(tab, formData) {
+    saveIconColorFields(tab, formData);
     const prefix = tab;
     formData.append('sensor_entity', document.getElementById(prefix + '_sensor_entity')?.value || '');
     formData.append('sensor_unit', document.getElementById(prefix + '_sensor_unit')?.value || '');
@@ -126,6 +131,7 @@
   }
 
   function resetSensorFields(tab) {
+    resetIconColorFields(tab);
     const prefix = tab;
     const entityEl = document.getElementById(prefix + '_sensor_entity');
     if (entityEl) entityEl.value = '';

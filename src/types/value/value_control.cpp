@@ -1,5 +1,7 @@
 #include "src/ui/shared/ui_surface_style.h"
 #include "src/types/value/value_control.h"
+#include "src/tiles/runtime/tile_icon_color_rules.h"
+#include "src/ui/tabs/tiles/tab_tiles_unified.h"
 #include <ArduinoJson.h>
 #include <algorithm>
 #include <cmath>
@@ -139,8 +141,17 @@ void refresh_editable_tile(GridType grid, uint8_t index) {
   SensorTileWidgets* widgets = tile_renderer_get_sensor_widgets(grid);
   if (!widgets || !widgets[index].value_label) return;
   const EditableValue value = parse_editable_value(haBridgeConfig.findEditableValue(tile->sensor_entity));
+  const String display = editable_display_value(value);
   lv_label_set_long_mode(widgets[index].value_label, LV_LABEL_LONG_DOT);
-  lv_label_set_text(widgets[index].value_label, editable_display_value(value).c_str());
+  lv_label_set_text(widgets[index].value_label, display.c_str());
+  // Per-tile icon colors: Number uses the color bar on the raw number; Select
+  // and Date/Time state colors match the raw state or its displayed text.
+  if (widgets[index].icon_label && tile->icon_colors.length()) {
+    const bool known = value.valid && value.has_state && value.available && value.state != "unknown";
+    tiles_request_rule_refresh(grid, index);
+    tile_icon_color_rules::apply(widgets[index].icon_label, tile->icon_colors.c_str(), known,
+                                 value.state.c_str(), display.c_str(), lv_color_white());
+  }
 }
 
 void queue_editable_value(const String& entity, const char* payload) {
@@ -602,6 +613,12 @@ void apply_control_colors(EditableControl* c) {
   c->colors = editable_colors::from(base);
   c->colors_initialized = true;
   editable_colors::dropdown(c->dropdown, c->colors);
+  // The white Apply button cuts its label out in the card color; pressed is
+  // the white mixed toward the card (0xBBBBBB on the default 0x2A2A2A card).
+  if (c->apply) {
+    lv_obj_set_style_text_color(c->apply, base, 0);
+    lv_obj_set_style_bg_color(c->apply, lv_color_mix(base, lv_color_white(), 81), LV_STATE_PRESSED);
+  }
   editable_colors::surface(c->number_box, c->colors.raised);
   editable_colors::surface(c->clock_box, c->colors.raised);
   for (auto& field : c->fields) {
@@ -796,6 +813,8 @@ void editable_control_open(EditableControl* c, const String& entity) {
 
 void editable_control_refresh(EditableControl* c) {
   if (!c || !c->active) return;
+  // The card follows its tile's color while open; only a change restyles.
+  apply_control_colors(c);
   const bool online = networkManager.isMqttConnected();
   if (!online && c->online) { finish_editing(c); c->dragging = false; lv_dropdown_close(c->dropdown); c->payload = "\x01"; }
   if (c->command_id.length() && (!online || millis() - c->command_ms >= 30000)) {

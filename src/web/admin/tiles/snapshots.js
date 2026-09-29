@@ -1,12 +1,67 @@
 
+  // Per-tile icon disc options are common to every type with an icon, so
+  // they travel with the type fields through drafts, copy/paste and saves.
+  function tileTypeHasIcon(typeValue) {
+    return !['0', '16'].includes(String(typeValue ?? '0'));
+  }
+  // Glow only matters where the icon can take a color: from its entity
+  // (switch/light, climate, cover, binary sensor), from the color bar or
+  // state colors (sensor family, energy) or from a fixed icon color (scene,
+  // folder, back, camera). Other icons are always white.
+  function tileTypeHasColoredIcon(typeValue) {
+    return ['1', '2', '4', '5', '8', '12', '14', '15', '17', '18', '19', '20', '21', '22', '23']
+      .includes(String(typeValue ?? '0'));
+  }
+  // Stored disc mode: 0 follows the global option, 2 hides the disc on this
+  // tile. A legacy stored 1 ("on") loads as checked.
+  function iconDiscModeFromCheckbox(box) {
+    return box?.checked === false ? '2' : '0';
+  }
+  // Like the per-tile Tile borders option, only Back, Clock and Text can hide
+  // their own icon disc; every other tile follows the global option.
+  function tileTypeHasDiscToggle(typeValue) {
+    return ['8', '9', '10'].includes(String(typeValue ?? '0'));
+  }
+  function collectIconDiscFields(tab, typeValue) {
+    const box = document.getElementById(tab + '_tile_icon_disc');
+    if (!box || !tileTypeHasIcon(typeValue)) return {};
+    const glow = document.getElementById(tab + '_tile_icon_glow');
+    return {
+      icon_disc: tileTypeHasDiscToggle(typeValue) ? iconDiscModeFromCheckbox(box) : '0',
+      icon_glow: tileTypeHasColoredIcon(typeValue) && glow?.checked === false ? '0' : '1',
+    };
+  }
+  function loadIconDiscFields(tab, data) {
+    const box = document.getElementById(tab + '_tile_icon_disc');
+    if (box) box.checked = String(data?.icon_disc) !== '2';
+    const glow = document.getElementById(tab + '_tile_icon_glow');
+    if (glow) glow.checked = !['0', 'false'].includes(String(data?.icon_glow));
+    syncIconDiscFields(tab);
+  }
+  function resetIconDiscFields(tab) {
+    const box = document.getElementById(tab + '_tile_icon_disc');
+    if (box) box.checked = true;
+    const glow = document.getElementById(tab + '_tile_icon_glow');
+    if (glow) glow.checked = true;
+  }
+  function syncIconDiscFields(tab) {
+    const typeValue = document.getElementById(tab + '_tile_type')?.value || '0';
+    const discToggle = tileTypeHasDiscToggle(typeValue);
+    const colored = tileTypeHasColoredIcon(typeValue);
+    document.getElementById(tab + '_tile_icon_disc_fields')
+      ?.classList.toggle('hidden', !tileTypeHasIcon(typeValue) || (!discToggle && !colored));
+    document.getElementById(tab + '_tile_icon_disc_row')?.classList.toggle('hidden', !discToggle);
+    document.getElementById(tab + '_tile_icon_glow_row')?.classList.toggle('hidden', !colored);
+  }
+
   function collectTypeFieldValues(tab) {
     const prefix = tab;
     const typeValue = document.getElementById(prefix + '_tile_type')?.value || '0';
     const meta = getTileTypeMeta(typeValue);
-    if (!meta.save) return {};
+    const out = collectIconDiscFields(prefix, typeValue);
+    if (!meta.save) return out;
     const fd = new FormData();
     callTypeHandler(meta, 'save', prefix, fd);
-    const out = {};
     for (const [key, value] of fd.entries()) {
       out[key] = value;
     }
@@ -64,7 +119,7 @@
     const prev = tiles[index] || {};
     const tile = Object.assign({}, prev);
     const layout = normalizeSnapshotLayout(snapshot, index, tab);
-    const numericFields = ['type', 'sensor_decimals', 'sensor_value_font', 'sensor_display_mode', 'sensor_gauge_min', 'sensor_gauge_max', 'switch_style', 'navigate_target', 'popup_open_mode', 'key_code', 'key_modifier', 'background_opacity'];
+    const numericFields = ['type', 'sensor_decimals', 'sensor_value_font', 'sensor_display_mode', 'sensor_gauge_min', 'sensor_gauge_max', 'switch_style', 'navigate_target', 'popup_open_mode', 'key_code', 'key_modifier', 'background_opacity', 'icon_disc', 'icon_glow'];
 
     tile.type = clampInt(snapshot?.type, 0, 255, Number(prev.type) || 0);
     tile.title = snapshot?.title || '';
@@ -135,7 +190,7 @@
       tile.sensor_gauge_max = Number.isFinite(num) ? num : 100;
     }
 
-    if ([9,10].includes(Number(tile.type)) && snapshot?.tile_border !== undefined) {
+    if ([8,9,10].includes(Number(tile.type)) && snapshot?.tile_border !== undefined) {
       tile.sensor_display_mode = ['0','false'].includes(String(snapshot.tile_border)) ? 1 : 0;
     }
     tiles[index] = tile;

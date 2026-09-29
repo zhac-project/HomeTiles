@@ -683,6 +683,13 @@ void setup() {
   log_memory_status("after-nvs");
   Serial.flush();
 
+  // Tile renderer state lives in PSRAM (PSRAM is ready only after the global
+  // constructors) and must exist before the UI task and the MQTT worker.
+  if (!tile_renderer_init_cold_storage()) {
+    Serial.println("[Setup] Tile state storage FAILED!");
+    while(1) delay(1000);
+  }
+
   Serial.println("[Setup] Loading configs...");
   Serial.flush();
   bool has_config = configManager.load();
@@ -1058,6 +1065,9 @@ void loop() {
       Serial.flush();
     }
     yield();
+    // This branch returns before the normal loop's process_popup_open();
+    // without it, a popup opened during AP mode never gets its content.
+    process_popup_open();
     sync_popup_shell();
     lv_timer_handler();
     yield();

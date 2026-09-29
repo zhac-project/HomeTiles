@@ -6,6 +6,7 @@
 #include "src/tiles/runtime/tile_renderer_shared.h"
 #include "src/tiles/config/tile_geometry.h"
 #include "src/tiles/runtime/tile_renderer_fonts.h"
+#include "src/tiles/runtime/tile_icon_disc.h"
 #include "src/tiles/icons/mdi_icons.h"
 #include "src/fonts/ui_fonts.h"
 #include "src/ui/screensaver/image_screensaver.h"
@@ -481,7 +482,7 @@ lv_obj_t* render_clock_tile(lv_obj_t* parent, int col, int row, const Tile& tile
   ui_surface_style::apply_radius(card, tile_layout::scale_480(22), 0);
   lv_obj_set_style_border_width(card, 0, 0);
 
-  uint32_t card_color = tileBgColorOrDefault(tile, 0x2A2A2A);
+  uint32_t card_color = tileBgColorOrDefault(tile, tileDefaultBgColor());
   lv_obj_set_style_bg_color(card, lv_color_hex(card_color), LV_PART_MAIN | LV_STATE_DEFAULT);
 lv_obj_set_style_bg_grad_color(card, lv_color_hex(card_color), LV_PART_MAIN | LV_STATE_DEFAULT);
 lv_obj_set_style_bg_grad_dir(card, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -512,6 +513,7 @@ lv_obj_set_style_bg_grad_dir(card, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_PRE
     iconChar = getMdiChar(tile.icon_name);
   }
   const bool has_icon = iconChar.length() > 0;
+  lv_obj_t* header_icon = nullptr;
   if (has_icon) {
     lv_obj_t* icon_lbl = lv_label_create(card);
     if (icon_lbl) {
@@ -520,6 +522,7 @@ lv_obj_set_style_bg_grad_dir(card, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_PRE
       lv_obj_align(icon_lbl, LV_ALIGN_TOP_RIGHT,
                    tile_layout::scale_480(4),
                    tile_layout::scale_480(-8));
+      header_icon = icon_lbl;
     }
   }
 
@@ -535,6 +538,8 @@ lv_obj_set_style_bg_grad_dir(card, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_PRE
                    tile_layout::scale_480(4));
     }
   }
+  // After the title exists, so the disc can lift the whole header.
+  if (header_icon) tile_icon_disc::add_round(card, header_icon);
 
   uint8_t flags = get_clock_flags(tile);
   const bool show_time = (flags & 1) != 0;

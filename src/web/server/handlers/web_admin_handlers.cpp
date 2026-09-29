@@ -8,9 +8,11 @@
 #include "src/network/mqtt/mqtt_handlers.h"
 #include "src/ui/tabs/settings/tab_settings.h"
 #include "src/tiles/config/tile_config.h"
+#include "src/tiles/config/tile_geometry.h"
 #include "src/ui/tabs/tiles/tab_tiles_unified.h"
 #include "src/ui/ui_manager.h"
 #include "src/ui/shared/ui_surface_style.h"
+#include "src/ui/screensaver/image_screensaver.h"
 #include "src/types/clock/clock_format.h"
 #include "src/web/server/web_admin_utils.h"
 #include <stdlib.h>
@@ -57,7 +59,10 @@ void WebAdminServer::handleSaveMQTT() {
     strncpy(cfg.mqtt_base_topic, "hometiles", CONFIG_MQTT_BASE_MAX - 1);
     strncpy(cfg.ha_prefix, "ha/statestream", CONFIG_HA_PREFIX_MAX - 1);
     cfg.tile_borders = true;
-    cfg.tile_radius = tile_radius::kMinimum;
+    cfg.tile_radius = tile_radius::kDefault;
+    cfg.icon_discs = true;
+    cfg.icon_glow = icon_glow::kDefault;
+    cfg.default_tile_color = tile_color::kDefault;
   }
   const DeviceConfig previous_cfg = cfg;
 
@@ -223,8 +228,8 @@ void WebAdminServer::handleSaveMQTT() {
   bool settings_visibility_changed = false;
   bool settings_visibility_commit_needed = false;
   bool settings_gesture_changed = false;
-  int settings_tile_target_col = -1;
-  int settings_tile_target_row = -1;
+  float settings_tile_target_col = -1;
+  float settings_tile_target_row = -1;
   if (server.hasArg("settings_access_present")) {
     const auto& tr = i18n::strings(cfg.language);
     const bool enable_pin = server.hasArg("settings_pin_enabled");
@@ -237,19 +242,27 @@ void WebAdminServer::handleSaveMQTT() {
 
     const bool has_target_col = server.hasArg("settings_tile_target_col");
     const bool has_target_row = server.hasArg("settings_tile_target_row");
+    auto parse_bounded_arg = [&](const char* name, float minimum,
+                                 float maximum, float& out) {
+      String value = server.arg(name);
+      value.trim();
+      char* end = nullptr;
+      const float parsed = strtof(value.c_str(), &end);
+      if (end == value.c_str() || *end != '\0' ||
+          !tile_geometry::half_step(parsed) || parsed < minimum ||
+          parsed > maximum) return false;
+      out = parsed;
+      return true;
+    };
     if (has_target_col != has_target_row) {
       sendSaveError(400, tr.save_failed);
       return;
     }
     if (has_target_col) {
-      settings_tile_target_col =
-          server.arg("settings_tile_target_col").toInt();
-      settings_tile_target_row =
-          server.arg("settings_tile_target_row").toInt();
-      if (settings_tile_target_col < 0 ||
-          settings_tile_target_col >= GRID_COLS ||
-          settings_tile_target_row < 0 ||
-          settings_tile_target_row >= GRID_ROWS) {
+      if (!parse_bounded_arg("settings_tile_target_col", 0, GRID_COLS - 1,
+                             settings_tile_target_col) ||
+          !parse_bounded_arg("settings_tile_target_row", 0, GRID_ROWS - 0.5f,
+                             settings_tile_target_row)) {
         sendSaveError(400, tr.save_failed);
         return;
       }
@@ -293,14 +306,12 @@ void WebAdminServer::handleSaveMQTT() {
       snapshot.col = settings_tile.col;
       snapshot.row = settings_tile.row;
       snapshot.span_w = settings_tile.span_w < 1 ? 1 : settings_tile.span_w;
-      snapshot.span_h = settings_tile.span_h < 1 ? 1 : settings_tile.span_h;
+      snapshot.span_h = settings_tile.span_h < 0.5f ? 1 : settings_tile.span_h;
     }
     if (!hide_tile && previous_cfg.settings_tile_hidden &&
         settings_tile_target_col >= 0 && cfg.settings_tile_snapshot.valid) {
-      cfg.settings_tile_snapshot.col =
-          static_cast<uint8_t>(settings_tile_target_col);
-      cfg.settings_tile_snapshot.row =
-          static_cast<uint8_t>(settings_tile_target_row);
+      cfg.settings_tile_snapshot.col = settings_tile_target_col;
+      cfg.settings_tile_snapshot.row = settings_tile_target_row;
     }
     if (server.hasArg("settings_tile_snapshot_present")) {
       if (!(hide_tile || previous_cfg.settings_tile_hidden) ||
@@ -339,41 +350,27 @@ void WebAdminServer::handleSaveMQTT() {
         return;
       }
       if (has_complete_snapshot_layout) {
-        auto parse_bounded_arg = [&](const char* name, int minimum,
-                                     int maximum, int& out) {
-          String value = server.arg(name);
-          value.trim();
-          if (!value.length()) return false;
-          char* end = nullptr;
-          const long parsed = strtol(value.c_str(), &end, 10);
-          if (end == value.c_str() || *end != '\0' || parsed < minimum ||
-              parsed > maximum) {
-            return false;
-          }
-          out = static_cast<int>(parsed);
-          return true;
-        };
-        int snapshot_col = 0;
-        int snapshot_row = 0;
-        int snapshot_span_w = 1;
-        int snapshot_span_h = 1;
+        float snapshot_col = 0;
+        float snapshot_row = 0;
+        float snapshot_span_w = 1;
+        float snapshot_span_h = 1;
         if (!parse_bounded_arg("settings_tile_col", 0, GRID_COLS - 1,
                                snapshot_col) ||
-            !parse_bounded_arg("settings_tile_row", 0, GRID_ROWS - 1,
+            !parse_bounded_arg("settings_tile_row", 0, GRID_ROWS - 0.5f,
                                snapshot_row) ||
             !parse_bounded_arg("settings_tile_span_w", 1, GRID_COLS,
                                snapshot_span_w) ||
-            !parse_bounded_arg("settings_tile_span_h", 1, GRID_ROWS,
+            !parse_bounded_arg("settings_tile_span_h", 0.5f, GRID_ROWS,
                                snapshot_span_h) ||
             snapshot_col + snapshot_span_w > GRID_COLS ||
             snapshot_row + snapshot_span_h > GRID_ROWS) {
           sendSaveError(400, tr.save_failed);
           return;
         }
-        snapshot.col = static_cast<uint8_t>(snapshot_col);
-        snapshot.row = static_cast<uint8_t>(snapshot_row);
-        snapshot.span_w = static_cast<uint8_t>(snapshot_span_w);
-        snapshot.span_h = static_cast<uint8_t>(snapshot_span_h);
+        snapshot.col = snapshot_col;
+        snapshot.row = snapshot_row;
+        snapshot.span_w = snapshot_span_w;
+        snapshot.span_h = snapshot_span_h;
       }
     }
     cfg.settings_tile_hidden = hide_tile;
@@ -674,6 +671,82 @@ void WebAdminServer::handleTileRadius() {
   }
   server.send(200, "application/json",
       String("{\"success\":true,\"radius\":") + configManager.getConfig().tile_radius + "}");
+}
+
+void WebAdminServer::handleSaveIconDiscs() {
+  webAdminMarkActivity();
+  if (!server.hasArg("enabled")) {
+    sendJsonError(server, 400, "Missing enabled value");
+    return;
+  }
+  String value = server.arg("enabled");
+  value.trim();
+  value.toLowerCase();
+  const bool enabled = value == "1" || value == "true" || value == "on";
+  if (!configManager.saveIconDiscs(enabled)) {
+    sendJsonError(server, 500, "Could not save icon discs");
+    return;
+  }
+  // Shared disc styles update every grid, including cached and screensaver
+  // tiles, on the next safe UI pass. This handler does not touch LVGL.
+  ui_surface_style::request_icon_disc_refresh();
+  server.send(200, "application/json",
+              enabled ? "{\"success\":true,\"enabled\":true}"
+                      : "{\"success\":true,\"enabled\":false}");
+}
+
+void WebAdminServer::handleSaveIconGlow() {
+  webAdminMarkActivity();
+  const String value = server.arg("percent");
+  bool valid = value.length() > 0 && value.length() <= 3;
+  for (size_t i = 0; i < value.length(); ++i)
+    valid = valid && value[i] >= '0' && value[i] <= '9';
+  const long percent = value.toInt();
+  if (!valid || percent < icon_glow::kMinimum || percent > icon_glow::kMaximum) {
+    sendJsonError(server, 400, "Invalid icon glow");
+    return;
+  }
+  if (!configManager.saveIconGlow(static_cast<uint8_t>(percent))) {
+    sendJsonError(server, 500, "Could not save icon glow");
+    return;
+  }
+  // Every disc takes the new strength through the shared disc styles; tiles
+  // are rebuilt like a default tile color change and popups use it on their
+  // next sync. These calls only set flags for the UI loop.
+  ui_surface_style::request_icon_disc_refresh();
+  tiles_invalidate_folder(tileConfig.rootFolderId());
+  tiles_request_reload_all();
+  image_screensaver_tiles_changed();
+  server.send(200, "application/json",
+              String("{\"success\":true,\"percent\":") + static_cast<int>(configManager.getConfig().icon_glow) + "}");
+}
+
+void WebAdminServer::handleSaveDefaultTileColor() {
+  webAdminMarkActivity();
+  // Accepts "#RRGGBB" from the color picker.
+  String value = server.arg("color");
+  value.trim();
+  bool valid = value.length() == 7 && value[0] == '#';
+  for (size_t i = 1; valid && i < value.length(); ++i) valid = isxdigit(value[i]);
+  if (!valid) {
+    sendJsonError(server, 400, "Invalid tile color");
+    return;
+  }
+  const uint32_t rgb = static_cast<uint32_t>(strtoul(value.c_str() + 1, nullptr, 16));
+  if (!configManager.saveDefaultTileColor(rgb)) {
+    sendJsonError(server, 500, "Could not save tile color");
+    return;
+  }
+  // Tiles without their own color use the new default: the visible grid
+  // reloads, cached folder grids rebuild when opened and the screensaver
+  // grid refreshes. These calls only set flags for the UI loop.
+  tiles_invalidate_folder(tileConfig.rootFolderId());
+  tiles_request_reload_all();
+  image_screensaver_tiles_changed();
+  char response[48];
+  snprintf(response, sizeof(response), "{\"success\":true,\"color\":\"#%06X\"}",
+           static_cast<unsigned>(configManager.getConfig().default_tile_color));
+  server.send(200, "application/json", response);
 }
 
 void WebAdminServer::handleSaveTileBorders() {

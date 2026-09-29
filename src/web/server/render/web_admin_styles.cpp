@@ -5,6 +5,7 @@
 #include "src/types/climate/layout.h"
 #include "src/tiles/config/tile_config.h"
 #include "src/tiles/runtime/tile_renderer_fonts.h"
+#include "src/tiles/icons/mdi_icons.h"
 
 namespace {
 
@@ -94,6 +95,17 @@ void appendPreviewScaleVars(String& html) {
   };
   html += "  <style>:root{";
   emit_exact("compact-inset", compact_sensor_layout::inset());
+  emit_exact("icon-disc-round", tile_icon_disc::round_diameter());
+  // Disc opacities shared with the device (the global Glow strength, which
+  // applyIconDiscTint reads from --icon-glow-pct).
+  const uint8_t glow = icon_glow::clamp(configManager.getConfig().icon_glow);
+  html += "--icon-disc-opa:";
+  html += String(icon_glow::neutral_opa(glow) / 255.0f, 3);
+  html += ";--icon-disc-glow:";
+  html += String(icon_glow::disc_opa(glow) * 100.0f / 255.0f, 1);
+  html += "%;--icon-glow-pct:";
+  html += String(glow);
+  html += ";";
   emit_exact("compact-text-gap", compact_sensor_layout::text_gap());
   emit_exact("compact-title-font", compact_sensor_layout::title_size());
   emit_exact("compact-title-line", compact_sensor_layout::title_font()->line_height);
@@ -103,6 +115,11 @@ void appendPreviewScaleVars(String& html) {
   emit_exact("compact-value-line-24", tile_layout::content_font_24()->line_height);
   emit_exact("compact-value-line-32", tile_layout::content_font_32()->line_height);
   emit_exact("compact-value-line-40", tile_layout::content_font_40()->line_height);
+  // Chosen half-height value sizes (compact_sensor_layout::value_font).
+  emit_exact("compact-value-font-24", compact_sensor_layout::value_size(2));
+  emit_exact("compact-value-line-step-24", compact_sensor_layout::value_font(2)->line_height);
+  emit_exact("compact-value-font-28", compact_sensor_layout::value_size(5));
+  emit_exact("compact-value-line-step-28", compact_sensor_layout::value_font(5)->line_height);
 
 #if defined(DEVICE_LAYOUT_1024X600)
   // Match the compact layout's real LVGL font substitutions. The preview
@@ -194,10 +211,19 @@ void appendPreviewScaleVars(String& html) {
 #endif
   emit("tile-pad-v", climate_layout::kCardPaddingVertical);
   emit("tile-pad-h", climate_layout::kCardPaddingHorizontal);
-  emit_exact("tile-header-title-top", tile_layout::scale_480(24) + tile_layout::scale_480(4));
+  // The device places a corner header's disc in the tile corner like the
+  // half-height disc and centers the icon in it; the header labels move with
+  // the icon (tile_icon_disc::corner_header). The preview header follows.
+  const tile_icon_disc::CornerHeader header = tile_icon_disc::corner_header(
+      tile_layout::scale_480(24), tile_layout::scale_480(20), tile_layout::scale_480(-8),
+      lv_font_get_glyph_width(FONT_MDI_ICONS, tile_icon_disc::kMdiReferenceGlyph, 0),
+      lv_font_get_line_height(FONT_MDI_ICONS));
+  emit_exact("icon-disc-corner", header.disc);
+  emit_exact("tile-header-title-top",
+             tile_layout::scale_480(24) + tile_layout::scale_480(4) + header.shift);
   emit_exact("tile-header-title-right", tile_layout::scale_480(20) - tile_layout::scale_480(4));
-  emit_exact("tile-header-icon-top", tile_layout::scale_480(24) + tile_layout::scale_480(-8));
-  emit_exact("tile-header-icon-left", tile_layout::scale_480(20) + tile_layout::scale_480(-8));
+  emit_exact("tile-header-icon-top", tile_layout::scale_480(24) + header.icon_top);
+  emit_exact("tile-header-icon-left", tile_layout::scale_480(20) + header.icon_side);
 #if defined(DEVICE_LAYOUT_1024X600)
   emit("value-dy", 23);
 #elif defined(DEVICE_LAYOUT_480X480)
@@ -205,6 +231,16 @@ void appendPreviewScaleVars(String& html) {
 #else
   emit("value-dy", 28);
 #endif
+  {
+    // Tiles without their own color paint with this variable, so a change of
+    // the global default tile color repaints every preview grid at once.
+    char color_hex[8];
+    snprintf(color_hex, sizeof(color_hex), "#%06X",
+             static_cast<unsigned>(tileDefaultBgColor()));
+    html += "--tile-default-bg:";
+    html += color_hex;
+    html += ";";
+  }
   emit_exact("tile-radius", configManager.getConfig().tile_radius);
   html += "--radius-preview-scale:";
   html += String(static_cast<double>(preview_cell_h_px()) / GRID_CELL_H, 8);
@@ -216,7 +252,8 @@ void appendPreviewScaleVars(String& html) {
   // minimum used for readable preview text.
   emit_exact("climate-margin-x", climate_layout::kOuterInset);
   emit_exact("climate-grid-gap", climate_layout::kGap);
-  emit_exact("climate-slots-top", climate_layout::kContentTop);
+  emit_exact("climate-slots-top",
+             climate_layout::content_top(header.disc, tile_icon_disc::inset()));
   emit_exact("climate-slots-bottom", climate_layout::kOuterInset);
   html += "--climate-control-radius:max(0px,calc(var(--tile-radius) - var(--climate-margin-x)));";
   emit_exact("climate-control-side-pad", tile_layout::scale_480(8));

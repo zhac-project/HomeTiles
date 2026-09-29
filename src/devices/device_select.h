@@ -128,14 +128,25 @@
 #define DEVICE_GUITION_JC1060P470C_FAMILY
 #endif
 
-// Built-in camera. The exact JC8012P4A1 V2 profile carries the demo-verified
-// OV02C10 SCCB/CSI wiring; the Waveshare 8-inch ESP32-P4-WIFI6-Touch-LCD
-// front camera (OV5647) and the M5Stack Tab5 camera (SC202CS/SC2356) are
-// enabled only in camera beta builds (HOMETILES_CAMERA_BETA) until hardware
-// validation. V1 and every other board keep the capture path out of their images.
+// Built-in camera on every ESP32-P4 board with a camera: the Guition
+// JC8012P4A1 V2 and V1 cameras and the JC1060P470C V2 / JC4880P443 CSI
+// connectors (OV02C10), the Waveshare 8-inch, 7-inch and 10.1-inch front
+// cameras and the OV5647 CSI connectors of the Waveshare 7B, 4.3-inch and 4B,
+// and the M5Stack Tab5 camera (SC202CS/SC2356). The camera stays off until the
+// user enables it in the Web Admin; only then is the sensor probed. The
+// original-panel JC1060P470C (board identity unproven) and the ESP32-S3 boards
+// keep the capture path out.
 #if defined(DEVICE_GUITION_JC8012P4A1_V2) || \
-    (defined(DEVICE_WAVESHARE_TOUCH_LCD_8) && defined(HOMETILES_CAMERA_BETA)) || \
-    (defined(DEVICE_M5STACKS_TAB5) && defined(HOMETILES_CAMERA_BETA))
+    defined(DEVICE_WAVESHARE_TOUCH_LCD_8) || \
+    defined(DEVICE_WAVESHARE_TOUCH_LCD_7) || \
+    defined(DEVICE_WAVESHARE_TOUCH_LCD_10_1) || \
+    defined(DEVICE_WAVESHARE_TOUCH_LCD_7B) || \
+    defined(DEVICE_WAVESHARE_TOUCH_LCD_4_3) || \
+    defined(DEVICE_WAVESHARE_4B) || \
+    defined(DEVICE_GUITION_JC8012P4A1) || \
+    defined(DEVICE_GUITION_JC1060P470C_V2) || \
+    defined(DEVICE_GUITION_JC4880P443_PORTRAIT) || \
+    defined(DEVICE_M5STACKS_TAB5)
 #define HOMETILES_LOCAL_CAMERA 1
 #endif
 

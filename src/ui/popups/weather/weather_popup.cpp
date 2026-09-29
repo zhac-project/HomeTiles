@@ -2810,11 +2810,10 @@ static void build_weather_ui(WeatherPopupContext* ctx,
   }
 }
 
-static void apply_init_to_context(WeatherPopupContext* ctx, const WeatherPopupInit& init) {
+// The card and every surface cut out in the card color.
+static void apply_card_color(WeatherPopupContext* ctx, uint32_t bg_color) {
   if (!ctx) return;
-  ctx->entity_id = init.entity_id;
-  ctx->title = init.title;
-  ctx->bg_color = init.bg_color;
+  ctx->bg_color = bg_color;
   uint32_t color = ctx->bg_color ? ctx->bg_color : 0x2A2A2A;
   if (ctx->card) {
     lv_obj_set_style_bg_color(ctx->card, lv_color_hex(color), 0);
@@ -2829,11 +2828,26 @@ static void apply_init_to_context(WeatherPopupContext* ctx, const WeatherPopupIn
     lv_obj_set_style_bg_color(ctx->detail_now_temp_value_label, lv_color_hex(color), 0);
   if (ctx->detail_now_temp_unit_label)
     lv_obj_set_style_bg_color(ctx->detail_now_temp_unit_label, lv_color_hex(color), 0);
+  // The white week-range and day-title pills cut their text out in the card
+  // color; the resident popup reopens with other tile colors and tints.
+  if (ctx->week_range_label)
+    lv_obj_set_style_text_color(ctx->week_range_label, lv_color_hex(color), 0);
+  if (ctx->detail_title_label)
+    lv_obj_set_style_text_color(ctx->detail_title_label, lv_color_hex(color), 0);
   for (int i = 0; i < ctx->detail_disabled_separator_count; ++i) {
     if (ctx->detail_disabled_separators[i]) {
       lv_obj_set_style_bg_color(ctx->detail_disabled_separators[i], lv_color_hex(color), 0);
     }
   }
+}
+
+static void apply_init_to_context(WeatherPopupContext* ctx, const WeatherPopupInit& init) {
+  if (!ctx) return;
+  ctx->entity_id = init.entity_id;
+  ctx->title = init.title;
+  apply_card_color(ctx, init.bg_color);
+  // The header icon takes the tile icon's color; the shell tints its disc.
+  if (ctx->icon_label) lv_obj_set_style_text_color(ctx->icon_label, lv_color_hex(init.icon_color), 0);
   if (ctx->location_label) {
     String title = ctx->title;
     title.trim();
@@ -2843,6 +2857,18 @@ static void apply_init_to_context(WeatherPopupContext* ctx, const WeatherPopupIn
   update_mode_buttons(ctx);
   popup_layout::alignHeader(ctx->card, ctx->location_label, ctx->icon_label);
 }
+
+}  // namespace
+
+// While open, the popup follows its tile's current background (a rules tint
+// that changes with the entity state); tile_icon_source calls this.
+void weather_popup_follow_tile_color(uint32_t color) {
+  WeatherPopupContext* ctx = g_weather_popup_ctx;
+  if (!ctx || !ctx->card || lv_obj_has_flag(ctx->card, LV_OBJ_FLAG_HIDDEN) || ctx->bg_color == color) return;
+  apply_card_color(ctx, color);
+}
+
+namespace {
 
 static void on_overlay_click(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;

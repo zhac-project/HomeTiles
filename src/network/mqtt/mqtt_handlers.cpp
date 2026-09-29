@@ -1326,6 +1326,8 @@ static void rebuildDynamicRoutes(std::vector<DynamicSensorRoute>& routes) {
   auto add_grid_entities = [&](const FolderEntitySlotView* slots, size_t count) {
     for (size_t i = 0; i < count; ++i) {
       const FolderEntitySlotView& slot = slots[i];
+      // Rules on another entity (tile_icon_colors.h).
+      if (slot.rule_entity[0]) add_route(String(slot.rule_entity), -1, "state");
       if (tileTypeSubscribesDynamicState(slot.type) &&
           slot.entity[0]) {
         add_route(String(slot.entity), -1, tileTypeIsEditableValue(slot.type) ? "control" : "state");
@@ -1367,6 +1369,8 @@ static void rebuildDynamicRoutes(std::vector<DynamicSensorRoute>& routes) {
   const TileGridConfig& screensaver_grid = screensaverConfig.tileGrid();
   for (size_t i = 0; i < TILES_PER_GRID; ++i) {
     const Tile& tile = screensaver_grid.tiles[i];
+    const String rule_entity = tileIconSourceEntity(tile.type, tile.icon_colors);
+    if (rule_entity.length()) add_route(rule_entity, -1, "state");
     if (!tileTypeSubscribesScreensaverState(tile.type) ||
         !tile.sensor_entity.length()) {
       continue;

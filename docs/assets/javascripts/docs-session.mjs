@@ -1,5 +1,6 @@
 import { mountSerialStatus } from "./serial-status.mjs?v=serial-navigation-3";
 import { serialActivity } from "./serial-activity.mjs?v=serial-navigation-3";
+import { mountTocEndSpace } from "./toc-end-space.mjs?v=2";
 
 const baseUrl = new URL("../../", import.meta.url);
 mountSerialStatus(document, baseUrl);
@@ -10,7 +11,7 @@ const components = [
   { selector: "[data-device-logs]", status: "[data-log-status]", source: "logs",
     module: "./device-logs.mjs?v=device-logs-6" },
   { selector: "[data-hometiles-installer]", status: "#installer-status", source: "installer",
-    module: "./installer.mjs?v=installer-ui-15" },
+    module: "./installer.mjs?v=installer-ui-18" },
 ];
 
 function update() {
@@ -18,6 +19,7 @@ function update() {
   // Legacy documentation URLs use the same navigation lifecycle as normal
   // links, so following a redirect cannot tear down an active USB session.
   if (redirect) setTimeout(() => { if (redirect.isConnected) redirect.click(); }, 0);
+  mountTocEndSpace();
   for (const component of components) {
     const root = document.querySelector(component.selector);
     if (!root) continue;

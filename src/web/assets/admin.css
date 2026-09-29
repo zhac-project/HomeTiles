@@ -542,6 +542,18 @@
     .local-camera-custom[hidden] { display:none; }
     .local-camera-custom .local-camera-slider { grid-template-columns:minmax(72px, 150px) minmax(0, 1fr) 44px; }
     .local-camera-indicator .settings-checkbox:has(input:disabled) { opacity:.45; }
+    /* Built-in camera: the fine-tuning controls (rotation, mirror, red/blue
+       swap, image) in a collapsed Advanced block below the two groups. The
+       summary reads like the sub-headings, with a chevron instead of the
+       native marker. */
+    .local-camera-advanced { border-top:1px solid #232323; padding-top:16px; }
+    .local-camera-advanced > summary { display:flex; align-items:center; gap:8px; width:max-content; max-width:100%; cursor:pointer; list-style:none; }
+    .local-camera-advanced > summary::-webkit-details-marker { display:none; }
+    .local-camera-advanced > summary::before { content:""; width:6px; height:6px; border-right:2px solid currentColor; border-bottom:2px solid currentColor; transform:rotate(-45deg); transition:transform .15s; }
+    .local-camera-advanced[open] > summary { margin-bottom:16px; }
+    .local-camera-advanced[open] > summary::before { transform:rotate(45deg); }
+    .local-camera-advanced > summary:hover { color:var(--text-2); }
+    .local-camera-advanced > summary:focus-visible { outline:2px solid var(--accent); outline-offset:3px; border-radius:4px; }
     .local-camera-slider { display:grid; grid-template-columns:minmax(72px, 110px) minmax(0, 1fr) 44px; align-items:center; gap:12px; margin:0; font-size:14px; color:var(--text); }
     @media (max-width: 780px) { .local-camera-image { grid-template-columns:minmax(0, 1fr); } }
     .local-camera-slider span { min-width:0; overflow-wrap:anywhere; }
@@ -739,7 +751,41 @@
     /* width:0 + min-width:100% - the footer follows the grid width without
        its long hint text inflating the column. */
     .folder-footer { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; width:0; min-width:100%; }
-    .folder-footer-options { flex:0 0 100%; display:flex; align-items:center; gap:16px; }
+    .folder-footer-options { flex:0 0 100%; display:flex; align-items:center; gap:10px 16px; flex-wrap:wrap; }
+    /* Global settings under the grid: the Tile Settings card and fields,
+       laid out in columns that wrap on narrow widths. */
+    .global-settings-panel {
+      flex:0 0 100%;
+      box-sizing:border-box;
+      background:var(--panel);
+      border:1px solid #232323;
+      border-radius:18px;
+      padding:20px;
+    }
+    /* Two compact columns in the Tile Settings style: checkboxes like Glow,
+       fields with a small label above like Column/Row; one column on phones. */
+    .global-settings-grid {
+      display:grid;
+      grid-template-columns:repeat(2, minmax(0, 1fr));
+      gap:8px 24px;
+      align-items:end;
+      max-width:560px;
+    }
+    .global-settings-grid .inline-checkbox { margin:0; }
+    /* The label sits left of its control, like the font size rows in Tile
+       Settings, so the block stays low enough for the page height. */
+    .global-settings-field { display:flex; align-items:center; gap:10px; min-width:0; }
+    .global-settings-panel .global-settings-field > label { flex:0 0 auto; margin:0; }
+    .global-settings-field > .global-radius-field,
+    .global-settings-field > .tile-color-row { flex:1 1 auto; min-width:0; }
+    .global-settings-grid .tile-color-row { margin:0; grid-template-columns:minmax(72px,1fr) 32px; }
+    .global-settings-grid .tile-color-row input[type="color"] { height:32px; margin-bottom:0; }
+    .global-settings-grid .tile-color-reset-btn { flex:0 0 32px; width:32px; height:32px; }
+    @media (max-width:520px) { .global-settings-grid { grid-template-columns:minmax(0, 1fr); } }
+    .global-radius-field { display:flex; align-items:center; gap:8px; height:32px; }
+    .global-radius-field input[type="range"] { flex:1 1 auto; min-width:0; height:18px; margin:0; accent-color:var(--accent); }
+    .global-radius-field input[type="range"]:focus { outline:none; box-shadow:none; }
+    .global-radius-field input[type="range"]:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
     .folder-footer-options .inline-checkbox { margin:0; }
     .folder-footer .hint { margin:0; }
     .btn-delete-folder { padding:8px 16px; font-size:13px; flex:0 0 auto; }
@@ -938,7 +984,7 @@
     /* The hairline sits on the outer card edge. A child overlay would be
        visibly indented by the transparent 3px editor border. */
     .tile-grid.tiles-bordered > .tile:not(.empty):not(.tile-border-hidden) {
-      outline:1px solid rgba(255,255,255,0.20);
+      outline:1px solid var(--tile-border-tint, rgba(255,255,255,0.20));
       outline-offset:-1px;
     }
 
@@ -1125,6 +1171,8 @@
     .tile.empty[data-selected="1"] { border:3px solid #26a69a; box-shadow:0 0 12px rgba(38,166,154,0.55); }
     .tile.empty:hover:not(.active),
     .tile.empty.free-slot-hover:not(.active) { border-color:rgba(38,166,154,0.4); }
+    /* The free slot may lie over a selected empty new tile; it takes the click. */
+    .tile.empty.free-slot-hover:not([data-selected="1"]) { z-index:1; }
     .tile-title {
       color:#fff;
       font-weight:normal;
@@ -1141,6 +1189,8 @@
       color:#fff;
       font-size:var(--icon-size, 24px);
       line-height:1;
+      /* Anchor for the round icon disc; header icons stay absolute. */
+      position:relative;
     }
     /* Centered ghost hint for tiles without a live preview (weather/media) */
     .tile-ghost-icon {
@@ -1188,6 +1238,7 @@
     .tile-settings-body {
       flex:1 1 auto;
       min-height:0;
+      overflow-x:hidden;
       overflow-y:auto;
       overscroll-behavior:contain;
       margin-right:-12px;
@@ -1201,16 +1252,21 @@
       border-top:1px solid #232323;
     }
     /* More compact controls, panel only */
-    .tile-settings label { font-size:12px; margin-bottom:4px; }
-    .tile-settings input, .tile-settings select, .tile-settings textarea {
+    .tile-settings label, .global-settings-panel label { font-size:12px; margin-bottom:4px; }
+    .tile-settings input, .tile-settings select, .tile-settings textarea,
+    .global-settings-panel input {
       padding:9px 12px;
       font-size:13px;
       border-radius:10px;
       margin-bottom:10px;
     }
     .tile-settings select { background-position:right 12px center; padding-right:32px; }
-    .tile-settings input[type="range"] { padding:0; }
-    .tile-settings h3 { margin:0 0 14px; color:var(--text); font-size:17px; }
+    /* Long entity names never widen the panel: fields may shrink below their
+       text, which ends in an ellipsis on one line. */
+    .tile-settings select { min-width:0; max-width:100%; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+    .type-fields.show > * { min-width:0; }
+    .tile-settings input[type="range"], .global-settings-panel input[type="range"] { padding:0; }
+    .tile-settings h3, .global-settings-panel h3 { margin:0 0 14px; color:var(--text); font-size:17px; }
     .tile-settings .hidden { display:none; }
     /* Typ-Felder: kompakte zweispaltige Zeilen (Label links, Feld rechts) */
     .type-fields { display:none; margin-top:10px; }
@@ -1288,6 +1344,15 @@
     .tile-color-row { display:grid; grid-template-columns:minmax(72px,1fr) 38px; gap:8px; align-items:center; }
     .tile-color-label-row.has-opacity,
     .tile-color-row.has-opacity { grid-template-columns:minmax(72px,1fr) minmax(110px,1.5fr) 38px; }
+    /* The tile Color field has no reset button: the Global choice replaces it. */
+    .tile-color-label-row.no-reset,
+    .tile-color-row.no-reset { grid-template-columns:minmax(72px,1fr); }
+    .tile-color-label-row.no-reset.has-opacity,
+    .tile-color-row.no-reset.has-opacity { grid-template-columns:minmax(72px,1fr) minmax(110px,1.5fr); }
+    /* Tile color choice: the color field shows only for Custom; screensaver
+       tiles keep their opacity slider in place. */
+    .tile-color-row.color-hidden:not(.has-opacity) { display:none; }
+    .tile-color-row.color-hidden input[type="color"] { visibility:hidden; }
     .tile-color-label-row { margin-top:13px; margin-bottom:4px; }
     .tile-color-label-row span { color:var(--text-2); font-size:12px; font-weight:600; line-height:14px; }
     .tile-color-row { margin-bottom:10px; }
@@ -1317,7 +1382,11 @@
     }
     .layout-field label { margin-bottom:4px; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .layout-field input { padding:8px 10px; font-size:13px; margin-bottom:0; }
-    .inline-checkbox { display:flex; align-items:center; gap:8px; font-weight:600; margin-top:8px; }
+    .inline-checkbox { display:flex; width:fit-content; align-items:center; gap:8px; font-weight:600; margin-top:8px; }
+    /* Only the checkbox itself toggles: a click next to it (or on its text)
+       must not change the setting by accident. */
+    .inline-checkbox { pointer-events:none; user-select:none; }
+    .inline-checkbox input { pointer-events:auto; cursor:pointer; }
     .inline-checkbox input { width:auto; padding:0; margin:0; flex:0 0 auto; }
     .clock-toggle-row { display:grid; grid-template-columns:repeat(2, minmax(120px, max-content)); gap:8px 18px; align-items:center; justify-content:start; margin-bottom:8px; }
     .clock-toggle-row .inline-checkbox { display:inline-flex; width:auto; margin-top:0; white-space:nowrap; }
@@ -1677,7 +1746,8 @@
       border:0;
       /* 11 px outer radius - 3 px effective inset = 8 px. */
       border-radius:var(--climate-control-radius, 8px);
-      background:#3a3a3a;
+      /* A lighter step of the tile like the device (kSlotSurfaceOpa 28/255). */
+      background:rgba(255,255,255,0.11);
     }
     .tile.climate .climate-slot-control span {
       font-size:var(--fs24, 12px);
@@ -1686,7 +1756,7 @@
     .tile.climate .climate-slot-control small {
       min-width:0;
       overflow:hidden;
-      color:#e0e0e0;
+      color:#fff;
       font-size:var(--fs20, 10px);
       font-weight:400;
       line-height:1.2;
@@ -2231,7 +2301,13 @@
     .tile-radius-control input[type="range"] { width:120px; height:18px; margin:0; accent-color:var(--accent); }
     .tile-radius-control input[type="range"]:focus { outline:none; box-shadow:none; }
     .tile-radius-control input[type="range"]:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
-    .global-tile-radius-value { min-width:2ch; text-align:right; font-variant-numeric:tabular-nums; }
+    /* Slider values in the label size of Tile Settings. */
+    .global-tile-radius-value, .global-icon-glow-value {
+      font-size:12px; font-weight:600; color:var(--text-2); text-align:right;
+      white-space:nowrap; font-variant-numeric:tabular-nums;
+    }
+    .global-tile-radius-value { min-width:2ch; }
+    .global-icon-glow-value { min-width:4.5ch; }
 
 /* Fractional placement preserves the existing cell pitch and gutter. */
 .tile-grid > .fractional-tile {
@@ -2252,9 +2328,44 @@
   position:absolute; left:var(--compact-inset); top:var(--compact-inset);
   width:var(--compact-icon); height:var(--compact-icon); margin:0;
   display:flex; align-items:center; justify-content:center;
-  border-radius:max(0px, calc(var(--tile-radius) - var(--compact-inset))); background:rgba(255,255,255,0.15);
+  border-radius:max(0px, calc(var(--tile-radius) - var(--compact-inset)));
+  background:rgba(255,255,255,var(--icon-disc-opa, 0.149));
   font-size:var(--icon-size, 48px); line-height:1;
 }
+/* Glow: a colored icon tints its disc with its own hue (tile_icon_disc). */
+.tile.sensor-compact > .tile-icon.tile-icon-tinted {
+  background:color-mix(in srgb, currentColor var(--icon-disc-glow, 25%), transparent);
+}
+/* Taller tiles: a disc of tile_icon_disc::round_diameter() centered on the
+   unchanged icon, behind it, with the half-height radius rule. */
+.tile:not(.empty):not(.sensor-compact) > .tile-icon::after {
+  content:""; position:absolute; left:50%; top:50%; z-index:-1;
+  width:var(--icon-disc-round, 30px); height:var(--icon-disc-round, 30px);
+  transform:translate(-50%, -50%); pointer-events:none;
+  border-radius:max(0px, calc(var(--tile-radius) - var(--compact-inset)));
+  background:rgba(255,255,255,var(--icon-disc-opa, 0.149));
+}
+/* Corner headers (the shared Sensor header, icon top left): the disc grows
+   into the corner like the half-height disc (tile_icon_disc::corner_diameter).
+   Centered icons above a title (Folder, Scene, Camera, Switch) use the same
+   size (tile_icon_disc::header_diameter). */
+.tile:is(.sensor, .binary_sensor, .number, .select, .datetime,
+         .cover, .energy, .weather, .media, .climate):not(.empty):not(.sensor-compact) > .tile-icon::after,
+.tile:is(.scene, .navigate, .camera, .switch:not(.switch-toggle)):not(.empty):not(.sensor-compact) > .tile-icon::after {
+  width:var(--icon-disc-corner, var(--icon-disc-round, 30px));
+  height:var(--icon-disc-corner, var(--icon-disc-round, 30px));
+}
+.tile:not(.sensor-compact) > .tile-icon.tile-icon-tinted::after {
+  background:color-mix(in srgb, currentColor var(--icon-disc-glow, 25%), transparent);
+}
+.icon-discs-off .tile:not([data-icon-disc="1"]) > .tile-icon::after,
+.tile[data-icon-disc="2"] > .tile-icon::after { display:none; }
+/* The global icon disc option (root class, mirrors the device's shared disc
+   style) and the per-tile override: data-icon-disc 0 global, 1 on, 2 off. */
+.icon-discs-off .tile.sensor-compact:not([data-icon-disc="1"]) > .tile-icon,
+.tile.sensor-compact[data-icon-disc="2"] > .tile-icon { background:transparent; }
+.tile-icon-disc-fields.hidden { display:none; }
+.tile-icon-disc-fields .inline-checkbox.hidden { display:none; }
 .tile.sensor-compact > .tile-title,
 .tile.sensor-compact > .tile-value {
   position:absolute; left:calc(var(--compact-h) + var(--compact-inset));
@@ -2271,6 +2382,18 @@
   font-size:var(--compact-value-font); line-height:var(--compact-value-line);
 }
 .tile.sensor-compact .tile-unit { font-size:inherit; }
+/* Chosen half-height value sizes (compact_sensor_layout::value_font); title
+   and value both use the value line to center their block. */
+.tile.sensor-compact.compact-value-24 {
+  --compact-value-font:var(--compact-value-font-24); --compact-value-line:var(--compact-value-line-step-24);
+}
+.tile.sensor-compact.compact-value-28 {
+  --compact-value-font:var(--compact-value-font-28); --compact-value-line:var(--compact-value-line-step-28);
+}
+/* Half-height Back: the title alone is centered on the disc row. */
+.tile.sensor-compact.compact-title-only > .tile-title {
+  top:max(0px, calc((var(--compact-h) - var(--compact-title-line)) / 2));
+}
 .tile.sensor-half .tile-gauge, .tile.sensor-half .tile-graph { display:none; }
 
 .tile.sensor-compact .tile-title-lines { display:block; top:0; transform:none; white-space:nowrap; }
@@ -2283,3 +2406,143 @@
 .tile.sensor-compact:hover:not(.active) { box-shadow:inset 0 0 0 2px rgba(38,166,154,.6); }
 .tile.sensor-compact.active, .tile.sensor-compact[data-selected="1"] { box-shadow:inset 0 0 0 3px #26a69a, 0 0 12px rgba(38,166,154,.55); }
 .tile.sensor-compact:focus-visible { box-shadow:inset 0 0 0 3px #64d8cb, 0 0 12px rgba(38,166,154,.55); }
+
+/* Per-tile icon colors in the tile editor: the fixed icon color and the
+   Binary On/Off colors use the tile color row; the color bar has a mode
+   toggle, preset chips, the bar, draggable stop handles with value labels
+   and the range; state colors are text, contains, color and remove. */
+/* An unset icon color shows the default white icon color at full strength. */
+/* Tile Settings group captions (Icon, Tile, Rules): what belongs to what. */
+.tile-settings-group {
+  margin:18px 0 8px; padding-top:12px; border-top:1px solid #232323;
+  font-size:11px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--text-3);
+}
+.tile-icon-color-fixed { margin-top:10px; }
+.tile-icon-color-fixed.hidden { display:none; }
+/* Rules: stacked controls, targets side by side, strength on one line with
+   the value in the label size (like the Global settings sliders). */
+.icon-color-rules-body { display:flex; flex-direction:column; align-items:flex-start; gap:8px; margin-top:8px; }
+.icon-color-rules-body.hidden { display:none; }
+.icon-color-rules-body > select { width:100%; margin:0; }
+.icon-color-targets { display:flex; gap:16px; flex-wrap:wrap; }
+.icon-color-targets .inline-checkbox { margin:0; }
+.icon-color-strength { display:flex; align-items:center; gap:10px; width:100%; }
+.icon-color-strength.hidden { display:none; }
+.tile-settings .icon-color-strength label { flex:0 0 auto; margin:0; }
+.icon-color-strength input[type="range"] { flex:1 1 auto; min-width:0; margin:0; padding:0; accent-color:var(--accent); }
+.icon-color-strength output { font-size:12px; font-weight:600; color:var(--text-2); min-width:4.5ch; text-align:right; white-space:nowrap; }
+.icon-color-strength .tile-color-reset-btn { flex:0 0 32px; width:32px; height:32px; }
+/* "Tint tile" while Tile color "From icon" makes the tile follow the icon:
+   visible, greyed out and not clickable. */
+.inline-checkbox.is-disabled, .icon-color-strength.is-disabled { opacity:0.45; }
+.inline-checkbox.is-disabled input, .icon-color-strength.is-disabled * { cursor:not-allowed; pointer-events:none; }
+/* Strength of Tile color "From icon color", below the Tile color choice. */
+.icon-color-fill { display:flex; flex-direction:column; gap:8px; margin:0 0 10px; }
+.icon-color-fill.hidden { display:none; }
+.icon-color-segmented {
+  display:inline-grid;
+  grid-auto-flow:column;
+  grid-auto-columns:1fr;
+  gap:2px;
+  padding:2px;
+  margin-bottom:10px;
+  border:1px solid var(--line-strong);
+  border-radius:10px;
+  background:var(--well);
+}
+.icon-color-segmented button {
+  padding:6px 14px;
+  border:0;
+  border-radius:8px;
+  background:transparent;
+  color:var(--text-2);
+  font:inherit;
+  font-size:12px;
+  font-weight:600;
+  cursor:pointer;
+}
+.icon-color-segmented button.active { background:var(--accent-soft); color:#5fd4c7; }
+.icon-color-presets { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px; }
+.icon-color-chip {
+  padding:4px 10px;
+  border:1px solid var(--line-strong);
+  border-radius:999px;
+  background:var(--well);
+  color:var(--text-2);
+  font:inherit;
+  font-size:12px;
+  cursor:pointer;
+}
+.icon-color-chip:hover { border-color:#4a4a4a; color:var(--text); }
+.icon-color-bar {
+  height:22px;
+  margin:0 9px;
+  border:1px solid var(--line-strong);
+  border-radius:11px;
+  cursor:copy;
+  touch-action:manipulation;
+}
+.icon-color-handles { position:relative; height:42px; margin:4px 9px 0; }
+.icon-color-stop {
+  position:absolute;
+  top:0;
+  width:18px;
+  height:18px;
+  margin:0 0 0 -9px;
+  padding:0;
+  border:2px solid #fff;
+  border-radius:50%;
+  box-shadow:0 0 0 1px rgba(0,0,0,.6);
+  cursor:grab;
+  touch-action:none;
+}
+.icon-color-stop.selected { box-shadow:0 0 0 2px var(--accent); }
+.icon-color-stop-label {
+  position:absolute;
+  top:21px;
+  transform:translateX(-50%);
+  color:var(--text-2);
+  font-size:11px;
+  white-space:nowrap;
+  pointer-events:none;
+}
+.icon-color-stop-remove {
+  position:absolute;
+  top:-6px;
+  width:16px;
+  height:16px;
+  margin-left:6px;
+  padding:0;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border:1px solid var(--line-strong);
+  border-radius:50%;
+  background:var(--card);
+  color:var(--text-2);
+  font-size:11px;
+  cursor:pointer;
+  z-index:1;
+}
+.icon-color-stop-remove.hidden { display:none; }
+.icon-color-stop-picker { position:absolute; width:1px; height:1px; padding:0; border:0; opacity:0; pointer-events:none; }
+.icon-color-bar-editor { position:relative; }
+.icon-color-range { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:4px; }
+.icon-color-range label { margin:0; font-size:12px; }
+.icon-color-range input { margin-top:4px; padding:8px 10px; font-size:13px; }
+.tile-icon-rule {
+  display:grid;
+  grid-template-columns:minmax(0,1.6fr) auto 44px 38px;
+  gap:8px;
+  align-items:center;
+  margin-bottom:8px;
+}
+.tile-icon-rule input { min-width:0; margin:0; }
+.tile-icon-rule input[type="text"] { padding:8px 10px; font-size:13px; }
+.tile-icon-rule input[type="color"] { width:100%; height:38px; padding:4px 7px; border-radius:10px; }
+.icon-color-contains { display:inline-flex; align-items:center; gap:6px; margin:0; font-size:12px; white-space:nowrap; }
+.icon-color-contains input { width:16px; height:16px; }
+/* Same sizes as the other Tile Settings texts and buttons: hints like
+   .settings-note, the add button like the Copy/Paste/Delete actions. */
+.tile-icon-rule-add { margin-top:2px; padding:8px 10px; font-size:12px; }
+.tile-icon-color-fields .hint { font-size:12px; margin:4px 0 12px; }

@@ -8,6 +8,9 @@ struct LightPopupInit {
   String title;
   String icon_name;
   uint32_t color = 0;
+  // Card color: the opening tile's current background (0 = default card).
+  // Only an opening applies it; state updates keep the last opening's color.
+  uint32_t bg_color = 0;
   uint8_t brightness_pct = 100;
   uint16_t color_temp_kelvin = 4000;
   uint16_t min_color_temp_kelvin = 2000;
@@ -36,3 +39,4 @@ void update_light_popup(const LightPopupInit& init);
 lv_color_t light_color_from_temperature_kelvin(uint16_t kelvin);
 void preload_light_popup();
 void hide_light_popup();
+void light_popup_follow_tile_color(uint32_t color);

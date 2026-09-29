@@ -7,6 +7,8 @@
 #include "src/devices/device.h"
 #include "src/tiles/config/tile_geometry.h"
 #include "src/core/config/pin_access.h"
+#include "src/core/config/tile_color.h"
+#include "src/tiles/config/tile_icon_colors.h"
 #include "src/types/tile_type_policy.h"
 
 static constexpr uint8_t GRID_COLS = Device::kGridCols;
@@ -84,6 +86,11 @@ enum SwitchPopupOpenModeStorage : uint8_t {
   TILE_SWITCH_POPUP_MODE_LONG = 2
 };
 
+// Value size choices (Tile::sensor_value_font): 0 = default (28 px, the title
+// size in half-height tiles), 1 = 20, 2 = 24, 3 = 32, 4 = 40, 5 = 28 (sizes on
+// the 1280x800 layouts). Half-height tiles show at most 28.
+static constexpr uint8_t SENSOR_VALUE_FONT_MAX = 5;
+
 struct Tile {
   TileType type;
   // Stable navigation identity, stored in the two unused V7 reserved bytes.
@@ -124,6 +131,14 @@ struct Tile {
   String image_path;
   uint16_t image_slideshow_sec;
 
+  // Icon disc override: TILE_ICON_DISC_GLOBAL follows the global option.
+  uint8_t icon_disc_mode = 0;
+  // Glow: a colored icon tints its disc with the same hue.
+  bool icon_glow = true;
+  // Fixed icon color, color bar and state colors (tile_icon_colors.h), kept
+  // in the /_tile_icon_colors sidecar. Empty = the type's default icon colors.
+  String icon_colors;
+
   Tile()
       : type(TILE_EMPTY),
         bg_color(0),
@@ -148,9 +163,50 @@ struct Tile {
         image_slideshow_sec(10) {}
 };
 
-// Clock/Text use the otherwise unused display mode byte: 0 inherits borders, 1 hides them.
+enum TileIconDiscMode : uint8_t {
+  TILE_ICON_DISC_GLOBAL = 0,
+  TILE_ICON_DISC_ON = 1,
+  TILE_ICON_DISC_OFF = 2
+};
+
+static inline uint8_t normalizeTileIconDiscMode(int mode) {
+  return (mode >= TILE_ICON_DISC_GLOBAL && mode <= TILE_ICON_DISC_OFF)
+             ? static_cast<uint8_t>(mode)
+             : TILE_ICON_DISC_GLOBAL;
+}
+
+// Canonical icon color record for a type: numeric types keep only the color
+// bar, text types only the state lines, Sensor keeps both; icon-and-title
+// tiles keep the fixed color and a source entity (with the bar and state
+// lines for a "rules" source); types without icon colors keep none.
+static inline String normalizeTileIconColors(int type, const char* record) {
+  if (!tileTypeHasIconColors(type) || !record || !*record) return String();
+  char out[tile_icon_colors::kMaxRecordBytes + 1];
+  const size_t length = tile_icon_colors::normalize(
+      record, out, sizeof(out), tileTypeIconColorsByValue(type), tileTypeIconColorsByState(type),
+      true, tileTypeRulesUseOwnEntity(type));
+  return length ? String(out) : String();
+}
+
+// The other entity of a tile's enabled rules (subscriptions), or "".
+static inline String tileIconSourceEntity(int type, const String& record) {
+  if (!tileTypeHasIconColors(type) || !record.length()) return String();
+  const char* entity = nullptr;
+  size_t length = 0;
+  if (tile_icon_colors::source(record.c_str(), entity, length) == tile_icon_colors::SourceMode::None) {
+    return String();
+  }
+  String out;
+  out.reserve(length);
+  for (size_t i = 0; i < length; ++i) out += entity[i];
+  return out;
+}
+
+// Clock/Text/Back use the otherwise unused display mode byte: 0 inherits
+// borders, 1 hides them.
 static inline bool tileBorderEnabled(const Tile& tile) {
-  return (tile.type != TILE_CLOCK && tile.type != TILE_TEXT) || tile.sensor_display_mode != 1;
+  return (tile.type != TILE_CLOCK && tile.type != TILE_TEXT && tile.type != TILE_BACK) ||
+         tile.sensor_display_mode != 1;
 }
 
 // Climate tile content is packed into sensor_gauge_min. Climate tiles do not
@@ -184,12 +240,14 @@ static inline uint8_t climateTileGridColumns(const Tile& tile) {
              : span_w;
 }
 
+// One mini-grid row per half cell below the header row, so half steps add a
+// row: 1 -> 1, 1.5 -> 2, 2 -> 3, 2.5 -> 4. Whole sizes keep their rows.
 static inline uint8_t climateTileGridRows(const Tile& tile) {
-  const uint8_t span_h =
+  const float span_h =
       tile.span_h < 1
-          ? 1
-          : (tile.span_h > GRID_ROWS ? GRID_ROWS : tile.span_h);
-  return static_cast<uint8_t>(span_h * 2u - 1u);
+          ? 1.0f
+          : (tile.span_h > GRID_ROWS ? static_cast<float>(GRID_ROWS) : tile.span_h);
+  return static_cast<uint8_t>(static_cast<uint8_t>(span_h * 2.0f + 0.5f) - 1u);
 }
 
 // Adjustable climate values consume two cells. Their preferred orientation is
@@ -355,6 +413,7 @@ static inline bool parseClimateTileGeometry(
   return true;
 }
 
+// Stored position of one mini tile; build_slot_kinds clamps it to the grid.
 static inline ClimateTileItemGeometry getClimateTileItemGeometry(
     const Tile& tile, uint8_t item_index) {
   const uint8_t columns = climateTileGridColumns(tile);
@@ -421,16 +480,9 @@ static inline ClimateTileItemGeometry getClimateTileItemGeometry(
       }
     }
   }
-  if (geometry.col >= columns) geometry.col = columns - 1;
-  if (geometry.row >= rows) geometry.row = rows - 1;
-  if (geometry.span_w < 1) geometry.span_w = 1;
-  if (geometry.span_h < 1) geometry.span_h = 1;
-  if (geometry.span_w > columns - geometry.col) {
-    geometry.span_w = columns - geometry.col;
-  }
-  if (geometry.span_h > rows - geometry.row) {
-    geometry.span_h = rows - geometry.row;
-  }
+  // Deliberately not clamped into the current grid: placement orders the
+  // items by where they were stored and clamps afterwards, so an item from a
+  // row that no longer exists cannot jump ahead of the items above it.
   return geometry;
 }
 
@@ -474,6 +526,11 @@ struct TileGridConfig {
   Tile tiles[TILES_PER_GRID];
 };
 
+// Allocates a default TileGridConfig for a grid that lives as long as the
+// firmware: PSRAM first, internal RAM as fallback. Aborts when neither has
+// room, because the caller cannot run without its grid.
+TileGridConfig* allocateTileGridStorage(const char* name);
+
 static constexpr uint32_t TILE_BG_COLOR_RGB_MASK = 0x00FFFFFFu;
 static constexpr uint32_t TILE_BG_COLOR_EXPLICIT = 0x01000000u;
 
@@ -489,8 +546,20 @@ static inline uint32_t tileBgColorRgb(const Tile& tile) {
   return tile.bg_color & TILE_BG_COLOR_RGB_MASK;
 }
 
+// Background of tiles without their own color: the global default tile color
+// from the display settings (tile_color::kDefault until the user picks one).
+uint32_t tileDefaultBgColor();
+
+// A stored built-in default grey (saved explicitly by older editors) counts
+// as "no own color" and follows the global default tile color like an unset
+// color. Every other stored color is kept.
+static inline bool tileBgColorFollowsDefault(uint32_t stored) {
+  return stored == 0 || tile_color::isDefaultGrey(stored);
+}
+
 static inline uint32_t tileBgColorOrDefault(const Tile& tile, uint32_t default_color) {
-  return tileBgColorIsSet(tile) ? tileBgColorRgb(tile) : (default_color & TILE_BG_COLOR_RGB_MASK);
+  if (!tileBgColorIsSet(tile)) return default_color & TILE_BG_COLOR_RGB_MASK;
+  return tileBgColorFollowsDefault(tile.bg_color) ? tileDefaultBgColor() : tileBgColorRgb(tile);
 }
 
 struct FolderEntry {
@@ -517,6 +586,8 @@ enum class SettingsTileVisibilityResult : uint8_t {
 struct TileEntitySlot {
   TileType type = TILE_EMPTY;
   String sensor_entity;
+  // The other entity of the tile's rules (tile_icon_colors.h), or "".
+  String rule_entity;
 };
 
 // Read-only view of one slot of the PSRAM folder entity cache, see
@@ -525,7 +596,8 @@ struct TileEntitySlot {
 // the same folder: use them right away, do not keep them.
 struct FolderEntitySlotView {
   TileType type = TILE_EMPTY;
-  const char* entity = "";  // Never nullptr.
+  const char* entity = "";       // Never nullptr.
+  const char* rule_entity = "";  // Never nullptr; the rules' other entity.
 };
 
 struct FolderEntityCacheEntry;
@@ -559,8 +631,8 @@ public:
   bool setActiveFolder(uint16_t folder_id);
   bool setActiveFolderCached(uint16_t folder_id, const TileGridConfig& grid);
   uint16_t getActiveFolderId() const { return active_folder_id; }
-  const TileGridConfig& getActiveGrid() const { return active_grid; }
-  TileGridConfig& getActiveGrid() { return active_grid; }
+  const TileGridConfig& getActiveGrid() const { return activeGrid(); }
+  TileGridConfig& getActiveGrid() { return activeGrid(); }
 
   const FolderEntry* getFolder(uint16_t folder_id) const;
   uint16_t getFolderParent(uint16_t folder_id) const;
@@ -576,16 +648,19 @@ public:
   bool getFolderPin(uint16_t folder_id, String& out) const;
   bool getSettingsTile(Tile& out);
   SettingsTileVisibilityResult validateSettingsTileVisible(
-      bool visible, int target_col = -1, int target_row = -1);
+      bool visible, float target_col = -1, float target_row = -1);
   SettingsTileVisibilityResult setSettingsTileVisible(
-      bool visible, int target_col = -1, int target_row = -1);
+      bool visible, float target_col = -1, float target_row = -1);
 
 private:
   volatile uint32_t view_revision_ = 1;
   static constexpr uint16_t kRootFolderId = 0;
   static constexpr uint16_t kInvalidFolderId = 0xFFFF;
 
-  TileGridConfig active_grid;
+  // PSRAM, allocated on first use (load() in setup()) because PSRAM is not
+  // ready while the global constructors run. Never freed.
+  mutable TileGridConfig* active_grid_ = nullptr;
+  TileGridConfig& activeGrid() const;
   uint16_t active_folder_id = kRootFolderId;
   std::vector<FolderEntry> folders;
 
@@ -610,10 +685,13 @@ private:
                 bool ensure_navigation_tile = true);
   bool saveGrid(uint16_t folder_id, const TileGridConfig& grid,
                 bool ensure_navigation_tile = true);
+  // Normalizes and saves the caller's grid without another full copy.
+  bool saveGridInPlace(uint16_t folder_id, TileGridConfig& grid,
+                       bool ensure_navigation_tile = true);
   uint16_t nextFolderId() const;
   void ensureRootFolder();
-  bool ensureSettingsTile(TileGridConfig& grid, int target_col = -1,
-                          int target_row = -1);
+  bool ensureSettingsTile(TileGridConfig& grid, float target_col = -1,
+                          float target_row = -1);
   bool removeSettingsTiles(TileGridConfig& grid);
   bool applySettingsTilePolicy(TileGridConfig& grid);
   bool ensureBackTile(uint16_t folder_id, TileGridConfig& grid);

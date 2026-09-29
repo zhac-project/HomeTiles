@@ -33,6 +33,7 @@
 #include "src/types/energy/energy_data.h"
 #include "src/ui/screensaver/screensaver_config.h"
 #include "src/ui/tabs/tiles/tab_tiles_unified.h"
+#include "src/tiles/runtime/tile_icon_source.h"
 #include "src/ui/shared/ui_surface_style.h"
 #include "src/core/config/tile_radius.h"
 
@@ -78,6 +79,11 @@ struct ScreensaverState {
   // the first Bridge sync supplies HA metadata such as kWh. Comparing only
   // the payload would permanently miss the unit when it arrives later.
   String slot_units[TILES_PER_GRID];
+  // Rendered slot cards, for icon-and-title tiles that follow their icon
+  // colors' source entity. Cleared with every rebuild.
+  lv_obj_t* slot_objs[TILES_PER_GRID] = {};
+  // Last rule entity payload per slot (the rules reapply on changes only).
+  String slot_rule_payloads[TILES_PER_GRID];
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
   // Prepare a complete LVGL frame for smooth slide transitions: wallpaper,
   // clock, tiles and any open popup are rendered off-screen in PSRAM, then
@@ -1009,8 +1015,26 @@ bool sd_wallpaper_file_exists(const String& file_name) {
          Device::sdFS().exists(String(kLegacyWallpaperDir) + "/" + file_name);
 }
 
+// A slide is shown only when it is checked and its file is still on the card.
+// Entries of deleted files stay in the stored list until the next Web Admin
+// save; they must neither be shown nor stall the slideshow.
+bool wallpaper_usable(const ScreensaverWallpaperConfig& wallpaper) {
+  return wallpaper.enabled && sd_wallpaper_file_exists(wallpaper.file_name);
+}
+
+bool any_configured_wallpaper_on_card() {
+  for (const auto& wallpaper : screensaverConfig.get().wallpapers) {
+    if (sd_wallpaper_file_exists(wallpaper.file_name)) return true;
+  }
+  return false;
+}
+
+// The first-image fallback is only for a card whose images were never
+// configured or were all deleted since. Unchecked images stay hidden.
 bool find_first_sd_wallpaper(ScreensaverWallpaperConfig& out) {
-  if (!Device::sdReadyCached()) return false;
+  if (!Device::sdReadyCached() || any_configured_wallpaper_on_card()) {
+    return false;
+  }
   const char* directories[] = {kImageDir, kLegacyWallpaperDir};
   for (const char* directory : directories) {
     fs::File dir = Device::sdFS().open(directory, FILE_READ);
@@ -1041,9 +1065,7 @@ bool find_first_sd_wallpaper(ScreensaverWallpaperConfig& out) {
 int first_enabled_wallpaper() {
   const auto& wallpapers = screensaverConfig.get().wallpapers;
   for (size_t i = 0; i < wallpapers.size(); ++i) {
-    if (wallpapers[i].enabled && is_wallpaper_file(wallpapers[i].file_name)) {
-      return static_cast<int>(i);
-    }
+    if (wallpaper_usable(wallpapers[i])) return static_cast<int>(i);
   }
   return -1;
 }
@@ -1056,8 +1078,7 @@ int next_enabled_wallpaper(int current) {
     int choices[kMaxScreensaverWallpapers];
     size_t choice_count = 0;
     for (size_t i = 0; i < count; ++i) {
-      if (config.wallpapers[i].enabled &&
-          is_wallpaper_file(config.wallpapers[i].file_name) &&
+      if (wallpaper_usable(config.wallpapers[i]) &&
           (static_cast<int>(i) != current || count == 1)) {
         choices[choice_count++] = static_cast<int>(i);
       }
@@ -1066,9 +1087,7 @@ int next_enabled_wallpaper(int current) {
   }
   for (size_t step = 1; step <= count; ++step) {
     const size_t i = (static_cast<size_t>(current < 0 ? 0 : current) + step) % count;
-    if (config.wallpapers[i].enabled && is_wallpaper_file(config.wallpapers[i].file_name)) {
-      return static_cast<int>(i);
-    }
+    if (wallpaper_usable(config.wallpapers[i])) return static_cast<int>(i);
   }
   return first_enabled_wallpaper();
 }
@@ -1243,6 +1262,19 @@ void refresh_slot_values(ScreensaverState* st) {
   const TileGridConfig& grid = screensaverConfig.tileGrid();
   for (size_t i = 0; i < TILES_PER_GRID; ++i) {
     const Tile& tile = grid.tiles[i];
+    // Rules follow their entity (own or other) like the tile states below.
+    if (tile.icon_colors.length() && st->slot_objs[i]) {
+      const String rule_entity = tile_icon_source::rule_entity(tile);
+      if (rule_entity.length()) {
+        String rule_payload;
+        tile_icon_source::cached_payload(rule_entity, rule_payload);
+        if (rule_payload != st->slot_rule_payloads[i]) {
+          st->slot_rule_payloads[i] = rule_payload;
+          tile_icon_source::refresh_card(st->slot_objs[i], tile);
+        }
+      }
+    }
+    if (tileTypeHasFixedIconColorOnly(tile.type)) continue;
     if (!tile.sensor_entity.length()) continue;
     String payload;
     if (!tiles_get_cached_entity_payload(tile.sensor_entity.c_str(), payload)) {
@@ -1339,6 +1371,8 @@ void rebuild_slot_grid(ScreensaverState* st) {
     lv_obj_clean(st->slot_grid);
   }
   for (String& payload : st->slot_payloads) payload = String();
+  for (lv_obj_t*& obj : st->slot_objs) obj = nullptr;
+  for (String& payload : st->slot_rule_payloads) payload = String();
 
   // Use exactly the normal tile system's tracks, gaps and outer padding.
   // The prepared full-frame image starts at GRID_PAD - 4, placing it
@@ -1381,6 +1415,7 @@ void rebuild_slot_grid(ScreensaverState* st) {
                                      static_cast<uint8_t>(i),
                                      GridType::SCREENSAVER, g_scene_callback);
     if (!tile_obj) continue;
+    st->slot_objs[i] = tile_obj;
     const lv_opa_t opacity = tile.background_opacity;
     lv_obj_set_style_bg_opa(tile_obj, opacity,
                             LV_PART_MAIN | LV_STATE_DEFAULT);

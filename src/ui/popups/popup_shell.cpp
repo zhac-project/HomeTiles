@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <new>
 #include <cstring>
+#include <string>
 
 namespace {
 struct Binding {
@@ -16,19 +17,34 @@ struct Binding {
   lv_obj_t* title = nullptr;
   lv_obj_t* icon = nullptr;
   lv_obj_t* close = nullptr;
+  // Optional hidden label holding the current value for the header.
+  lv_obj_t* value = nullptr;
   int32_t border_width = 0, shadow_width = 0, shadow_spread = 0;
   lv_color_t border_color{}, shadow_color{};
   void (*dismiss)() = nullptr;
   bool owner_deleting = false;
   lv_opa_t border_opa = LV_OPA_TRANSP, shadow_opa = LV_OPA_TRANSP;
 };
+// Header disc options from the opening tile (popup_shell_use_tile_disc).
+struct HeaderDisc {
+  bool from_tile = false;
+  bool off = false;
+  bool follows_global = false;
+  bool glow = true;
+};
+HeaderDisc g_next_disc;
 struct Shell {
+  HeaderDisc disc;
   lv_obj_t* overlay = nullptr;
   lv_obj_t* frame = nullptr;
   lv_obj_t* header = nullptr;
   lv_obj_t* title = nullptr;
+  lv_obj_t* icon_disc = nullptr;
   lv_obj_t* icon = nullptr;
   lv_obj_t* close = nullptr;
+  lv_obj_t* value = nullptr;
+  // Last source text copied into `value`; the visible label holds fitted text.
+  std::string value_source;
   Binding* active = nullptr;
 } shell;
 
@@ -69,23 +85,29 @@ void draw_popup_background(lv_event_t* event) {
     lv_event_stop_processing(event);
 }
 
+// Only the shared shell header draws, so only it gets the icon disc. The
+// resident bodies keep invisible header labels as metadata holders.
 void create_header(lv_obj_t* parent, lv_obj_t*& title, lv_obj_t*& icon,
-                   lv_obj_t*& close, lv_event_cb_t handler, void* context) {
+                   lv_obj_t*& close, lv_event_cb_t handler, void* context,
+                   lv_obj_t** icon_disc = nullptr) {
   title = lv_label_create(parent);
   lv_obj_set_width(title, LV_PCT(62));
   lv_obj_set_style_text_font(title, popup_layout::headerTitleFont(), 0);
   lv_obj_set_style_text_color(title, lv_color_white(), 0);
   lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
   lv_label_set_text(title, "");
+  lv_obj_t* disc = icon_disc ? popup_layout::createHeaderIconDisc(parent) : nullptr;
+  if (icon_disc) *icon_disc = disc;
   icon = lv_label_create(parent);
   lv_obj_set_style_text_font(icon, FONT_MDI_ICONS, 0);
   popup_layout::applyIconScale(icon);
+  popup_layout::styleHeaderIcon(icon);
   lv_obj_set_style_text_color(icon, lv_color_white(), 0);
   lv_label_set_text(icon, "");
   close = popup_layout::createCloseButton(parent, handler, context);
-  for (auto* object : {title, icon, close})
-    lv_obj_add_flag(object, LV_OBJ_FLAG_IGNORE_LAYOUT);
-  popup_layout::alignHeader(parent, title, icon);
+  for (auto* object : {title, disc, icon, close})
+    if (object) lv_obj_add_flag(object, LV_OBJ_FLAG_IGNORE_LAYOUT);
+  popup_layout::alignHeader(parent, title, icon, disc);
 }
 
 void detach() {
@@ -178,17 +200,30 @@ void ensure_shell() {
   lv_obj_remove_style_all(shell.header);
   lv_obj_remove_flag(shell.header, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_remove_flag(shell.header, LV_OBJ_FLAG_SCROLLABLE);
-  create_header(shell.header, shell.title, shell.icon, shell.close, close_clicked, nullptr);
+  create_header(shell.header, shell.title, shell.icon, shell.close, close_clicked, nullptr,
+                &shell.icon_disc);
+  // Second header line with the current value; only popups that pass a value
+  // source show it.
+  shell.value = lv_label_create(shell.header);
+  lv_obj_set_width(shell.value, LV_PCT(62));
+  lv_obj_set_style_text_font(shell.value, popup_layout::headerValueFont(), 0);
+  lv_obj_set_style_text_color(shell.value, lv_color_white(), 0);
+  lv_label_set_text(shell.value, "");
+  lv_obj_add_flag(shell.value, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_IGNORE_LAYOUT |
+                                                          LV_OBJ_FLAG_HIDDEN));
+  lv_obj_remove_flag(shell.value, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(shell.overlay, shell_deleted, LV_EVENT_DELETE, nullptr);
 }
 
-void copy_label(lv_obj_t* target, lv_obj_t* source, bool title) {
+void copy_label(lv_obj_t* target, lv_obj_t* source, bool title,
+                const lv_font_t* font_override = nullptr) {
   if (!source || lv_obj_has_flag(source, LV_OBJ_FLAG_HIDDEN)) {
     lv_obj_add_flag(target, LV_OBJ_FLAG_HIDDEN);
     return;
   }
   lv_obj_remove_flag(target, LV_OBJ_FLAG_HIDDEN);
-  const auto* font = lv_obj_get_style_text_font(source, LV_PART_MAIN);
+  const auto* font = font_override ? font_override
+                                   : lv_obj_get_style_text_font(source, LV_PART_MAIN);
   if (font != lv_obj_get_style_text_font(target, LV_PART_MAIN))
     lv_obj_set_style_text_font(target, font, 0);
   const char* text = title ? hometiles_title::text(source) : lv_label_get_text(source);
@@ -201,6 +236,67 @@ void copy_label(lv_obj_t* target, lv_obj_t* source, bool title) {
   if (!lv_color_eq(color, lv_obj_get_style_text_color(target, LV_PART_MAIN)))
     lv_obj_set_style_text_color(target, color, 0);
 
+}
+
+// The header disc looks like the opening tile's disc: shown or hidden by its
+// Icon circle mode, and with "Circle in icon color" a colored icon (binary
+// on, light color, climate mode, ...) tints it; white and grey icons keep the
+// neutral white disc. Same rule and opacities as the tile discs
+// (tile_icon_disc::apply_fill, the global Glow strength, kOpa). Popups
+// opened without a tile tint by a colored icon and always show the disc.
+void apply_header_disc_tint(lv_obj_t* disc, lv_obj_t* icon) {
+  if (!disc || !icon) return;
+  const uint32_t rgb =
+      lv_color_to_u32(lv_obj_get_style_text_color(icon, LV_PART_MAIN)) & 0xFFFFFFu;
+  const uint32_t card = lv_color_to_u32(lv_obj_get_style_bg_color(shell.frame, LV_PART_MAIN)) & 0xFFFFFFu;
+  const uint8_t r = (rgb >> 16) & 0xFF, g = (rgb >> 8) & 0xFF, b = rgb & 0xFF;
+  const HeaderDisc& options = shell.disc;
+  const bool tinted = (r != g || g != b) && (!options.from_tile || options.glow);
+  const bool shown = !options.from_tile ||
+                     (!options.off && (!options.follows_global || ui_surface_style::icon_discs_shown()));
+  const lv_color_t color = tinted ? lv_color_hex(rgb) : lv_color_white();
+  const uint8_t step = popup_layout::headerDiscContrastStep(card);
+  const lv_opa_t opa = shown ? static_cast<lv_opa_t>(popup_layout::headerDiscScaledOpa(
+                                   tinted ? ui_surface_style::icon_glow_opa()
+                                          : ui_surface_style::icon_neutral_opa(),
+                                   step))
+                             : LV_OPA_TRANSP;
+  if (!lv_color_eq(lv_obj_get_style_bg_color(disc, LV_PART_MAIN), color))
+    lv_obj_set_style_bg_color(disc, color, 0);
+  if (lv_obj_get_style_bg_opa(disc, LV_PART_MAIN) != opa) lv_obj_set_style_bg_opa(disc, opa, 0);
+  // The card hairline is the plain lighter tile border. It never follows the
+  // icon color: a hairline change redraws the whole popup, and a Light popup
+  // changes its icon color on every step of a dragged color or Kelvin value.
+  ui_surface_style::apply_popup_border(shell.frame, lv_color_white(),
+                                       static_cast<lv_opa_t>(popup_layout::kPopupBorderOpa));
+}
+
+// A header with a value line shows the title on one line; the classic header
+// keeps the configured two-line title. Only a change re-renders the title.
+void set_title_single_line(lv_obj_t* title, bool single_line) {
+  auto* state = hometiles_title::state_for(title);
+  if (!state || state->single_line == single_line) return;
+  state->single_line = single_line;
+  hometiles_title::render(title, state);
+}
+
+// Copy the current value text from the popup's hidden holder. The holder is
+// never drawn, so its own changes do not repaint anything.
+bool sync_header_value(lv_obj_t* source) {
+  const char* text = source ? lv_label_get_text(source) : nullptr;
+  const bool visible = text && text[0];
+  const bool hidden = lv_obj_has_flag(shell.value, LV_OBJ_FLAG_HIDDEN);
+  if (!visible) {
+    if (!hidden) lv_obj_add_flag(shell.value, LV_OBJ_FLAG_HIDDEN);
+    return false;
+  }
+  if (shell.value_source != text) {
+    shell.value_source = text;
+    hometiles_title::set(shell.value, text, true);
+    set_title_single_line(shell.value, true);
+  }
+  if (hidden) lv_obj_remove_flag(shell.value, LV_OBJ_FLAG_HIDDEN);
+  return true;
 }
 }
 
@@ -229,7 +325,8 @@ PopupShellParts create_popup_body(lv_event_cb_t close_handler, void* context,
   lv_obj_set_style_bg_opa(parts.card, LV_OPA_COVER, 0);
   ui_surface_style::apply_radius(parts.card, popup_layout::kCardRadius, 0);
   lv_obj_set_style_border_width(parts.card, 0, 0);
-  ui_surface_style::apply_global_tile_border(parts.card);
+  // No hairline on the body: the shell frame draws the only card border
+  // (apply_popup_border); a second one on the body doubled its strength.
   lv_obj_set_style_pad_all(parts.card, popup_layout::kCardPad, 0);
   lv_obj_set_style_shadow_width(parts.card, popup_layout::scale480(28), 0);
   lv_obj_set_style_shadow_color(parts.card, lv_color_black(), 0);
@@ -241,11 +338,17 @@ PopupShellParts create_popup_body(lv_event_cb_t close_handler, void* context,
 }
 
 void show_popup_shell(lv_obj_t* owner, lv_obj_t* body, lv_obj_t* title,
-                       lv_obj_t* icon, lv_obj_t* close, void (*dismiss)()) {
+                       lv_obj_t* icon, lv_obj_t* close, void (*dismiss)(),
+                       lv_obj_t* value) {
   if (!owner || !body || !close) return;
   Binding* binding = bind(owner, body, title, icon, close);
   if (!binding) return;
+  binding->value = value;
   ensure_shell();
+  // A newly shown popup takes the disc options of the tile that opened it (or
+  // the default without one); a re-show keeps them unless a tile passed new ones.
+  if (shell.active != binding || g_next_disc.from_tile) shell.disc = g_next_disc;
+  g_next_disc = {};
   if (shell.active && shell.active != binding) {
     auto dismiss_previous = shell.active->dismiss;
     if (dismiss_previous) dismiss_previous();
@@ -293,6 +396,20 @@ void show_popup_shell(lv_obj_t* owner, lv_obj_t* body, lv_obj_t* title,
 
 bool popup_shell_active() { return shell.active != nullptr; }
 
+void popup_shell_use_tile_disc(bool off, bool follows_global, bool glow) {
+  g_next_disc.from_tile = true;
+  g_next_disc.off = off;
+  g_next_disc.follows_global = follows_global;
+  g_next_disc.glow = glow;
+}
+
+void popup_shell_follow_tile_color(uint32_t color) {
+  if (!shell.active || !shell.active->body) return;
+  const lv_color_t value = lv_color_hex(color);
+  if (!lv_color_eq(lv_obj_get_style_bg_color(shell.active->body, LV_PART_MAIN), value))
+    lv_obj_set_style_bg_color(shell.active->body, value, 0);
+}
+
 void hide_popup_shell(lv_obj_t* body) {
   if (!shell.active || shell.active->body != body) return;
   invalidate_shell();
@@ -309,9 +426,21 @@ void sync_popup_shell() {
   const auto color = lv_obj_get_style_bg_color(body, LV_PART_MAIN);
   if (!lv_color_eq(color, lv_obj_get_style_bg_color(shell.frame, LV_PART_MAIN)))
     lv_obj_set_style_bg_color(shell.frame, color, 0);
-  copy_label(shell.title, shell.active->title, true);
+  const bool with_value = sync_header_value(shell.active->value);
+  copy_label(shell.title, shell.active->title, true,
+             with_value ? popup_layout::headerCompactTitleFont() : nullptr);
+  set_title_single_line(shell.title, with_value);
   copy_label(shell.icon, shell.active->icon, false);
-  popup_layout::alignHeader(shell.header, shell.title, shell.icon);
+  apply_header_disc_tint(shell.icon_disc, shell.icon);
+  // The disc appears only behind a visible header icon.
+  lv_obj_set_flag(shell.icon_disc, LV_OBJ_FLAG_HIDDEN,
+                  lv_obj_has_flag(shell.icon, LV_OBJ_FLAG_HIDDEN) ||
+                      !lv_label_get_text(shell.icon)[0]);
+  if (with_value)
+    popup_layout::alignHeaderWithValue(shell.header, shell.title, shell.value, shell.icon,
+                                       shell.icon_disc);
+  else
+    popup_layout::alignHeader(shell.header, shell.title, shell.icon, shell.icon_disc);
   copy_label(lv_obj_get_child(shell.close, 0), lv_obj_get_child(shell.active->close, 0), false);
   if (lv_obj_has_state(shell.active->close, LV_STATE_DISABLED))
     lv_obj_add_state(shell.close, LV_STATE_DISABLED);

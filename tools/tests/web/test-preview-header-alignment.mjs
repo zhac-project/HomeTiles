@@ -7,9 +7,14 @@ const helpers = [
   'escapeHtml', 'normalizeTileTitle', 'tileTitleHtml', 'getTileTypeMeta',
   'isEditablePreview', 'normalizeSensorValueFont', 'getSensorValueFontClass',
   'resolveIconName', 'normalizeMdiIconName', 'isExplicitlyDisabledValue',
-  'tileColorInputIsDefault', 'tileBgToHex', 'rgbToHex', 'applyTileAriaLabel',
+  'tileColorInputIsDefault', 'tileBgToHex', 'tileBgValueIsSet', 'tileBackgroundCss',
+  'applyIconDiscTint', 'iconDiscTinted', 'cssColorChannels',
+  'tileBgFollowsDefault', 'tileColorHexIsDefaultGrey',
+  'isDefaultTileGrey', 'tileColorMode', 'syncTileColorMode', 'previewIconColor', 'iconColorRuleState',
+  'tileTypeHasDiscToggle', 'tileTypeHasColoredIcon',
+  'rgbToHex', 'applyTileAriaLabel',
   'resolveUnitValue', 'isScreensaverTileTab', 'getTileResizeHandlesHtml',
-  'applyCompactSensorPreview', 'isCompactSensorType', 'renderTileFromData', 'updateTilePreview'
+  'applyCompactSensorPreview', 'compactValueSize', 'syncCompactValueFontOptions', 'isCompactSensorType', 'renderTileFromData', 'updateTilePreview'
 ].map(extractDeliveredFunction).join('\n');
 const html = `<!doctype html><html><head><style>
 ${readRepoFile('src/web/assets/admin.css')}

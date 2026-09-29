@@ -65,6 +65,9 @@ public:
   void handleGetHardwareIo();
   void handleSaveHardwareIo();
   void handleSaveTileBorders();
+  void handleSaveIconDiscs();
+  void handleSaveIconGlow();
+  void handleSaveDefaultTileColor();
   void handleTileRadius();
   void handleLocalCamera();
   void handleGetScreensaverWallpaper();

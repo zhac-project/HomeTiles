@@ -66,6 +66,7 @@
     if (specific) {
       specific.classList.remove('hidden');
     }
+    applyFolderTypeLock('folder0', false);
     const snapshot = normalizeHiddenSettingsSnapshot();
     if (!applyDraft('folder0', HIDDEN_SETTINGS_TILE_INDEX)) {
       applyTileFormData('folder0', snapshot);
@@ -209,6 +210,8 @@
       updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab);
     });
     bindLive(iconInput, 'input', 'tileIcon', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
+    bindLive(document.getElementById(prefix + '_tile_icon_disc'), 'change', 'tileIconDisc', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
+    bindLive(document.getElementById(prefix + '_tile_icon_glow'), 'change', 'tileIconGlow', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(colorInput, 'input', 'tileColor', () => { markTileColorInputExplicit(tab); updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(opacityInput, 'input', 'tileOpacity', () => { updateTilePreview(tab); updateDraft(tab); });
     bindLive(opacityInput, 'change', 'tileOpacitySave', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
@@ -246,6 +249,19 @@
         opacityInput.value = String(SCREENSAVER_TILE_DEFAULT_OPACITY);
       }
       updateTileType(tab);
+      // New tiles start in the HomeTiles look: a type with icon colors tints
+      // the tile with the color its icon shows at 20 % (Tile color "From
+      // icon"). Existing tiles and the screensaver keep their own style.
+      if (previousType === 0 && nextType !== 0 && !isScreensaverTileTab(tab) &&
+          typeof tileTypeHasIconColors === 'function' &&
+          tileTypeHasIconColors(String(nextType))) {
+        const strength = document.getElementById(tab + '_tile_icon_fill_strength');
+        if (strength) strength.value = '20';
+        const fill = document.getElementById(tab + '_tile_icon_fill');
+        if (fill) fill.checked = true;
+        syncTileColorMode(tab);
+        if (typeof syncIconColorFields === 'function') syncIconColorFields(tab);
+      }
       normalizeLayoutInputs(tab);
       updateLayoutFromInputs(tab);
       updateTilePreview(tab);
@@ -393,7 +409,7 @@
     bindLive(animationFpsInput, 'input', 'animationFps', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(animationFitSelect, 'change', 'animationFit', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(animationZoomInput, 'input', 'animationZoom', () => { updateDraft(tab); scheduleAutoSave(tab); });
-    for (const kind of ['clock','text']) {
+    for (const kind of ['clock','text','back']) {
       bindLive(document.getElementById(prefix + '_' + kind + '_tile_border'), 'change', kind + 'TileBorder', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     }
     bindLive(clockTimeCheck, 'change', 'clockShowTime', () => {

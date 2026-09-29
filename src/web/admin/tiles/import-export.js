@@ -445,6 +445,12 @@
     fd.append('type', safeType);
     fd.append('title', tile.title || '');
     fd.append('icon_name', tile.icon_name || '');
+    if (tile.icon_disc !== undefined && tile.icon_disc !== null) {
+      fd.append('icon_disc', tile.icon_disc);
+    }
+    if (tile.icon_glow !== undefined && tile.icon_glow !== null) {
+      fd.append('icon_glow', ['0', 'false'].includes(String(tile.icon_glow)) ? '0' : '1');
+    }
     const parsedBgColor = parseBgColorValue(tile.bg_color);
     if (parsedBgColor !== 0 || (typeof tile.bg_color === 'string' && tile.bg_color.trim().startsWith('#'))) {
       fd.append('bg_color', parsedBgColor);
@@ -459,6 +465,9 @@
     if (tile.background_opacity !== undefined && tile.background_opacity !== null) {
       fd.append('background_opacity', tile.background_opacity);
     }
+    // Per-tile icon colors (Sensor family, Binary sensor, Energy); older
+    // exports without the field import without icon colors.
+    if (typeof tile.icon_colors === 'string') fd.append('icon_colors', tile.icon_colors);
 
     if ([21, 22, 23].includes(safeType)) fd.append('sensor_value_font', tile.sensor_value_font ?? 2);
     if (safeType === 1) {
@@ -534,6 +543,8 @@
       if (tile.popup_open_mode !== undefined && tile.popup_open_mode !== null) {
         fd.append('popup_open_mode', tile.popup_open_mode);
       }
+    } else if (safeType === 8) {
+      fd.append('tile_border', Number(tile.sensor_display_mode) === 1 ? '0' : '1');
     } else if (safeType === 10) {
       fd.append('text_value', tile.text_value || tile.scene_alias || tile.key_macro || '');
       fd.append('text_value_font', tile.text_value_font || tile.sensor_value_font || '0');

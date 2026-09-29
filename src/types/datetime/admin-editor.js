@@ -1,5 +1,6 @@
 
   function loadDateTimeFields(tab, data) {
+    loadIconColorFields(tab, data);
     const font = document.getElementById(tab + '_datetime_value_font');
     if (font) font.value = String(data.sensor_value_font ?? 2);
     const entity = document.getElementById(tab + '_datetime_entity');
@@ -24,9 +25,12 @@
       popup.value = data.popup_open_mode !== undefined
         ? String(data.popup_open_mode) : '1';
     }
+    // The entity is known now: the state color section follows it.
+    syncIconColorFields(tab);
   }
 
   function saveDateTimeFields(tab, formData) {
+    saveIconColorFields(tab, formData);
     formData.append('sensor_value_font', document.getElementById(tab + '_datetime_value_font')?.value ?? '2');
     const entityEl = document.getElementById(tab + '_datetime_entity');
     const entity = entityEl
@@ -39,6 +43,7 @@
   }
 
   function resetDateTimeFields(tab) {
+    resetIconColorFields(tab);
     const font = document.getElementById(tab + '_datetime_value_font');
     if (font) font.value = '2';
     const entity = document.getElementById(tab + '_datetime_entity');

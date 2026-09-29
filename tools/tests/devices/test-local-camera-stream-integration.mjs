@@ -49,7 +49,7 @@ const tryStartCallers = [...maskCpp(service).matchAll(/tryStartStream\(\);/g)].l
 assert.equal(tryStartCallers, 1, 'tryStartStream is called from the keepalive handler only');
 assert.match(svc('serviceStream'),
   /if \(local_camera_stream::reasonEndsSession\(reason\)\) \{\s*endStreamSession\(reason\);\s*\} else \{\s*requestStreamStop\(reason\);/,
-  'Popup/sleep/errors stop the upload but keep the session for the next keepalive');
+  'Popup/storage/errors stop the upload but keep the session for the next keepalive');
 
 // --- Stop paths --------------------------------------------------------------------------
 assert.match(svc('setEnabled'), /if \(g_worker\) g_abort\.store\(true\);\s*endStreamSession\(StopReason::Disabled\);/);
@@ -58,10 +58,13 @@ assert.match(svc('shutdown'), /g_stream_blocked_until_ms\.store\([\s\S]*endStrea
 assert.match(svc('streamWait'), /if \(bits & kNotifyShutdown\) return StopReason::Shutdown;\s*if \(bits & kNotifyDisable\) return StopReason::Disabled;\s*if \(bits & kNotifyRelease\) return StopReason::Sleep;/);
 assert.match(svc('streamWait'), /\*leftover \|= bits & \(kNotifyShutdown \| kNotifyDisable \| kNotifyRelease \| kNotifyProbe\);/,
   'Lifecycle notifications are handed back to the worker loop');
-assert.match(svc('releaseForSleep'), /notifyWorker\(kNotifyRelease\);/);
-assert.match(svc('currentGate'), /in\.display_sleeping = powerManager\.isInSleep\(\);/,
-  'Keepalives defer while the display sleeps, so the sleep release is not undone');
-assert.match(contract, /if \(in\.display_sleeping\) return StopReason::Sleep;/);
+// Display sleep no longer stops or defers the stream
+// (tools/tests/devices/test-local-camera-sleep-stream.mjs covers the display).
+assert.match(svc('releaseForSleep'),
+  /if \(g_stream_wanted\.load\(\) \|\| g_stream_running\.load\(\)\) return;\s*notifyWorker\(kNotifyRelease\);/,
+  'The sleep release frees only an idle pipeline, never a running stream');
+assert.doesNotMatch(svc('currentGate'), /isInSleep|display_sleeping/);
+assert.doesNotMatch(bodyOf(contract, 'streamGate'), /sleep|StopReason::Sleep/i);
 assert.match(svc('handleStreamStop'), /endStreamSession\(StopReason::StreamStop\);/);
 assert.match(contract, /if \(!in\.mqtt_connected\) return StopReason::Mqtt;/);
 assert.match(contract, /if \(in\.ttl_expired\) return StopReason::Keepalive;/);
@@ -131,8 +134,10 @@ assert.match(service, /static_assert\(kMode\.frame_width == kMode\.image_width &
 assert.match(service, /constexpr jpeg_down_sampling_type_t kJpegSubsampling =\s*kQuarterTurn \? JPEG_DOWN_SAMPLING_YUV420 : JPEG_DOWN_SAMPLING_YUV422;/);
 assert.equal((service.match(/config\.sub_sample = kJpegSubsampling;/g) || []).length, 2, 'Snapshot and stream');
 assert.doesNotMatch(service, /config\.sub_sample = JPEG_DOWN_SAMPLING/);
-assert.match(service, /constexpr uint16_t kStatusRotate = local_camera_board::kMode\.quarter_turn \? 90 : 0;/);
-assert.match(svc('currentStatusFields'), /fields\.rotate = kStatusRotate;/);
+// The announced turn follows the mounting and the user rotation at runtime
+// (tools/tests/web/test-local-camera-rotation.mjs covers the combinations).
+assert.match(svc('statusRotate'), /statusRotateDegrees\(\s*imageTurn\(false, local_camera_board::kMode\.quarter_turn, g_rotation\.load\(\)\)\)/);
+assert.match(svc('currentStatusFields'), /fields\.rotate = statusRotate\(\);/);
 // ISP statistics run on the frame as delivered.
 assert.match(svc('createAutoExposure'), /config\.window\.btm_right\.x = kStatsLeft \+ kStatsWidth;/);
 assert.match(service, /constexpr uint32_t kStatsWidth = kMode\.frame_width \/ 5 \* 5;/);
@@ -154,7 +159,7 @@ assert.match(run, /applyOrientation\(false\)[\s\S]*?esp_cam_ctlr_start\([\s\S]*?
 assert.match(run, /applyImageSettingsIfChanged\(\);\s*\/\/[^\n]*\n\s*if \(!applyOrientation\(true\)\) \{\s*reason = StopReason::Error;/,
   'A rotation or mirror change during the stream turns the sensor readout');
 const orientation = svc('applyOrientation');
-assert.match(orientation, /desiredOrientation\(imageRotated180\(\), g_mirror\.load\(\), kQuarterTurn\)/);
+assert.match(orientation, /const ImageTurn turn = imageTurn\(imageRotated180\(\), kQuarterTurn, g_rotation\.load\(\)\);\s*const SensorOrientation wanted =\s*desiredOrientation\(turn\.rotated_180, g_mirror\.load\(\), turn\.quarter_turn\);/);
 assert.match(orientation, /if \(code == g_applied_orientation\) return true;/, 'No SCCB write per frame');
 assert.match(orientation, /xQueueReset\(g_isr\.frames\);[\s\S]*?kOrientationSettleFrames/,
   'Frames in flight during a live change are dropped');
