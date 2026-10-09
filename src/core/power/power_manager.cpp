@@ -3,6 +3,7 @@
 #include "src/ui/ui_manager.h"
 #include "src/core/hardware/board_hal.h"
 #include "src/core/display/display_manager.h"
+#include "src/devices/device.h"
 #include "src/core/config/config_manager.h"
 #include "src/core/power/battery_state.h"
 #include "src/network/network_manager.h"
@@ -205,6 +206,14 @@ void PowerManager::wakeFromDisplaySleep(const char* reason) {
 #endif
   BoardHAL::displayWaitDisplay();
   delay(10);
+#if defined(DEVICE_SUNTON_ESP32_8048S070C)
+  // VSYNC restarts stay masked on this direct-PSRAM RGB panel, so a scanout
+  // drift from PSRAM contention while asleep would otherwise last until the
+  // next flash write. Resynchronize while the backlight is still off.
+  Serial.println("[Display/S3] Resynchronizing RGB scanout after wake");
+  Device::storageWriteBegin();
+  Device::storageWriteEnd();
+#endif
   BoardHAL::setBrightness(saved_brightness);
 
   is_display_sleeping = false;

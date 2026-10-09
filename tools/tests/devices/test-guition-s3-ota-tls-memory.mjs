@@ -17,6 +17,9 @@ const compiler = [process.env.CXX, 'clang++', 'g++'].filter(Boolean)
   .find(command => spawnSync(command, ['--version']).status === 0);
 if (!compiler) { console.log('SKIP: OTA TLS memory test needs a native C++ compiler'); process.exit(0); }
 const allocator = source.slice(source.indexOf('void* checkTlsInternalCalloc('), source.indexOf('struct ParsedHttpsUrl'));
+// The board's default mbedTLS allocator, compiled against the heap stubs below.
+const tlsMemory = fs.readFileSync(path.join(root, 'src/network/tls_memory.cpp'), 'utf8')
+  .replace(/^#include[^\n]*$/gm, '');
 const cpp = String.raw`
 #include <algorithm>
 #include <cassert>
@@ -99,6 +102,7 @@ class NetworkClientSecure {
   bool connected(){return online;}
   void stop(){for(void* p:blocks)tls_free(p);blocks.clear();online=false;}
 };
+${tlsMemory}
 ${allocator}
 struct ParsedHttpsUrl { String host,path; uint16_t port=443; };
 ${['parseHttpsUrl','readHttpLine','parseStatusCode','parseSizeT','parseContentRangeTotal','resolveRedirectUrl'].map(fn).join('\n')}
@@ -115,7 +119,7 @@ void reset(size_t free,size_t largest,size_t external=4*1024*1024) {
 bool transfer(String& error){uint8_t buf[4];size_t total=0;std::string body;String final_url;
   bool ok=fetchHttpRange("https://github.com/release",0,3,buf,sizeof(buf),collect,&body,total,error,&final_url);
   if(ok){assert(body=="DATA"&&total==400&&final_url=="https://release-assets.githubusercontent.com/image");}
-  assert(allocations.empty()); assert(tls_calloc==coreCalloc||tls_calloc==checkTlsInternalCalloc);return ok;
+  assert(allocations.empty()); assert(tls_calloc==coreCalloc||tls_calloc==TlsMemory::defaultCalloc);return ok;
 }
 int main(){String error;
   reset(128*1024,64*1024); assert(transfer(error));
@@ -150,9 +154,37 @@ int main(){String error;
 #endif
     tls_free(p);
   }
-  assert(allocations.empty());assert(tls_calloc==checkTlsInternalCalloc);
+  // Scoped allocators return to the board default, not to internal-only.
+  assert(allocations.empty());assert(tls_calloc==TlsMemory::defaultCalloc);
   for(int i=0;i<20;++i){reset(128*1024,64*1024);assert(transfer(error));}
-  std::cout<<"OTA range allocation, redirects, pressure, exhaustion, cleanup and HTTP errors passed\n";
+  // The long-lived ZHAC Cloud session stays in internal RAM while it fits:
+  // TLS records in PSRAM compete with the continuous RGB scanout.
+  reset(128*1024,64*1024);assert(TlsMemory::installDefault());assert(tls_calloc==TlsMemory::defaultCalloc);
+  { void* records=tls_calloc(1,16384);assert(records&&!allocations.at(records).external);tls_free(records); }
+  // A reconnect after hours of uptime (Sunton field reading: internal minimum
+  // 932 B, largest block about 7 KiB). Only the Sunton falls back to PSRAM;
+  // every other board keeps the core's internal-only allocator.
+  reset(16*1024,7*1024);
+  { void* records=tls_calloc(1,16384);void* mpi=tls_calloc(1,512);
+#if defined(DEVICE_SUNTON_ESP32_8048S070C)
+    assert(records&&allocations.at(records).external);
+#else
+    assert(!records);
+#endif
+    assert(mpi&&!allocations.at(mpi).external);
+    tls_free(records);tls_free(mpi);
+  }
+  // Internal RAM exhausted: the Sunton still completes the handshake in PSRAM.
+  reset(0,0);
+  { void* mpi=tls_calloc(1,512);
+#if defined(DEVICE_SUNTON_ESP32_8048S070C)
+    assert(mpi&&allocations.at(mpi).external);
+#else
+    assert(!mpi);
+#endif
+    tls_free(mpi);
+  }
+  std::cout<<"OTA range allocation, redirects, pressure, exhaustion, cleanup, HTTP errors and the board TLS default passed\n";
 }
 `;
 const out = path.join(root, 'build/tests/guition-s3-ota-tls-memory');
@@ -160,7 +192,8 @@ fs.mkdirSync(out,{recursive:true});
 const cppPath = path.join(out,'test.cpp');fs.writeFileSync(cppPath,cpp);
 const deviceSelect = fs.readFileSync(path.join(root, 'src/devices/device_select.h'), 'utf8');
 const familyGuard = deviceSelect.match(/#if[^#]+#define DEVICE_ESP32_S3_RGB_480/)[0];
-const s3Targets = ['DEVICE_GUITION_ESP32_4848S040', 'DEVICE_WAVESHARE_S3_TOUCH_LCD_4', 'DEVICE_WAVESHARE_S3_TOUCH_LCD_4B'];
+const s3Targets = ['DEVICE_GUITION_ESP32_4848S040', 'DEVICE_WAVESHARE_S3_TOUCH_LCD_4', 'DEVICE_WAVESHARE_S3_TOUCH_LCD_4B',
+  'DEVICE_SUNTON_ESP32_8048S070C'];
 for (const define of s3Targets) assert.ok(familyGuard.includes(`defined(${define})`));
 for (const target of [...s3Targets,'p4']) {
   const binary = path.join(out,target+(process.platform==='win32'?'.exe':''));

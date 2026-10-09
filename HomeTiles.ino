@@ -33,6 +33,7 @@
 #include "src/ui/popups/camera/camera_popup.h"
 #include "src/types/energy/energy_data.h"
 #include "src/network/network_manager.h"
+#include "src/network/tls_memory.h"
 #include "src/network/transport/network_transport.h"
 #include "src/network/mqtt/mqtt_handlers.h"
 #include "src/network/mqtt/mqtt_topics.h"
@@ -613,6 +614,10 @@ void setup() {
   GuitionS3Diagnostics::logOtaPartitions("boot");
   confirm_running_ota_if_needed();
   log_memory_status("boot-start");
+#if defined(DEVICE_SUNTON_ESP32_8048S070C)
+  // Before Wi-Fi or the ZHAC Cloud client opens a TLS session (tls_memory.h).
+  TlsMemory::installDefault();
+#endif
   Serial.flush();
 
   // Board-HAL initialisiert I2C, Display (MIPI-DSI HX8394), GT911 Touch, Backlight

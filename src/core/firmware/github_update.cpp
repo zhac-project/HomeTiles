@@ -20,6 +20,7 @@
 #include "src/core/firmware/firmware_version.h"
 #include "src/devices/device.h"
 #include "src/devices/guition_esp32_4848s040/s3_diagnostics.h"
+#include "src/network/tls_memory.h"
 #include "src/network/transport/network_transport.h"
 
 namespace {
@@ -168,11 +169,9 @@ class ScopedCheckTlsAllocator {
                                                 checkTlsHeapFree) == 0) {}
 
   ~ScopedCheckTlsAllocator() {
-    if (active_) {
-      // This matches CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC in the selected cores.
-      mbedtls_platform_set_calloc_free(checkTlsInternalCalloc,
-                                       checkTlsHeapFree);
-    }
+    // Internal-only (CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC of the selected cores)
+    // except on boards whose default keeps long-lived TLS in PSRAM.
+    if (active_) TlsMemory::installDefault();
   }
 
   bool active() const { return active_; }

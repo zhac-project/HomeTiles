@@ -48,7 +48,7 @@ Issue: https://github.com/GalusPeres/HomeTiles/issues/30
 
 ## ZHAC Cloud fork
 
-- Sunton 8048S070C (unpublished): link, taps, remote editor OK 2026-09-25; TLS soak, merge HW test pending.
+- Sunton 8048S070C: link OK; TLS starved int. RAM after hours: PSRAM TLS fallback, wake resync; HW pending.
 
 ## Issue #38
 
