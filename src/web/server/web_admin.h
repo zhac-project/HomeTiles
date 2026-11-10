@@ -68,6 +68,8 @@ public:
   void handleSaveIconDiscs();
   void handleSaveIconGlow();
   void handleSaveDefaultTileColor();
+  void handleGetBackground();
+  void handleSaveBackground();
   void handleTileRadius();
   void handleLocalCamera();
   void handleGetScreensaverWallpaper();

@@ -152,6 +152,12 @@ bool WebAdminServer::start() {
               withStorageHold([this]() { this->handleSaveIconGlow(); }));
   server.on("/api/display/tile-color", HTTP_POST,
               withStorageHold([this]() { this->handleSaveDefaultTileColor(); }));
+  // Settings only, so the cloud's remote Web Admin may use them; photo uploads
+  // stay in the local-only file manager.
+  server.on("/api/display/background", HTTP_GET,
+              withStorageHold([this]() { this->handleGetBackground(); }));
+  server.on("/api/display/background", HTTP_POST,
+              withStorageHold([this]() { this->handleSaveBackground(); }));
     server.on("/api/local-camera", HTTP_GET,
               [this]() { this->handleLocalCamera(); });
     server.on("/api/local-camera", HTTP_POST,

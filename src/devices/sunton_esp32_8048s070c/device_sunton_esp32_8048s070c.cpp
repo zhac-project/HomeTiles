@@ -8,6 +8,8 @@
 #include <Arduino_GFX_Library.h>
 
 #include <LittleFS.h>
+#include <SD.h>
+#include <SPI.h>
 #include <WiFi.h>
 #include <Wire.h>
 #include <esp_err.h>
@@ -69,6 +71,19 @@ constexpr uint8_t kTouchAddressAlternate = 0x14;
 constexpr uint16_t kTouchProductIdRegister = 0x8140;
 constexpr uint16_t kTouchStatusRegister = 0x814E;
 constexpr uint16_t kTouchPointRegister = 0x814F;
+
+// microSD slot on the S3's native FSPI pins (board definition
+// esp32-8048S070C.json: TF_CS 10, TF_SPI_MOSI 11, TF_SPI_SCLK 12,
+// TF_SPI_MISO 13). The bus is not shared with the panel or the touch.
+constexpr int8_t kSdCs = 10;
+constexpr int8_t kSdMosi = 11;
+constexpr int8_t kSdSck = 12;
+constexpr int8_t kSdMiso = 13;
+// IO_MUX pins allow full SD SPI speed; 4 MHz (the Arduino SD default) stays as
+// mount fallback.
+constexpr uint32_t kSdFrequency = 20000000;
+constexpr uint32_t kSdFallbackFrequency = 4000000;
+constexpr uint32_t kSdRetryMs = 1500;
 // Keep a held point across normal GT911 "no new frame" polls, but do not let
 // a broken I2C/data path leave LVGL pressed forever. At the 8 ms input period,
 // 16 consecutive real errors give the bus roughly 128 ms to recover.
@@ -509,6 +524,10 @@ bool g_display_ready = false;
 bool g_backlight_ready = false;
 bool g_touch_ready = false;
 bool g_littlefs_ready = false;
+SPIClass g_sd_spi(FSPI);
+bool g_sd_available = false;
+bool g_sd_init_attempted = false;
+uint32_t g_sd_retry_tick_ms = 0;
 uint8_t g_brightness = 0;
 uint8_t g_applied_brightness = 0;
 uint8_t g_rotation = DeviceSuntonESP328048S070C::kProfile.rotation_default;
@@ -1013,12 +1032,55 @@ void DeviceSuntonESP328048S070C::prepareForRestart() {
     g_gfx->fillScreen(0x0000);
     g_gfx->flush(true);
   }
+  if (g_sd_available) {
+    SD.end();
+    g_sd_available = false;
+  }
   delay(20);
 }
 
-// The board has a microSD slot, but its pins are not verified for HomeTiles yet:
-// the profile keeps everything on LittleFS.
-bool DeviceSuntonESP328048S070C::initSDCard() { return false; }
+// The card holds user media only (screensaver and background photos);
+// settings, grids and icons stay on LittleFS.
+bool DeviceSuntonESP328048S070C::initSDCard() {
+  if (g_sd_available && SD.cardType() != CARD_NONE) return true;
+
+  const uint32_t now = millis();
+  if (g_sd_init_attempted && (now - g_sd_retry_tick_ms) < kSdRetryMs) {
+    return false;
+  }
+  g_sd_init_attempted = true;
+  g_sd_retry_tick_ms = now;
+  SD.end();
+
+  g_sd_spi.begin(kSdSck, kSdMiso, kSdMosi, kSdCs);
+  uint32_t frequency = kSdFrequency;
+  bool mounted = SD.begin(kSdCs, g_sd_spi, frequency, "/sdcard", 5);
+  if (!mounted) {
+    SD.end();
+    g_sd_spi.end();
+    g_sd_spi.begin(kSdSck, kSdMiso, kSdMosi, kSdCs);
+    frequency = kSdFallbackFrequency;
+    mounted = SD.begin(kSdCs, g_sd_spi, frequency, "/sdcard", 5);
+  }
+  if (!mounted) {
+    g_sd_available = false;
+    Serial.println("[Device/Sunton ESP32-8048S070C] SD card mount failed");
+    return false;
+  }
+  if (SD.cardType() == CARD_NONE) {
+    SD.end();
+    g_sd_available = false;
+    Serial.println("[Device/Sunton ESP32-8048S070C] SD card absent");
+    return false;
+  }
+
+  g_sd_available = true;
+  Serial.printf(
+      "[Device/Sunton ESP32-8048S070C] SD card OK, size=%llu MB, hz=%lu\n",
+      static_cast<unsigned long long>(SD.cardSize() / (1024ULL * 1024ULL)),
+      static_cast<unsigned long>(frequency));
+  return true;
+}
 
 bool DeviceSuntonESP328048S070C::storageReady() {
   return g_littlefs_ready;
@@ -1097,16 +1159,21 @@ void DeviceSuntonESP328048S070C::storageWriteEnd() {
   }
 }
 
-bool DeviceSuntonESP328048S070C::sdReady() { return false; }
+bool DeviceSuntonESP328048S070C::sdReady() {
+  // Mounted once during board initialisation; never retried from UI paths,
+  // where a failing SD.begin() would block the LVGL task.
+  return g_sd_available && SD.cardType() != CARD_NONE;
+}
 
-fs::FS& DeviceSuntonESP328048S070C::sdFS() { return LittleFS; }
+fs::FS& DeviceSuntonESP328048S070C::sdFS() { return SD; }
 
 bool DeviceSuntonESP328048S070C::suspendSDCardForNetworkTransition() {
+  // Native S3 WiFi does not share a bus with the card.
   return false;
 }
 
 bool DeviceSuntonESP328048S070C::resumeSDCardAfterNetworkTransition() {
-  return false;
+  return initSDCard();
 }
 
 bool DeviceSuntonESP328048S070C::initLittleFS() {
@@ -1130,7 +1197,10 @@ void DeviceSuntonESP328048S070C::migrateStorageFromSD() {
 
   storageWriteBegin();
   ensureStorageLayout();
-  Serial.println("[Storage] No SD card on this profile, starting fresh");
+  // This profile has always kept its data on LittleFS; a card may hold another
+  // panel's data, so it is never migrated.
+  Serial.println(
+      "[Storage] Storage migration from SD is not used on this profile, starting fresh");
 
   File flag = LittleFS.open("/_migrated", FILE_WRITE);
   if (flag) {

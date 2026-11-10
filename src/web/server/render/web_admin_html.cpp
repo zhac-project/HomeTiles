@@ -28,6 +28,7 @@
 #include "src/tiles/icons/mdi_icons.h"
 #include "src/tiles/runtime/tile_icon_disc.h"
 #include "src/types/energy/energy_data.h"
+#include "src/ui/background/background_photo.h"
 #include "src/ui/screensaver/screensaver_config.h"
 #include "src/video/local_camera/local_camera.h"
 #include "src/video/local_camera/local_camera_stream_contract.h"
@@ -966,7 +967,34 @@ static void appendTileTabHTML(
             "<button type=\"button\" class=\"tile-color-reset-btn\" title=\"Reset\" "
             "onclick=\"saveDefaultTileColor('";
     html += factory_color_hex;
-    html += "')\"><i class=\"mdi mdi-restore\"></i></button></div></div></div></section>\n";
+    html += "')\"><i class=\"mdi mdi-restore\"></i></button></div></div>";
+    // Background photo, as Settings › Display › Background on the panel. The
+    // photo list and the status arrive from loadBackgroundSettings().
+    const String photo_id = tab_id + "_global_background_photo";
+    const String opacity_id = tab_id + "_global_tile_opacity";
+    const String dim_id = tab_id + "_global_background_dim";
+    const String opacity_value = String(background_photo::effective_tile_opacity());
+    const String dim_value = String(background_rules::clamp_dim(display.background_dim));
+    html += "<div class=\"global-settings-field global-background-field\"><label for=\"" + photo_id + "\">";
+    appendHtmlEscaped(html, tr.admin_background_photo);
+    html += "</label><select class=\"global-background-photo\" id=\"" + photo_id +
+            "\" onchange=\"saveBackgroundSettings({photo: this.value})\"></select>"
+            "<span class=\"global-background-status\"></span></div>";
+    html += "<div class=\"global-settings-field\"><label for=\"" + opacity_id + "\">";
+    appendHtmlEscaped(html, tr.admin_tile_opacity);
+    html += "</label><div class=\"global-radius-field\"><input class=\"global-tile-opacity\" id=\"" + opacity_id +
+            "\" type=\"range\" min=\"" + String(Device::kTileOpacityPercentMin) + "\" max=\"100\" step=\"" +
+            String(background_rules::kStep) + "\" value=\"" + opacity_value +
+            "\" oninput=\"previewBackgroundValue(this)\" onchange=\"saveBackgroundSettings({opacity: this.value})\">"
+            "<output class=\"global-tile-opacity-value\">" + opacity_value + " %</output></div></div>";
+    html += "<div class=\"global-settings-field\"><label for=\"" + dim_id + "\">";
+    appendHtmlEscaped(html, tr.admin_background_dim);
+    html += "</label><div class=\"global-radius-field\"><input class=\"global-background-dim\" id=\"" + dim_id +
+            "\" type=\"range\" min=\"0\" max=\"" + String(background_rules::kMaxDim) + "\" step=\"" +
+            String(background_rules::kStep) + "\" value=\"" + dim_value +
+            "\" oninput=\"previewBackgroundValue(this)\" onchange=\"saveBackgroundSettings({dim: this.value})\">"
+            "<output class=\"global-background-dim-value\">" + dim_value + " %</output></div></div>";
+    html += "</div></section>\n";
     html += R"html(            <p class="hint">)html";
   } else {
     html += R"html(            <div class="folder-footer-options">

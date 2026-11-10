@@ -4893,6 +4893,11 @@ lv_obj_t* render_tile(lv_obj_t* parent, int col, int row, const Tile& tile, uint
     if (tile_obj && grid_type != GridType::SCREENSAVER &&
         tile.type != TILE_EMPTY) {
       ui_surface_style::apply_global_tile_border(tile_obj);
+      // Over a background photo the card takes the tile opacity; the clock
+      // drops its card and border so time and date sit on the photo.
+      const bool cardless = tile.type == TILE_CLOCK && ui_surface_style::photo_backdrop_shown();
+      if (cardless) ui_surface_style::disable_tile_border(tile_obj);
+      ui_surface_style::apply_tile_card_background(tile_obj, cardless);
     }
     return tile_obj;
   }

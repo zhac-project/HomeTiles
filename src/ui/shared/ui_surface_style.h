@@ -50,4 +50,15 @@ void request_global_tile_border_refresh();
 void request_icon_disc_refresh();
 void process_pending_updates();
 
+// Background photo (UI thread only). The tile layers share one backdrop
+// style: black COVER without a photo, transparent over one. Changing it
+// updates every layer, also in cached grids; tiles are not re-rendered.
+void set_photo_backdrop(bool shown, uint8_t tile_opacity_pct);
+bool photo_backdrop_shown();
+void apply_backdrop(lv_obj_t* obj);
+// Over a photo a tile card takes the tile opacity, starting from its own
+// rendered bg_opa; a pressed card moves halfway back to it. A cardless card
+// (the clock over a photo) uses 0 %. No-op without a photo.
+void apply_tile_card_background(lv_obj_t* card, bool cardless);
+
 }  // namespace ui_surface_style

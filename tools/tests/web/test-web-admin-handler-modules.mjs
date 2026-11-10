@@ -32,6 +32,7 @@ const owners = {
   'web_admin.cpp': ['Root'],
   'web_admin_hardware_io.cpp': ['GetHardwareIo', 'SaveHardwareIo'],
   'web_admin_local_camera.cpp': ['LocalCamera'],
+  'web_admin_background.cpp': ['GetBackground', 'SaveBackground'],
 };
 const sources = new Map(serverFiles.filter(name => name.endsWith('.cpp'))
   .map(file => [file.split('/').at(-1), read(file.split('/').at(-1))]));

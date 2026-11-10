@@ -23,6 +23,9 @@ inline constexpr uint8_t kConfiguredBrightnessPercentMin = 2;
 #else
 inline constexpr uint8_t kConfiguredBrightnessPercentMin = 1;
 #endif
+// Lowest tile opacity over a background photo. A board whose panel cannot
+// redraw see-through tiles fast enough gets a higher floor.
+inline constexpr uint8_t kTileOpacityPercentMin = 0;
 inline constexpr RotationStepMode kRotationStepMode = kProfile.rotation_step_mode;
 inline constexpr uint8_t kRotationDefault = kProfile.rotation_default;
 inline constexpr uint8_t kRotationFlipped = kProfile.rotation_flipped;

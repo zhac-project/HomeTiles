@@ -12,7 +12,8 @@ export function radiusPolicyHost(root, cellHeight = '145', gap = '16') {
 }
 
 export function surfaceStyleHost(root) {
-  return `void image_screensaver_config_changed() {}\n` +
+  // Includes are stripped; the pure background rules have no board dependency.
+  return `#include "src/ui/background/background_rules.h"\nvoid image_screensaver_config_changed() {}\n` +
     strip(read(root, 'src/ui/shared/ui_surface_style.h')) + '\n' +
     strip(read(root, 'src/ui/shared/ui_surface_style.cpp'));
 }

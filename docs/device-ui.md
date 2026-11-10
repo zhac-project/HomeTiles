@@ -62,7 +62,7 @@ If Settings is PIN-protected, enter the PIN to open it. If its tile is hidden, s
 
 ### Display
 
-Adjust brightness, sleep timeout, screensaver timeout, and screensaver brightness. **Never** disables the corresponding timeout. The rotate button turns the UI by 180°.
+Adjust brightness, sleep timeout, screensaver timeout, and screensaver brightness. **Never** disables the corresponding timeout. The rotate button turns the UI by 180°. **Background** puts a photo behind the tiles; see [Background photo](#background-photo).
 
 <figure class="ht-screenshot">
 <img src="../images/8in-display-popup.png" alt="Display settings with screensaver timeout" width="1272" height="792" loading="lazy">
@@ -115,3 +115,27 @@ View the firmware version and device name, or use the maintenance actions:
 - **Restart:** reboot the display.
 - **Pairing:** reconnect MQTT and announce the display to Home Assistant again.
 - **GitHub:** show a QR code for the project.
+
+## Background photo
+
+One photo from the microSD card can sit behind every page, with see-through tiles on top. It needs microSD support, like the [screensaver images](screensaver.md#prepare-the-microsd-card).
+
+1. Copy JPEG photos into the `/images` folder of a FAT32 card: with a card reader, or with the Web Admin [file manager](web-admin.md#file-manager) (local Web Admin only, not through the cloud remote).
+2. Open Settings › Display › **Background**, tap **Photo** and pick a photo. **None** keeps the black background.
+3. **Tile opacity** sets how solid the tiles are, from 0 to 100 % (60 % the first time a photo is chosen). **Dim photo** darkens the photo, from 0 to 60 % (default 25 %), so tile text stays readable. Both are grey while **None** is chosen.
+
+The photo fills the screen, cropped to fit, and stands upright as the camera's EXIF orientation says. Popups, Settings, the PIN pad and the screensaver stay solid; the clock drops its card over a photo.
+
+Photos the panel cannot show are greyed out in the list with the reason:
+
+| Reason | Meaning |
+| --- | --- |
+| **Can’t use: progressive JPEG** | Save the photo as a baseline (standard) JPEG. |
+| **Can’t use: over 8 MB** | The file is larger than 8 MB. |
+| **Can’t use: over 4.2 MP** | The photo has more than 4.2 million pixels (2048 × 2048), like most phone photos; scale it down to 2048 pixels on the long side. |
+| **Can’t use: not a readable JPEG** | The file is damaged or not a JPEG. |
+| **Can’t use: file name** | The name is 64 bytes or longer; shorten it. |
+
+Without the card, or when the chosen file is gone, the panel shows solid tiles on black and keeps the choice: the popup shows the name with **Not found** and the status says **No microSD card** or **Not found**. Put the card or the file back and restart the panel, or pick the photo again. **Not enough memory** means the photo could not be decoded; restart the panel.
+
+The same three settings appear in the Web Admin [global settings](web-admin.md#global-settings), also through the cloud remote.

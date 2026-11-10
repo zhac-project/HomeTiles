@@ -39,6 +39,8 @@ void tiles_cache_entity_payload(const char* entity_id, const char* payload);
 bool tiles_open_view_popup(uint16_t view_id);
 uint16_t tiles_view_id_for_object(lv_obj_t* object);
 bool tiles_folder_switch_pending();
+// The visible Home or folder grid; nullptr before the tiles tab is built.
+lv_obj_t* tiles_active_grid();
 void tiles_switch_to_folder(uint16_t folder_id);
 void tiles_cancel_folder_switch(uint16_t folder_id);
 void tiles_invalidate_folder(uint16_t folder_id);

@@ -47,7 +47,7 @@ IFS='|' read -r define rx_variant elf_flags <<<"$fields"
 if [ "$check_only" = 0 ]; then
   read -r -a cli <<<"${ARDUINO_CLI:-arduino-cli}"
   if [ -n "${ARDUINO_CLI_CONFIG:-}" ]; then cli+=(--config-file "$ARDUINO_CLI_CONFIG"); fi
-  common="-DHOMETILES_CI_TARGET -D$define -DLV_CONF_INCLUDE_SIMPLE -I$root -I${ARDUINO_LIBRARIES:-$HOME/Arduino/libraries}"
+  common="-DHOMETILES_CI_TARGET -D$define -DLV_CONF_INCLUDE_SIMPLE -I$root -I${ARDUINO_LIBRARIES:-$HOME/Arduino/libraries} ${EXTRA_FLAGS:-}"
   # As in firmware.yml: repeat the core's C++ flags and append -fno-exceptions.
   cpp_flags='-MMD -c "@{compiler.sdk.path}/flags/cpp_flags" {compiler.warning_flags} {compiler.optimization_flags} {compiler.common_werror_flags}'
   core_flags="$("${cli[@]}" compile --profile "$profile" --show-properties=unexpanded "$root" |

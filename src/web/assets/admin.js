@@ -186,6 +186,96 @@ function syncGlobalDisplayControls(tabEl) {
   const glow = currentIconGlow();
   tabEl.querySelectorAll('.global-icon-glow').forEach(input => { input.value = String(glow); });
   tabEl.querySelectorAll('.global-icon-glow-value').forEach(output => { output.textContent = glow + ' %'; });
+  renderBackgroundSettings(tabEl);
+}
+
+// Background photo from the panel's microSD /images folder, as Settings ›
+// Display › Background on the panel. Replies carry the translated texts; each
+// tab's copy of the controls shows the newest one. Only the newest request
+// may render, so a slow reply never undoes a later change.
+let backgroundSettings = null;
+let backgroundRequest = 0;
+let backgroundReloadTimer = null;
+function renderBackgroundSettings(root = document) {
+  const state = backgroundSettings;
+  if (!state) return;
+  const files = Array.isArray(state.files) ? state.files : [];
+  root.querySelectorAll('.global-background-photo').forEach(select => {
+    select.replaceChildren(new Option(state.none_label, ''));
+    files.forEach(file => {
+      const option = new Option(file.usable ? file.name : file.name + ' — ' + file.reason, file.name);
+      option.disabled = !file.usable;
+      select.add(option);
+    });
+    // A saved photo the card does not list stays selected; the status says why.
+    if (state.photo && !files.some(file => file.name === state.photo)) {
+      select.add(new Option(state.photo, state.photo));
+    }
+    select.value = state.photo;
+  });
+  [['.global-tile-opacity', state.opacity], ['.global-background-dim', state.dim]].forEach(([selector, value]) => {
+    root.querySelectorAll(selector).forEach(input => {
+      if (selector === '.global-tile-opacity') input.min = String(state.opacity_min);
+      input.value = String(value);
+      input.disabled = !state.photo;
+    });
+    root.querySelectorAll(selector + '-value').forEach(output => { output.textContent = value + ' %'; });
+  });
+  root.querySelectorAll('.global-background-status').forEach(span => { span.textContent = state.status_text; });
+}
+function previewBackgroundValue(input) {
+  const output = input.parentElement && input.parentElement.querySelector('output');
+  if (output) output.textContent = input.value + ' %';
+}
+// The panel decodes a new photo after the reply: fetch the status again until
+// it is final.
+function scheduleBackgroundReload() {
+  backgroundReloadTimer = setTimeout(loadBackgroundSettings, 2000);
+}
+function startBackgroundRequest() {
+  clearTimeout(backgroundReloadTimer);
+  backgroundReloadTimer = null;
+  return ++backgroundRequest;
+}
+async function loadBackgroundSettings() {
+  const request = startBackgroundRequest();
+  try {
+    const response = await fetch('api/display/background');
+    const result = await response.json();
+    if (request !== backgroundRequest || !response.ok || !result.success) return;
+    backgroundSettings = result;
+    renderBackgroundSettings();
+    if (result.status === 'loading') scheduleBackgroundReload();
+  } catch (error) {}
+}
+async function saveBackgroundSettings(patch) {
+  const request = startBackgroundRequest();
+  try {
+    const response = await fetch('api/display/background', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: new URLSearchParams(patch).toString()
+    });
+    const result = await response.json();
+    if (request !== backgroundRequest) return;
+    if (!response.ok || !result.success) {
+      renderBackgroundSettings();
+      if (response.status === 400 && result.error) {
+        // A refused photo: the select is back on the saved one, the reason shows.
+        document.querySelectorAll('.global-background-status').forEach(span => { span.textContent = result.error; });
+      } else {
+        showNotification(t('networkErrorSave'), false);
+      }
+      return;
+    }
+    backgroundSettings = result;
+    renderBackgroundSettings();
+    scheduleBackgroundReload();
+  } catch (error) {
+    if (request !== backgroundRequest) return;
+    renderBackgroundSettings();
+    showNotification(t('networkErrorSave'), false);
+  }
 }
 
 // The shared root variables also reach cached and lazily inserted folder grids.
@@ -9831,6 +9921,7 @@ function syncTileRadiusControls(tabEl) {
     prepareFolderTabSessionCache();
     restoreInitialFolderTabSessionFragment(initialTab);
     loadSelectedTileStates();
+    loadBackgroundSettings();
     loadDraftsFromStorage();
     loadTileClipboard();
     // Stay on the admin tab that was open before a browser reload. Fall back to

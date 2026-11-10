@@ -30,6 +30,7 @@
 #include "src/ui/screensaver/image_screensaver.h"
 #include "src/ui/shared/ui_surface_style.h"
 #include "src/ui/popups/weather/weather_popup.h"
+#include "src/ui/background/background_photo.h"
 
 static lv_obj_t *brightness_label = nullptr;
 static lv_obj_t *screensaver_brightness_value_label = nullptr;
@@ -37,6 +38,7 @@ static lv_obj_t *display_rotate_btn = nullptr;
 static lv_obj_t *display_rotate_label = nullptr;
 static lv_obj_t *display_rotate_text_label = nullptr;
 static lv_obj_t *display_rotate_sub_label = nullptr;
+static lv_obj_t *display_background_text_label = nullptr;
 static bool display_rotated_180 = false;
 static uint8_t display_rotation_quarters = Device::kRotationDefault;
 static uint8_t display_rotation_mode = kDisplayRotationNormal;
@@ -62,6 +64,7 @@ enum class SettingsPopupKind : uint8_t {
   Wifi,
   Localization,
   Firmware,
+  Background,  // opened from Display; its close button returns there
 };
 
 static lv_obj_t *settings_tile_display_title = nullptr;
@@ -129,6 +132,21 @@ static lv_obj_t *locale_timezone_dd = nullptr;
 static lv_obj_t *locale_time_format_dd = nullptr;
 static lv_obj_t *locale_date_format_dd = nullptr;
 static lv_obj_t *locale_keyboard_dd = nullptr;
+
+// Background popup: photo field, status line, both sliders and the photo
+// list, which lives in a full-screen tap catcher while it is open.
+static lv_obj_t *background_field = nullptr;
+static lv_obj_t *background_field_label = nullptr;
+static lv_obj_t *background_status_label = nullptr;
+static lv_obj_t *background_opacity_slider = nullptr;
+static lv_obj_t *background_opacity_value_label = nullptr;
+static lv_obj_t *background_dim_slider = nullptr;
+static lv_obj_t *background_dim_value_label = nullptr;
+static lv_obj_t *background_list_catcher = nullptr;
+static lv_timer_t *background_status_timer = nullptr;
+static std::vector<background_photo::Entry> background_entries;
+// The last list() found no card; the status line says so until the next list.
+static bool background_card_missing = false;
 
 // System popup: version/device, GitHub QR, update check and OTA install
 static lv_obj_t *system_info_rows = nullptr;
@@ -972,6 +990,7 @@ static void reset_popup_refs() {
   display_rotate_label = nullptr;
   display_rotate_text_label = nullptr;
   display_rotate_sub_label = nullptr;
+  display_background_text_label = nullptr;
   sleep_slider = nullptr;
   sleep_time_label = nullptr;
   sleep_label = nullptr;
@@ -1017,6 +1036,17 @@ static void reset_popup_refs() {
   locale_date_format_dd = nullptr;
   locale_keyboard_dd = nullptr;
 
+  background_field = nullptr;
+  background_field_label = nullptr;
+  background_status_label = nullptr;
+  background_opacity_slider = nullptr;
+  background_opacity_value_label = nullptr;
+  background_dim_slider = nullptr;
+  background_dim_value_label = nullptr;
+  background_list_catcher = nullptr;
+  std::vector<background_photo::Entry>().swap(background_entries);
+  background_card_missing = false;
+
   system_info_rows = nullptr;
   system_status_label = nullptr;
   system_progress_bar = nullptr;
@@ -1043,6 +1073,10 @@ static void close_settings_popup() {
     ap_btn_cooldown_timer = nullptr;
   }
   if (networkTransport.isWifiDriverActive()) WiFi.scanDelete();
+  if (background_status_timer) {
+    lv_timer_delete(background_status_timer);
+    background_status_timer = nullptr;
+  }
   // If the screensaver brightness control closes during a preview,
   // always restore normal brightness.
   if (settings_popup_kind == SettingsPopupKind::Display) {
@@ -1073,6 +1107,11 @@ static void on_settings_popup_close_clicked(lv_event_t* event) {
       wifi_show_list_view();
       return;
     }
+  }
+  if (settings_popup_kind == SettingsPopupKind::Background) {
+    close_settings_popup();
+    open_settings_popup(SettingsPopupKind::Display);
+    return;
   }
   close_settings_popup();
 }
@@ -1810,6 +1849,31 @@ static void on_popup_ap_mode_clicked(lv_event_t*) {
   lv_timer_set_repeat_count(ap_btn_cooldown_timer, 1);
 }
 
+// An MDI icon and a text label side by side in a create_popup_button. Its
+// own label becomes the icon; the flex layout overrides its lv_obj_center.
+// Returns the text label.
+static lv_obj_t* add_display_button_content(lv_obj_t* btn, const char* icon, const char* text) {
+  lv_obj_set_height(btn, popup_layout::scale(76));
+  lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(btn, popup_layout::scale(14), 0);
+  lv_obj_t* icon_label = lv_obj_get_child(btn, 0);
+  if (FONT_MDI_ICONS) lv_obj_set_style_text_font(icon_label, FONT_MDI_ICONS, 0);
+  popup_layout::applyIconScale(icon_label);
+  lv_label_set_text(icon_label, getMdiChar(icon).c_str());
+  lv_obj_t* text_label = lv_label_create(btn);
+  lv_label_set_text(text_label, text);
+  lv_obj_set_style_text_font(text_label, popup_layout::font28(), 0);
+  lv_obj_set_style_text_color(text_label, lv_color_white(), 0);
+  return text_label;
+}
+
+// Background is a page of Display: it replaces Display and returns there.
+static void on_display_background_clicked(lv_event_t*) {
+  close_settings_popup();
+  open_settings_popup(SettingsPopupKind::Background);
+}
+
 static void build_display_popup(lv_obj_t* parent) {
   const DeviceConfig& cfg = configManager.getConfig();
   lv_obj_t* form = create_form_area(parent);
@@ -1931,25 +1995,271 @@ static void build_display_popup(lv_obj_t* parent) {
       screensaver_brightness_row, screensaver_brightness_buf,
       popup_layout::scale(130), LV_TEXT_ALIGN_RIGHT);
 
-  // Full-width rotation button with its icon and label inside.
-  display_rotate_btn = create_popup_button(form, "", 0x26A69A, on_display_rotate_clicked);
-  lv_obj_set_width(display_rotate_btn, LV_PCT(100));
-  lv_obj_set_height(display_rotate_btn, popup_layout::scale(76));
-  lv_obj_set_flex_flow(display_rotate_btn, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(display_rotate_btn, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-                        LV_FLEX_ALIGN_CENTER);
-  lv_obj_set_style_pad_column(display_rotate_btn, popup_layout::scale(14), 0);
-  // Reuse create_popup_button's label for the icon; the flex layout
-  // overrides its lv_obj_center alignment.
+  // Rotate and Background share the last row equally.
+  lv_obj_t* action_row = create_form_row(form);
+  display_rotate_btn = create_popup_button(action_row, "", 0x26A69A, on_display_rotate_clicked);
+  lv_obj_set_flex_grow(display_rotate_btn, 1);
+  display_rotate_text_label = add_display_button_content(
+      display_rotate_btn, "phone-rotate-landscape", tr().display_rotate_btn_text);
   display_rotate_label = lv_obj_get_child(display_rotate_btn, 0);
-  if (FONT_MDI_ICONS) lv_obj_set_style_text_font(display_rotate_label, FONT_MDI_ICONS, 0);
-  popup_layout::applyIconScale(display_rotate_label);
-  display_rotate_text_label = lv_label_create(display_rotate_btn);
-  lv_label_set_text(display_rotate_text_label, tr().display_rotate_btn_text);
-  lv_obj_set_style_text_font(display_rotate_text_label,
-                             popup_layout::font28(), 0);
-  lv_obj_set_style_text_color(display_rotate_text_label, lv_color_white(), 0);
+  lv_obj_t* display_background_btn =
+      create_popup_button(action_row, "", 0x26A69A, on_display_background_clicked);
+  lv_obj_set_flex_grow(display_background_btn, 1);
+  display_background_text_label =
+      add_display_button_content(display_background_btn, "image", tr().background_label);
   update_display_rotate_label();
+}
+
+// Unchanged text is not set again: the 250 ms refresh would redraw it.
+static void background_set_text(lv_obj_t* label, const char* text) {
+  if (label && strcmp(lv_label_get_text(label), text) != 0) lv_label_set_text(label, text);
+}
+
+static void background_update_status() {
+  background_set_text(background_status_label,
+                      background_card_missing ? tr().background_no_card
+                                              : background_photo::status_text(tr()));
+}
+
+static void background_update_field() {
+  const char* photo = configManager.getConfig().background_photo;
+  const background_rules::Status status = background_photo::status();
+  char text[background_rules::kMaxPhotoName + 48];
+  if (!photo[0]) {
+    strlcpy(text, tr().background_none, sizeof(text));
+  } else if (status == background_rules::Status::NoCard ||
+             status == background_rules::Status::NotFound) {
+    snprintf(text, sizeof(text), "%s \xC2\xB7 %s", photo, tr().background_not_found);
+  } else {
+    strlcpy(text, photo, sizeof(text));
+  }
+  background_set_text(background_field_label, text);
+}
+
+// Without a photo both sliders rest, dimmed, at their saved values.
+static void background_update_sliders() {
+  const bool shown = configManager.getConfig().background_photo[0] != '\0';
+  if (background_opacity_slider) lv_obj_set_state(background_opacity_slider, LV_STATE_DISABLED, !shown);
+  if (background_dim_slider) lv_obj_set_state(background_dim_slider, LV_STATE_DISABLED, !shown);
+}
+
+static void background_show_percent(lv_obj_t* label, uint8_t pct) {
+  if (label) lv_label_set_text_fmt(label, "%u%%", static_cast<unsigned>(pct));
+}
+
+// The status timer turns "Loading photo…" into the final state.
+static void on_background_status_timer(lv_timer_t*) {
+  background_update_status();
+  background_update_field();
+  background_update_sliders();
+}
+
+// Applies a saved change in this event instead of the next tiles pass, so
+// "Loading photo…" is drawn before the decode blocks the UI thread 50 ms
+// later; the 250 ms status refresh would usually miss that window.
+static void background_apply_now() {
+  background_photo::process_pending();
+  background_update_status();
+}
+
+static void background_close_list() {
+  if (background_list_catcher) lv_obj_delete(background_list_catcher);
+  background_list_catcher = nullptr;
+  std::vector<background_photo::Entry>().swap(background_entries);
+}
+
+static void on_background_list_catcher_clicked(lv_event_t*) {
+  background_close_list();
+}
+
+// User data: 0 = None, otherwise the background_entries index + 1.
+static void on_background_list_row_clicked(lv_event_t* e) {
+  const size_t index = reinterpret_cast<uintptr_t>(lv_event_get_user_data(e));
+  if (index > background_entries.size()) return;
+  char photo[background_rules::kMaxPhotoName] = "";
+  if (index > 0) strlcpy(photo, background_entries[index - 1].name.c_str(), sizeof(photo));
+  background_close_list();  // deletes this row
+  const DeviceConfig& cfg = configManager.getConfig();
+  if (configManager.saveBackground(photo, cfg.tile_opacity, cfg.background_dim)) {
+    background_photo::request_apply();
+    background_apply_now();
+  }
+  background_update_field();
+  background_update_sliders();
+  background_update_status();
+}
+
+static void on_background_photo_field_clicked(lv_event_t*) {
+  if (background_list_catcher || !settings_popup_card || !background_field) return;
+  background_card_missing = !background_photo::list(background_entries);
+  background_update_status();
+
+  // A tap anywhere outside the list closes it and does nothing else. It lives on
+  // the card like the Wi-Fi keyboard: the popup shell hides settings_popup_overlay.
+  background_list_catcher = lv_obj_create(settings_popup_card);
+  style_plain_container(background_list_catcher);
+  lv_obj_add_flag(background_list_catcher, LV_OBJ_FLAG_IGNORE_LAYOUT);
+  lv_obj_set_size(background_list_catcher, lv_obj_get_width(settings_popup_card),
+                  lv_obj_get_height(settings_popup_card));
+  lv_obj_center(background_list_catcher);
+  lv_obj_add_event_cb(background_list_catcher, on_background_list_catcher_clicked,
+                      LV_EVENT_CLICKED, nullptr);
+
+  lv_obj_t* list = lv_obj_create(background_list_catcher);
+  ui_control_style::dropdownList(list);
+  lv_obj_set_width(list, lv_obj_get_width(background_field));
+  lv_obj_set_height(list, LV_SIZE_CONTENT);
+  lv_obj_set_style_max_height(list, lv_obj_get_height(settings_popup_card) / 2, 0);
+  lv_obj_set_style_pad_row(list, popup_layout::scale(6), 0);
+  lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+
+  const char* current = configManager.getConfig().background_photo;
+  lv_obj_t* none_row = wifi_create_row(list, tr().background_none, !current[0], false);
+  lv_obj_add_event_cb(none_row, on_background_list_row_clicked, LV_EVENT_CLICKED, nullptr);
+  for (size_t i = 0; i < background_entries.size(); ++i) {
+    const background_photo::Entry& entry = background_entries[i];
+    const bool usable = entry.reason == background_rules::Reason::Usable;
+    lv_obj_t* row = wifi_create_row(list, entry.name.c_str(), usable && entry.name == current, false);
+    if (usable) {
+      lv_obj_add_event_cb(row, on_background_list_row_clicked, LV_EVENT_CLICKED,
+                          reinterpret_cast<void*>(static_cast<uintptr_t>(i + 1)));
+      continue;
+    }
+    // Shown but not selectable: an alert and the reason as a second line.
+    lv_label_set_text_fmt(lv_obj_get_child(row, -1), "%s\n%s", entry.name.c_str(),
+                          background_photo::reason_text(entry.reason, tr()));
+    lv_obj_t* alert = lv_label_create(row);
+    lv_obj_move_to_index(alert, 0);
+    lv_label_set_text(alert, getMdiChar("alert").c_str());
+    if (FONT_MDI_ICONS) lv_obj_set_style_text_font(alert, FONT_MDI_ICONS, 0);
+    popup_layout::applyIconScale(alert);
+    lv_obj_set_style_text_color(alert, lv_color_white(), 0);
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_set_style_min_height(row, popup_layout::scale(72), 0);
+    lv_obj_set_style_pad_ver(row, popup_layout::scale(10), 0);
+    lv_obj_add_state(row, LV_STATE_DISABLED);
+    lv_obj_set_style_opa(row, LV_OPA_30, LV_STATE_DISABLED);
+  }
+  lv_obj_align_to(list, background_field, LV_ALIGN_OUT_BOTTOM_LEFT, 0, popup_layout::scale(6));
+}
+
+static void on_background_opacity_changed(lv_event_t* e) {
+  lv_obj_t* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
+  const uint8_t pct = background_rules::clamp_opacity(
+      lv_slider_get_value(slider) * background_rules::kStep, Device::kTileOpacityPercentMin);
+  background_show_percent(background_opacity_value_label, pct);
+  const lv_event_code_t code = lv_event_get_code(e);
+  if (code != LV_EVENT_RELEASED && code != LV_EVENT_PRESS_LOST) return;
+  const DeviceConfig& cfg = configManager.getConfig();
+  if (configManager.saveBackground(cfg.background_photo, pct, cfg.background_dim)) {
+    background_photo::request_apply();
+    background_apply_now();
+  }
+}
+
+static void on_background_dim_changed(lv_event_t* e) {
+  lv_obj_t* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
+  const uint8_t pct = background_rules::clamp_dim(lv_slider_get_value(slider) * background_rules::kStep);
+  background_show_percent(background_dim_value_label, pct);
+  const lv_event_code_t code = lv_event_get_code(e);
+  if (code != LV_EVENT_RELEASED && code != LV_EVENT_PRESS_LOST) return;
+  const DeviceConfig& cfg = configManager.getConfig();
+  if (configManager.saveBackground(cfg.background_photo, cfg.tile_opacity, pct)) {
+    background_photo::request_apply();
+    background_apply_now();
+  }
+}
+
+static void add_background_slider_events(lv_obj_t* slider, lv_event_cb_t cb) {
+  lv_obj_add_event_cb(slider, cb, LV_EVENT_VALUE_CHANGED, nullptr);
+  lv_obj_add_event_cb(slider, cb, LV_EVENT_RELEASED, nullptr);
+  // A drag that ends outside the slider commits like a release.
+  lv_obj_add_event_cb(slider, cb, LV_EVENT_PRESS_LOST, nullptr);
+}
+
+static void build_background_popup(lv_obj_t* parent) {
+  const DeviceConfig& cfg = configManager.getConfig();
+  lv_obj_t* form = create_form_area(parent);
+  lv_obj_clear_flag(form, LV_OBJ_FLAG_SCROLLABLE);
+  // The Display popup's top offset and row spacing.
+  lv_obj_set_style_pad_top(form, popup_layout::scale(32), 0);
+  lv_obj_set_style_pad_row(form, popup_layout::scale(18), 0);
+
+  // A button dressed as the Localization dropdowns: the photo list needs an
+  // icon and a second line per row, which lv_dropdown cannot draw.
+  lv_obj_t* photo_row = create_form_row(form);
+  create_display_row_label(photo_row, tr().background_photo_label, popup_layout::scale(210));
+  background_field = lv_button_create(photo_row);
+  ui_control_style::dropdown(background_field);
+  lv_obj_set_flex_grow(background_field, 1);
+  lv_obj_set_height(background_field, LV_SIZE_CONTENT);
+  lv_obj_set_style_pad_ver(background_field, popup_layout::scale(18), 0);
+  lv_obj_set_style_pad_left(background_field, popup_layout::scale(20), 0);
+  ui_surface_style::apply_radius(background_field, popup_layout::scale(18), 0);
+  lv_obj_set_style_text_font(background_field, popup_layout::font28(), 0);
+  lv_obj_set_style_shadow_opa(background_field, LV_OPA_TRANSP, 0);
+  lv_obj_set_flex_flow(background_field, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(background_field, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+  lv_obj_add_event_cb(background_field, on_background_photo_field_clicked, LV_EVENT_CLICKED,
+                      nullptr);
+  background_field_label = lv_label_create(background_field);
+  lv_label_set_text(background_field_label, "");
+  lv_label_set_long_mode(background_field_label, LV_LABEL_LONG_DOT);
+  lv_obj_set_flex_grow(background_field_label, 1);
+  // One line: a long name ends in dots instead of wrapping.
+  lv_obj_set_height(background_field_label, lv_font_get_line_height(popup_layout::font28()));
+  lv_obj_t* arrow = lv_label_create(background_field);
+  lv_label_set_text(arrow, LV_SYMBOL_DOWN);
+  lv_obj_set_style_text_font(arrow, &ui_symbols_24, 0);
+
+  background_status_label = lv_label_create(form);
+  lv_label_set_text(background_status_label, "");
+  lv_obj_set_width(background_status_label, LV_PCT(100));
+  lv_label_set_long_mode(background_status_label, LV_LABEL_LONG_WRAP);
+  lv_obj_set_style_text_font(background_status_label, popup_layout::font20(), 0);
+  lv_obj_set_style_text_color(background_status_label, lv_color_hex(0xA0A0A0), 0);
+
+  // Slider positions are steps of background_rules::kStep percent.
+  constexpr int kStep = background_rules::kStep;
+  static_assert(Device::kTileOpacityPercentMin % kStep == 0, "the opacity floor must be a slider step");
+  const uint8_t opacity = background_rules::clamp_opacity(cfg.tile_opacity, Device::kTileOpacityPercentMin);
+  lv_obj_t* opacity_row = create_display_control_row(form);
+  lv_label_set_long_mode(create_display_row_label(opacity_row, tr().background_opacity_label,
+                                                  popup_layout::scale(210)),
+                         LV_LABEL_LONG_WRAP);
+  background_opacity_slider = lv_slider_create(opacity_row);
+  style_settings_slider(background_opacity_slider);
+  lv_obj_set_width(background_opacity_slider, 1);
+  lv_obj_set_flex_grow(background_opacity_slider, 1);
+  lv_slider_set_range(background_opacity_slider, Device::kTileOpacityPercentMin / kStep, 100 / kStep);
+  lv_slider_set_value(background_opacity_slider, opacity / kStep, LV_ANIM_OFF);
+  lv_obj_set_style_opa(background_opacity_slider, LV_OPA_30, LV_STATE_DISABLED);
+  add_background_slider_events(background_opacity_slider, on_background_opacity_changed);
+  background_opacity_value_label = create_display_row_label(
+      opacity_row, "", popup_layout::scale(130), LV_TEXT_ALIGN_RIGHT);
+  background_show_percent(background_opacity_value_label, opacity);
+
+  const uint8_t dim = background_rules::clamp_dim(cfg.background_dim);
+  lv_obj_t* dim_row = create_display_control_row(form);
+  lv_label_set_long_mode(create_display_row_label(dim_row, tr().background_dim_label,
+                                                  popup_layout::scale(210)),
+                         LV_LABEL_LONG_WRAP);
+  background_dim_slider = lv_slider_create(dim_row);
+  style_settings_slider(background_dim_slider);
+  lv_obj_set_width(background_dim_slider, 1);
+  lv_obj_set_flex_grow(background_dim_slider, 1);
+  lv_slider_set_range(background_dim_slider, 0, background_rules::kMaxDim / kStep);
+  lv_slider_set_value(background_dim_slider, dim / kStep, LV_ANIM_OFF);
+  lv_obj_set_style_opa(background_dim_slider, LV_OPA_30, LV_STATE_DISABLED);
+  add_background_slider_events(background_dim_slider, on_background_dim_changed);
+  background_dim_value_label = create_display_row_label(
+      dim_row, "", popup_layout::scale(130), LV_TEXT_ALIGN_RIGHT);
+  background_show_percent(background_dim_value_label, dim);
+
+  on_background_status_timer(nullptr);
+  background_status_timer = lv_timer_create(on_background_status_timer, 250, nullptr);
 }
 
 // The keyboard sits closer to the card edge than the form: use
@@ -2830,6 +3140,8 @@ static const char* popup_title_for_kind(SettingsPopupKind kind) {
       return tr().admin_settings_language;
     case SettingsPopupKind::Firmware:
       return "System";
+    case SettingsPopupKind::Background:
+      return tr().background_label;
   }
   return "";
 }
@@ -2844,6 +3156,8 @@ static const char* popup_icon_for_kind(SettingsPopupKind kind) {
       return "translate";
     case SettingsPopupKind::Firmware:
       return "chip";
+    case SettingsPopupKind::Background:
+      return "image";
   }
   return "cog";
 }
@@ -2861,6 +3175,9 @@ static void build_popup_content(SettingsPopupKind kind, lv_obj_t* parent) {
       break;
     case SettingsPopupKind::Firmware:
       build_system_popup(parent);
+      break;
+    case SettingsPopupKind::Background:
+      build_background_popup(parent);
       break;
   }
 }
@@ -3274,6 +3591,7 @@ void settings_refresh_language() {
                       s.screensaver_brightness_label);
   }
   if (display_rotate_text_label) lv_label_set_text(display_rotate_text_label, s.display_rotate_btn_text);
+  if (display_background_text_label) lv_label_set_text(display_background_text_label, s.background_label);
   if (wifi_section_label) lv_label_set_text(wifi_section_label, s.wifi_label);
   if (sleep_section_label) lv_label_set_text(sleep_section_label, s.sleep_label);
   if (sleep_label) lv_label_set_text(sleep_label, s.sleep_label);
@@ -3292,11 +3610,13 @@ void settings_refresh_language() {
   // plus both bottom buttons. Updating the existing flex layout in pieces
   // left stale regions on-screen. Recreate the open Wi-Fi popup without
   // an intermediate refresh; open_settings_popup draws only the finished
-  // state.
-  if (settings_popup_kind == SettingsPopupKind::Wifi &&
+  // state. Background is rebuilt the same way for its row labels.
+  if ((settings_popup_kind == SettingsPopupKind::Wifi ||
+       settings_popup_kind == SettingsPopupKind::Background) &&
       settings_popup_overlay) {
+    const SettingsPopupKind kind = settings_popup_kind;
     close_settings_popup();
-    open_settings_popup(SettingsPopupKind::Wifi);
+    open_settings_popup(kind);
   }
 
   weather_popup_refresh_language();

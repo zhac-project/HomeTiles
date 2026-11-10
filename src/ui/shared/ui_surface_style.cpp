@@ -2,6 +2,7 @@
 
 #include "src/core/config/config_manager.h"
 #include "src/core/config/icon_glow.h"
+#include "src/ui/background/background_rules.h"
 #include "src/ui/screensaver/image_screensaver.h"
 #include <atomic>
 
@@ -273,6 +274,52 @@ void process_pending_updates() {
   const bool enabled = configManager.getConfig().tile_borders;
   refresh_marked_tree(lv_screen_active(), enabled);
   refresh_marked_tree(lv_layer_top(), enabled);
+}
+
+namespace {
+
+lv_style_t g_backdrop_style{};
+bool g_backdrop_style_initialized = false;
+bool g_photo_backdrop = false;
+uint8_t g_tile_opacity_pct = background_rules::kDefaultTileOpacity;
+
+lv_style_t* backdrop_style() {
+  if (!g_backdrop_style_initialized) {
+    lv_style_init(&g_backdrop_style);
+    lv_style_set_bg_color(&g_backdrop_style, lv_color_hex(0x000000));
+    lv_style_set_bg_opa(&g_backdrop_style, g_photo_backdrop ? LV_OPA_TRANSP : LV_OPA_COVER);
+    g_backdrop_style_initialized = true;
+  }
+  return &g_backdrop_style;
+}
+
+}  // namespace
+
+void set_photo_backdrop(bool shown, uint8_t tile_opacity_pct) {
+  g_photo_backdrop = shown;
+  g_tile_opacity_pct = tile_opacity_pct;
+  lv_style_t* style = backdrop_style();
+  lv_style_set_bg_opa(style, shown ? LV_OPA_TRANSP : LV_OPA_COVER);
+  lv_obj_report_style_change(style);
+}
+
+bool photo_backdrop_shown() { return g_photo_backdrop; }
+
+void apply_backdrop(lv_obj_t* obj) {
+  if (!obj) return;
+  // A local value (createTabPanel's TRANSP, a COVER) would beat the shared style.
+  lv_obj_remove_local_style_prop(obj, LV_STYLE_BG_COLOR, 0);
+  lv_obj_remove_local_style_prop(obj, LV_STYLE_BG_OPA, 0);
+  lv_obj_add_style(obj, backdrop_style(), 0);
+}
+
+void apply_tile_card_background(lv_obj_t* card, bool cardless) {
+  if (!card || !g_photo_backdrop) return;
+  const uint8_t pct = cardless ? 0 : g_tile_opacity_pct;
+  const lv_opa_t rendered = lv_obj_get_style_bg_opa(card, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(card, background_rules::card_opa(rendered, pct), LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_bg_opa(card, background_rules::card_pressed_opa(rendered, pct),
+                          LV_PART_MAIN | LV_STATE_PRESSED);
 }
 
 }  // namespace ui_surface_style

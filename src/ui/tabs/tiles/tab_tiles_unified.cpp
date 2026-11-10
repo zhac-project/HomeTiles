@@ -13,6 +13,8 @@
 #include "src/ui/popups/binary_sensor/binary_sensor_popup.h"
 #include "src/ui/popups/weather/weather_popup.h"
 #include "src/ui/screensaver/image_screensaver.h"
+#include "src/ui/background/background_photo.h"
+#include "src/core/diagnostics/frame_bench.h"
 #include "src/ui/ui_manager.h"
 #include "src/ui/shared/ui_surface_style.h"
 #include "src/network/bridge/ha_bridge_config.h"
@@ -1219,8 +1221,7 @@ static void process_navigation_preload() {
 static lv_obj_t* create_tiles_grid(lv_obj_t* parent) {
   if (!parent) return nullptr;
   lv_obj_t* grid = lv_obj_create(parent);
-  lv_obj_set_style_bg_color(grid, lv_color_hex(0x000000), 0);
-  lv_obj_set_style_bg_opa(grid, LV_OPA_COVER, 0);
+  ui_surface_style::apply_backdrop(grid);
   lv_obj_set_style_border_width(grid, 0, 0);
   lv_obj_set_style_pad_left(grid, GRID_PAD_LEFT, 0);
   lv_obj_set_style_pad_right(grid, GRID_PAD_RIGHT, 0);
@@ -1525,8 +1526,7 @@ void build_tiles_tab(lv_obj_t *parent, GridType grid_type, scene_publish_cb_t sc
   }
   g_tiles_scene_cbs[idx] = scene_cb;
 
-  lv_obj_set_style_bg_color(parent, lv_color_hex(0x000000), 0);
-  lv_obj_set_style_bg_opa(parent, LV_OPA_COVER, 0);
+  ui_surface_style::apply_backdrop(parent);
   lv_obj_set_scroll_dir(parent, LV_DIR_VER);
   lv_obj_remove_flag(parent, LV_OBJ_FLAG_SCROLL_ELASTIC);
   lv_obj_remove_flag(parent, LV_OBJ_FLAG_SCROLL_MOMENTUM);
@@ -1835,6 +1835,7 @@ void tiles_switch_to_folder(uint16_t folder_id) {
   stop_preview_timer();
   g_pending_folder_id = folder_id;
   g_folder_switch_pending = true;
+  frame_bench::folder_open_requested();
 }
 
 void tiles_cancel_folder_switch(uint16_t folder_id) {
@@ -1872,6 +1873,7 @@ static void process_folder_cache_invalidation() {
 
 void tiles_process_reload_requests() {
   ui_surface_style::process_pending_updates();
+  background_photo::process_pending();
   bool did_reload = false;
 
   process_folder_cache_invalidation();
@@ -2436,6 +2438,8 @@ uint16_t tiles_view_id_for_object(lv_obj_t* object) {
 }
 
 bool tiles_folder_switch_pending() { return g_folder_switch_pending; }
+
+lv_obj_t* tiles_active_grid() { return g_tiles_grids[static_cast<uint8_t>(GridType::TAB0)]; }
 
 bool tiles_open_view_popup(uint16_t view_id) {
   if (!view_id || !g_tiles_loaded[0] || g_folder_switch_pending ||

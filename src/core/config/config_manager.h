@@ -8,6 +8,7 @@
 #include "src/core/config/tile_color.h"
 #include "src/core/config/tile_radius.h"
 #include "src/core/config/icon_glow.h"
+#include "src/ui/background/background_rules.h"
 
 // WiFi/MQTT configuration manager.
 // Stores and loads the connection data in flash (Preferences).
@@ -100,6 +101,11 @@ struct DeviceConfig {
   uint8_t icon_glow = icon_glow::kDefault;
   // Background of tiles without their own color (and of reset/new tiles).
   uint32_t default_tile_color = tile_color::kDefault;
+  // Photo from the microSD /images folder behind the tile grids ("" = None),
+  // the tile card opacity over it and its dim, in percent (background_rules.h).
+  char background_photo[background_rules::kMaxPhotoName] = "";
+  uint8_t tile_opacity = background_rules::kDefaultTileOpacity;
+  uint8_t background_dim = background_rules::kDefaultDim;
   bool display_rotated_180;    // Display rotated by 180 degrees?
   uint8_t display_rotation_quarters; // 0=0°, 1=90°, 2=180°, 3=270°
   uint8_t display_rotation_mode; // 0=Normal, 1=180, 2=Auto
@@ -160,6 +166,8 @@ public:
   bool saveIconDiscs(bool enabled);
   bool saveIconGlow(uint8_t percent);
   bool saveDefaultTileColor(uint32_t rgb);
+  // photo "" selects None; false for an unsafe file name.
+  bool saveBackground(const char* photo, uint8_t tile_opacity, uint8_t dim);
   bool saveEthernetEnabled(bool enabled);
   bool saveStaticAddressingEnabled(bool enabled);
 

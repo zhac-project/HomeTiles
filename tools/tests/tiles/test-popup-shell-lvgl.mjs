@@ -85,7 +85,7 @@ void queue_weather_popup_payload(const char*,const char*){}
 ${cppFunctionDefinitions(read('src/ui/popups/weather/weather_popup.cpp')).find(f=>f.name==='finish_weather_popup_open').source}
 // Execute the Settings shell, flex form and close/back callback from production.
 // Only form data/network actions are injected; layout and event delivery are real.
-enum class SettingsPopupKind { Wifi };
+enum class SettingsPopupKind { Wifi, Display, Background };
 SettingsPopupKind settings_popup_kind=SettingsPopupKind::Wifi;
 lv_obj_t *settings_popup_overlay=nullptr,*settings_popup_card=nullptr,*settings_popup_title=nullptr,*settings_popup_close_icon=nullptr,*settings_popup_content=nullptr,*wifi_entry_view=nullptr;
 namespace Device {constexpr int kGridPad=4;}
@@ -99,6 +99,7 @@ void build_popup_content(SettingsPopupKind,lv_obj_t*parent){++settings_built;wif
 void close_settings_popup(){++settings_closed;hide_popup_shell(settings_popup_card);lv_obj_delete(settings_popup_overlay);settings_popup_overlay=nullptr;settings_popup_card=nullptr;settings_popup_content=nullptr;wifi_entry_view=nullptr;}
 void hide_settings_popup(){if(settings_popup_overlay)close_settings_popup();}
 void wifi_show_list_view(){lv_obj_add_flag(wifi_entry_view,LV_OBJ_FLAG_HIDDEN);lv_label_set_text(settings_popup_close_icon,"X");}
+static void open_settings_popup(SettingsPopupKind kind);
 ${['on_settings_popup_close_clicked','finish_settings_popup_open','open_settings_popup'].map(name=>cppFunctionDefinitions(read('src/ui/tabs/settings/tab_settings.cpp')).find(f=>f.name===name).source).join('\n')}
 void save_frame(const std::string&path,const std::vector<uint32_t>&pixels){std::ofstream f(path,std::ios::binary);f<<"P6\n"<<SCREEN_WIDTH<<" "<<SCREEN_HEIGHT<<"\n255\n";for(auto p:pixels){const char rgb[]={char(p>>16),char(p>>8),char(p)};f.write(rgb,3);}}
 int main(int argc,char**argv){lv_init();auto*d=lv_display_create(SCREEN_WIDTH,SCREEN_HEIGHT);std::vector<uint32_t>pixels(SCREEN_WIDTH*SCREEN_HEIGHT),band(SCREEN_WIDTH*16);lv_display_set_color_format(d,LV_COLOR_FORMAT_XRGB8888);lv_display_set_buffers(d,band.data(),nullptr,band.size()*4,LV_DISPLAY_RENDER_MODE_PARTIAL);lv_display_set_user_data(d,&pixels);lv_display_set_flush_cb(d,[](lv_display_t*d,const lv_area_t*area,uint8_t*data){++flushed;auto&pixels=*static_cast<std::vector<uint32_t>*>(lv_display_get_user_data(d));auto*source=reinterpret_cast<uint32_t*>(data);for(int y=area->y1;y<=area->y2;++y)for(int x=area->x1;x<=area->x2;++x)pixels[y*SCREEN_WIDTH+x]=*source++;lv_display_flush_ready(d);});
@@ -147,6 +148,9 @@ int main(int argc,char**argv){lv_init();auto*d=lv_display_create(SCREEN_WIDTH,SC
  lv_obj_send_event(shell.active->close,LV_EVENT_RELEASED,nullptr);assert(settings_closed==0&&!lv_obj_has_flag(wifi_entry_view,LV_OBJ_FLAG_HIDDEN));
  lv_obj_send_event(button,LV_EVENT_CLICKED,nullptr);assert(settings_closed==0&&lv_obj_has_flag(wifi_entry_view,LV_OBJ_FLAG_HIDDEN));
  lv_obj_send_event(button,LV_EVENT_CLICKED,nullptr);assert(settings_closed==1&&!shell.active);assert(allocations==2);
+ open_settings_popup(SettingsPopupKind::Background);lv_refr_now(d);process_popup_open();
+ lv_obj_send_event(button,LV_EVENT_CLICKED,nullptr);assert(settings_closed==2&&settings_popup_overlay&&settings_popup_kind==SettingsPopupKind::Display&&"Background closes back to Display");
+ lv_refr_now(d);process_popup_open();assert(shell.active);lv_obj_send_event(button,LV_EVENT_CLICKED,nullptr);assert(settings_closed==3&&!settings_popup_overlay&&!shell.active);assert(allocations==2);
 
  show(a,"Screen replacement");auto*old=lv_screen_active();auto*next=lv_obj_create(nullptr);lv_screen_load(next);lv_obj_delete(old);assert(!shell.overlay&&!PopupFirstFrame::any_pending());assert(lv_obj_is_valid(a.body)&&lv_obj_get_parent(a.body)==a.owner);
  show(a,"Owner deletion");lv_obj_delete(a.owner);assert(!shell.active&&!PopupFirstFrame::any_pending());assert(allocations==1);lv_obj_delete(b.owner);assert(allocations==0);

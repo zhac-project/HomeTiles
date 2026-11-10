@@ -46,9 +46,11 @@ Issue: https://github.com/GalusPeres/HomeTiles/issues/30
 - Failed P4 OTA approaches: throttling, PSRAM staging, TLS-to-flash streaming, Hosted restart, permanent SDIO buffers. Retry only with new evidence.
 - Network wedge safeguards are recovery, not proof of a transport fix.
 
-## ZHAC Cloud fork
+## ZHAC fork
 
 - Sunton 8048S070C: link OK; TLS starved int. RAM after hours: PSRAM TLS fallback, wake resync; HW pending.
+- Background photo: `src/ui/background/`; photo = first screen child, cards take `tile_opacity` in `render_tile`; Settings › Display › Background, Web `/api/display/background`.
+- Sunton microSD: SPI CS10/MOSI11/SCK12/MISO13, 20 MHz (4 MHz fallback), media only. HW pending: card, decode time (4.2 MP cap: TJpgDec can’t scale), speed gate (`EXTRA_FLAGS=-DHOMETILES_BENCH_FRAMES`).
 
 ## Issue #38
 
@@ -68,11 +70,9 @@ Issue: https://github.com/GalusPeres/HomeTiles/issues/30
 ## Editable tiles
 
 - IDs 21 Number, 22 Select, 23 Date/Time reuse Sensor persistence/popups and five fonts; preview preserves `editableValues`, `PackedTileV7` unchanged.
-- Number/input_number uses the centered Media slider/value, Climate +/- pill or bounded roller, with graph/Activity. Select/input_select uses Settings dropdowns, timeline and Activity.
 - Date/Time: single-row hh/mm/ss rollers, popup-colored pill, no arrows, native 23/00 and 59/00 wrap; date spinboxes without keyboard; HA timezone/DST validation.
 - Additive `/control` preserves legacy clients; sessions/revisions/deadlines reject stale commands.
 - Bridge v0.6.44 (`148dec4`) on HACS: stale icon cache fixed, overrides preserved. v0.6.10 includes `84511da` plus title/color fixes.
-- Controls clear wrapped titles/close area; Number/Select equal height, Time taller. Select has compact history/earlier Activity; status in header. Range changes retain data; offline closes dropdowns.
 - Drafts coalesce steps/rollers for 600 ms, publish sliders on release and survive service ACKs until confirmation/rejection or 30-second timeout.
 - Editable surfaces follow tile color, white text unchanged; selection white with surface-colored text; S3 arrow 20px.
 - Wi-Fi idle/reconnect gaps remain unfixed; findings/probes: `build/wifi-power-audit/VERIFICATION.md`.

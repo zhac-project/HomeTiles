@@ -80,6 +80,9 @@ The **Global settings** below the preview apply to every tile on the display.
 | **Icon circles** | Shows a circle behind every icon. A tile can switch its own circle off. |
 | **Circle strength** | Opacity of the icon circles, from 0 to 100 %. |
 | **Tile color** | Background of every tile whose tile color is **Global**. |
+| **Background photo** | A photo from the microSD card's `/images` folder behind every page; see [Background photo](device-ui.md#background-photo). |
+| **Tile opacity** | How solid the tiles are over the photo, from 0 to 100 %. |
+| **Dim photo** | Darkens the photo, from 0 to 60 %. |
 
 New displays start with the maximum radius and the tile color `#1A1A1A`.
 
