@@ -1,6 +1,7 @@
 #include "src/ui/shared/ui_surface_style.h"
 #include "src/types/scene/renderer.h"
 #include "src/tiles/runtime/tile_renderer_shared.h"
+#include "src/ui/shared/tone_color.h"
 #include "src/tiles/runtime/tile_renderer_fonts.h"
 #include "src/tiles/runtime/tile_icon_disc.h"
 #include "src/tiles/runtime/tile_icon_source.h"
@@ -10,6 +11,7 @@
 #include "src/network/bridge/ha_bridge_config.h"
 #include <Arduino.h>
 #include <libs/tjpgd/tjpgd.h>
+#include "src/ui/shared/ui_theme.h"
 
 static constexpr uint16_t kSceneIconMaxSide =
     static_cast<uint16_t>(tile_layout::scale_480(64));
@@ -165,7 +167,7 @@ lv_obj_t* render_scene_tile(lv_obj_t* parent, int col, int row, const Tile& tile
   lv_obj_set_style_bg_color(btn, lv_color_hex(btn_color), LV_PART_MAIN | LV_STATE_DEFAULT);
 lv_obj_set_style_bg_grad_color(btn, lv_color_hex(btn_color), LV_PART_MAIN | LV_STATE_DEFAULT);
 lv_obj_set_style_bg_grad_dir(btn, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_DEFAULT);
-  uint32_t pressed_color = brighten_rgb_color(btn_color, 0x10);
+  uint32_t pressed_color = tone_color::pressed_card(btn_color);
   lv_obj_set_style_bg_color(btn, lv_color_hex(pressed_color), LV_PART_MAIN | LV_STATE_PRESSED);
 lv_obj_set_style_bg_grad_color(btn, lv_color_hex(pressed_color), LV_PART_MAIN | LV_STATE_PRESSED);
 lv_obj_set_style_bg_grad_dir(btn, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_PRESSED);
@@ -284,8 +286,8 @@ lv_obj_set_style_bg_grad_dir(btn, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_PRES
     String icon_name = tile.icon_name;
     bool icon_disabled = isMdiIconDisabled(icon_name);
     icon_name = normalizeMdiIconName(icon_name);
-    if (!icon_disabled && !icon_name.length() && tile.scene_alias.length()) {
-      String scene_entity = haBridgeConfig.findSceneEntity(tile.scene_alias);
+    if (!icon_disabled && !icon_name.length() && sceneTarget(tile).length()) {
+      String scene_entity = haBridgeConfig.findSceneEntity(sceneTarget(tile));
       if (scene_entity.length()) {
         icon_name = normalizeMdiIconName(haBridgeConfig.findEntityIcon(scene_entity));
       }
@@ -297,7 +299,7 @@ lv_obj_set_style_bg_grad_dir(btn, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_PRES
     if (iconChar.length() > 0) {
       icon_lbl = lv_label_create(btn);
       if (icon_lbl) {
-        set_label_style(icon_lbl, lv_color_white(), FONT_MDI_ICONS);
+        set_label_style(icon_lbl, lv_color_hex(ui_theme::icon()), FONT_MDI_ICONS);
         lv_label_set_text(icon_lbl, iconChar.c_str());
       }
     }
@@ -307,6 +309,8 @@ lv_obj_set_style_bg_grad_dir(btn, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_PRES
   // A half-height Scene uses the half-height Sensor header: the icon in the
   // concentric corner disc and the title beside it.
   const bool compact = tile_geometry::compact_icon_title(tile.type, tile.span_w, tile.span_h);
+  const tile_icon_disc::IconTitleOffsets offsets =
+      tile_icon_disc::icon_title_offsets(FONT_MDI_ICONS, tile_layout::header_title_font());
 
   // Position icon
   if (icon_img) {
@@ -319,8 +323,7 @@ lv_obj_set_style_bg_grad_dir(btn, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_PRES
         if (lv_obj_t* img = lv_obj_get_child(icon_img, 0)) lv_obj_set_size(img, size, size);
         lv_obj_align(icon_img, LV_ALIGN_TOP_LEFT, tile_icon_disc::inset(), tile_icon_disc::inset());
       } else if (has_title) {
-        lv_obj_align(icon_img, LV_ALIGN_CENTER, 0,
-                     tile_layout::scale_i16(-20));
+        lv_obj_align(icon_img, LV_ALIGN_CENTER, 0, offsets.icon);
       } else {
         lv_obj_center(icon_img);
       }
@@ -329,8 +332,7 @@ lv_obj_set_style_bg_grad_dir(btn, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_PRES
     tile_icon_source::apply_initial(icon_lbl, tile);
     if (!compact) {
       if (has_title) {
-        lv_obj_align(icon_lbl, LV_ALIGN_CENTER, 0,
-                     tile_layout::scale_i16(-20));
+        lv_obj_align(icon_lbl, LV_ALIGN_CENTER, 0, offsets.icon);
       } else {
         lv_obj_center(icon_lbl);
       }
@@ -345,12 +347,12 @@ lv_obj_set_style_bg_grad_dir(btn, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_PRES
     lv_obj_t* l = lv_label_create(btn);
     title_lbl = l;
     if (l) {
-      set_label_style(l, lv_color_white(), tile_layout::header_title_font());
+      set_label_style(l, lv_color_hex(ui_theme::text()), tile_layout::header_title_font());
       hometiles_title::tile(l, tile.title.c_str(), false);
       if (compact) {
         // compact_sensor_layout places it beside the disc below.
       } else if (has_icon) {
-        lv_obj_align(l, LV_ALIGN_CENTER, 0, tile_layout::scale(35));
+        lv_obj_align(l, LV_ALIGN_CENTER, 0, offsets.title);
       } else {
         lv_obj_center(l);
       }
@@ -359,8 +361,8 @@ lv_obj_set_style_bg_grad_dir(btn, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_PRES
   if (compact) compact_sensor_layout::apply(btn, icon_lbl, title_lbl, nullptr, tile);
 
   // Event handler for scene activation.
-  if (scene_cb && tile.scene_alias.length()) {
-    SceneEventData* event_data = new SceneEventData{tile.scene_alias, scene_cb};
+  if (scene_cb && sceneTarget(tile).length()) {
+    SceneEventData* event_data = new SceneEventData{sceneTarget(tile), scene_cb};
 
     lv_obj_add_event_cb(
         btn,

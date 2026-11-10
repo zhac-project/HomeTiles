@@ -10,7 +10,10 @@ export async function startDocsBrowser(executable, directory) {
     "--no-default-browser-check", "--disable-background-networking", "--remote-debugging-port=0",
     `--user-data-dir=${directory}`, "--window-size=1280,960", "about:blank"];
   if (process.getuid?.() === 0) args.unshift("--no-sandbox");
-  const child = spawn(executable, args, { windowsHide: true, stdio: "ignore" });
+  const child = spawn(executable, args, { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
+  // The browser's own last messages go into a failure (a page it never loads).
+  let browserLog = "";
+  child.stderr.on("data", chunk => { browserLog = (browserLog + chunk).slice(-4000); });
   let socket;
   try {
     let port;
@@ -37,9 +40,18 @@ export async function startDocsBrowser(executable, directory) {
       if (message.error) callback.reject(new Error(JSON.stringify(message.error)));
       else callback.resolve(message.result);
     });
+    // A call the browser never answers (a hung or crashed renderer) fails the
+    // test with its name instead of holding the CI job until it is cancelled.
     const send = (method, params = {}) => new Promise((resolve, reject) => {
       const id = ++sequence;
-      pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(`Browser call ${method} got no answer in 30 s\n${browserLog}`));
+      }, 30000);
+      pending.set(id, {
+        resolve: value => { clearTimeout(timer); resolve(value); },
+        reject: error => { clearTimeout(timer); reject(error); },
+      });
       socket.send(JSON.stringify({ id, method, params }));
     });
     await send("Page.enable");
@@ -61,9 +73,13 @@ export async function startDocsBrowser(executable, directory) {
       },
       async close() {
         socket.close();
+        // A browser that already exited sends no second exit event.
+        if (child.exitCode !== null || child.signalCode !== null) return;
         const exited = new Promise(resolve => child.once("exit", resolve));
         child.kill();
+        const forced = setTimeout(() => child.kill("SIGKILL"), 5000);
         await exited;
+        clearTimeout(forced);
       },
     };
   } catch (error) {

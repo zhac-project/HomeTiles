@@ -11,19 +11,22 @@ const read = file => readRepoFile(file).replace(/\r\n?/g, '\n');
 // Firmware geometry.
 const geometry = read('src/tiles/config/tile_geometry.h');
 assert.match(geometry, /inline bool icon_title\(int type\) \{\s*return type == TILE_SCENE \|\| type == TILE_FOLDER \|\| type == TILE_BACK \|\| type == TILE_CAMERA \|\| type == TILE_SETTINGS;/);
-assert.match(geometry, /inline bool half_size\(int type\) \{ return sensor\(type\) \|\| type == TILE_CLOCK \|\| icon_title\(type\); \}/);
+assert.match(geometry, /inline bool half_size\(int type\) \{\s*return sensor\(type\) \|\| type == TILE_CLOCK \|\| type == TILE_TEXT \|\| icon_title\(type\) \|\| type == TILE_SWITCH \|\|\s*type == TILE_COVER \|\| type == TILE_CLIMATE \|\| editable\(type\) \|\| device_control\(type\) \|\| calendar\(type\);\s*\}/);
 assert.doesNotMatch(geometry, /type == TILE_BACK\) &&\s*\(fractional/, 'Back may use half steps');
 assert.match(geometry, /inline bool compact_icon_title\(int type, float w, float h\) \{\s*return icon_title\(type\) && w >= 1 && h == 0\.5f;/);
 assert.doesNotMatch(geometry, /compact_back/);
 
 // Editor geometry mirrors the firmware.
-const helpers = ['isCompactSensorType', 'supportsHalfSize', 'supportedTileLayout'].map(extractDeliveredFunction).join('\n');
+const helpers = ['isCompactSensorType', 'isEditableValueType', 'supportsHalfSize', 'supportedTileLayout']
+  .map(extractDeliveredFunction).join('\n');
 const {supportsHalfSize, supportedTileLayout} = new Function(`${helpers}; return {supportsHalfSize, supportedTileLayout};`)();
 for (const type of [2, 4, 7, 8, 18]) {
   assert.ok(supportsHalfSize(type) && supportsHalfSize(String(type)), `type ${type} may be half a row high`);
   assert.ok(supportedTileLayout(type, {col: 0, row: 0.5, span_w: 1, span_h: 0.5}), `type ${type} 1x0.5`);
 }
-assert.ok(!supportsHalfSize(5) && !supportsHalfSize(10));
+// Switch is half-capable (compact header, tile_geometry::compact_switch);
+// Text too since 2026-10-12 (the text alone, tile_geometry::compact_text).
+assert.ok(supportsHalfSize(5) && supportsHalfSize(17) && supportsHalfSize(19) && supportsHalfSize(10));
 assert.ok(supportedTileLayout(8, {col: 0, row: 0.5, span_w: 1, span_h: 0.5}), 'Back 1x0.5');
 assert.ok(supportedTileLayout(8, {col: 1.5, row: 0, span_w: 1.5, span_h: 1}), 'Back half steps');
 assert.ok(!supportedTileLayout(8, {col: 0, row: 0, span_w: 0.5, span_h: 1}), 'Back stays at least one cell wide');
@@ -53,7 +56,7 @@ assert.match(policy, /return tileTypeRulesUseOwnEntity\(type\) \|\| tileTypeHasF
 assert.ok(!/tileTypeIconColorsByValue[^}]*TILE_(SCENE|FOLDER|BACK|CAMERA)/.test(policy) &&
   !/tileTypeIconColorsByState[^}]*TILE_(SCENE|FOLDER|BACK|CAMERA)/.test(policy), 'Fixed color only: no bar and no state list');
 assert.match(read('src/tiles/runtime/tile_icon_color_rules.h'),
-  /inline void apply_fixed\(lv_obj_t\* icon, const char\* record\) \{\s*apply\(icon, record, true, "", nullptr, lv_color_white\(\)\);/);
+  /inline void apply_fixed\(lv_obj_t\* icon, const char\* record\) \{\s*apply\(icon, record, true, "", nullptr, lv_color_hex\(ui_theme::text\(\)\)\);/);
 for (const [name, source, icon] of [['navigate', navigate, 'icon_lbl'], ['scene', scene, 'icon_lbl'], ['camera', camera, 'icon']]) {
   assert.ok(source.includes(`tile_icon_source::apply_initial(${icon}, tile);`), `${name} applies the fixed or source icon color`);
 }
@@ -67,9 +70,6 @@ for (const type of ['2', '4', '8', '18']) {
   assert.ok(tileTypeHasIconColors(type) && tileTypeHasFixedIconColorOnly(type), `type ${type} has a fixed icon color`);
 }
 assert.ok(!tileTypeHasFixedIconColorOnly('1') && !tileTypeHasIconColors('7') && tileTypeHasIconColors('5'));
-const tileTypeHasColoredIcon = new Function(`${extractDeliveredFunction('tileTypeHasColoredIcon')}; return tileTypeHasColoredIcon;`)();
-for (const type of ['2', '4', '8', '18']) assert.ok(tileTypeHasColoredIcon(type), `Glow checkbox for type ${type}`);
-assert.ok(!tileTypeHasColoredIcon('7') && !tileTypeHasColoredIcon('10'));
 const iconColorRuleState = new Function('tileTypeHasFixedIconColorOnly',
   `${extractDeliveredFunction('iconColorRuleState')}; return iconColorRuleState;`)(tileTypeHasFixedIconColorOnly);
 assert.deepEqual({...iconColorRuleState('18', 'camera.door', {values: {}}, null)}, {state: '', display: null},
@@ -85,7 +85,8 @@ for (const [file, names] of [['src/types/scene/admin.js', 'Scene'], ['src/types/
   }
 }
 assert.ok(read('src/tiles/runtime/compact_sensor_layout.h').includes(
-  'const int block = title_font()->line_height + (value ? value_face->line_height + gap : 0);'),
+  '(with_value ? value_font(value_choice)->line_height + text_gap() : 0);') &&
+  read('src/tiles/runtime/compact_sensor_layout.h').includes('text_top(value != nullptr, value_choice)'),
   'Without a value the title is centered on the disc row');
 
 // Per-tile border: the Clock/Text flag path.
@@ -111,5 +112,8 @@ const serverPreview = read('src/web/server/render/web_admin_html.cpp');
 assert.ok(serverPreview.includes('if (tile_geometry::compact_icon_title(tile.type, span_w, span_h)) {') &&
   serverPreview.includes('cssClass += " sensor-compact sensor-half compact-title-only";'));
 assert.ok(read('src/web/admin/tiles/layout.js').includes("const compactIconTitle = [2, 4, 7, 8, 18].includes(Number(type)) && halfHeight;"));
-assert.match(read('src/web/assets/admin.css'), /\.tile\.sensor-compact\.compact-title-only > \.tile-title \{\s*top:max\(0px, calc\(\(var\(--compact-h\) - var\(--compact-title-line\)\) \/ 2\)\);/);
+// The device's own top (compact_sensor_layout::text_top), the old centering
+// only as a fallback.
+assert.match(read('src/web/assets/admin.css'), /\.tile\.sensor-compact\.compact-title-only > \.tile-title \{\s*top:calc\(var\(--compact-title-only-top, max\(0px, \(var\(--compact-h\) - var\(--compact-title-line\)\) \/ 2\)\) \+ var\(--compact-title-dy, 0px\)\);/);
+assert.match(read('src/web/server/render/web_admin_styles.cpp'), /emit_scaled\("compact-title-only-top", compact_sensor_layout::text_top\(false\)\);/);
 console.log('Icon-and-title tiles: 1x0.5 compact header, fixed icon color with glow, Back border and preview pass');

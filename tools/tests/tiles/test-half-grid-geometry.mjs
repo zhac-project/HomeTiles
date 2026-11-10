@@ -32,19 +32,51 @@ ${radiusPolicyHost(root,'Device::kGridCellH','Device::kGridGap')}
 struct Config{int tile_radius=tile_radius::kMinimum;bool tile_borders=true;bool icon_discs=true;uint8_t icon_glow=icon_glow::kDefault;};
 struct Manager{Config config;const Config& getConfig(){return config;}}configManager;
 ${surfaceStyleHost(root)}
-struct Tile{int type=TILE_SENSOR;float col=0,row=0,span_w=1,span_h=1;uint8_t sensor_display_mode=0;uint8_t sensor_value_font=0;};
+struct Tile{int type=TILE_SENSOR;float col=0,row=0,span_w=1,span_h=1;uint8_t sensor_display_mode=0;uint8_t sensor_value_font=0;bool layout_hidden=false;};
 ${read('src/tiles/config/tile_config.h').match(/static constexpr uint8_t SENSOR_VALUE_FONT_MAX = \d+;/)[0]}
 ${fn('src/tiles/config/tile_config.h','tileBorderEnabled')}
 struct PackedQuarterGridV7{uint8_t version=7,quarter_index=0,reserved[2]={};};
-template<class P,class S>void clamp_media_tile_layout(int,P&,P&,S&,S&){}
+template<class P,class S>void clamp_media_tile_layout(int,P&,P&,S&,S&,float=0,float=0){}
+#include "src/tiles/config/grid_layout.h"
+static const uint8_t& GRID_SHOWN_COLS=grid_layout::g_shown.cols;
+static const uint8_t& GRID_SHOWN_ROWS=grid_layout::g_shown.rows;
+${fn('src/tiles/config/tile_config.h','tilePlaceCols')}
+${fn('src/tiles/config/tile_config.h','tilePlaceRows')}
+${fn('src/tiles/config/tile_config.h','shownTileLayout')}
 ${fn('src/ui/tabs/tiles/tab_tiles_unified.cpp','get_tile_layout')}
 ${fn('src/tiles/config/tile_config.cpp','packGeometry')}
 ${fn('src/tiles/config/tile_config.cpp','unpackGeometry')}
 ${fn('src/tiles/runtime/tile_renderer_shared.h','apply_fractional_tile_geometry')}
 ${fn('src/tiles/runtime/tile_renderer.cpp','set_tile_grid_cell')}
+#include "src/types/climate/layout.h"
+#include "src/tiles/runtime/tile_press.h"
 ${strip(read('src/tiles/runtime/tile_icon_disc.h'))}
 ${strip(read('src/tiles/runtime/compact_sensor_layout.h'))}
 int main(){
+ {
+  // The head bar layout (grid_layout.h): a tile shows only wholly inside the
+  // smaller grid, Back gives way to the head's X, a tile without a
+  // place in the layout is not drawn; without the bar the span is cut at the
+  // grid's edge as before. A panel that cannot show the bar layout yet (the
+  // upright JC4880 needs it turned) starts with the classic one.
+  float c,r,w,h;
+  Tile settings{TILE_SETTINGS,0,0,1,0.5f};
+  Tile inside{TILE_SENSOR,0,0,1,1};
+  if (grid_layout::apply(1) == grid_layout::Layout::kBar) {
+   const auto bar = grid_layout::shown();
+   assert(get_tile_layout(inside,c,r,w,h));
+   Tile beside{TILE_SENSOR,static_cast<float>(bar.cols),0,1,1};assert(!get_tile_layout(beside,c,r,w,h));
+   Tile wide{TILE_SENSOR,static_cast<float>(bar.cols-1),0,2,1};assert(!get_tile_layout(wide,c,r,w,h));
+   assert(get_tile_layout(settings,c,r,w,h));
+   Tile back{TILE_BACK,0,0,1,1};assert(!get_tile_layout(back,c,r,w,h));
+  } else {
+   assert(!grid_layout::head_bar());
+  }
+  assert(grid_layout::apply(0) == grid_layout::Layout::kClassic);
+  assert(get_tile_layout(settings,c,r,w,h));
+  Tile hidden{TILE_SENSOR,0,0,1,1};hidden.layout_hidden=true;assert(!get_tile_layout(hidden,c,r,w,h));
+  Tile cut{TILE_SENSOR,static_cast<float>(GRID_COLS-1),0,2,1};assert(get_tile_layout(cut,c,r,w,h) && w==1);
+ }
  assert(tile_layout::value_font_for_choice(0,nullptr)==nullptr);
  assert(tile_layout::value_font_for_choice(255,&ui_font_20)==&ui_font_20);
  assert(tile_layout::value_font_for_choice(1,nullptr)==tile_layout::content_font_20());
@@ -67,7 +99,12 @@ int main(){
  PackedQuarterGridV7 legacy;Tile full{TILE_SENSOR,1,1,2,1};packGeometry(full,legacy,0);
  assert(legacy.reserved[0]==0 && legacy.reserved[1]==0);unpackGeometry(legacy,0,full);
  assert(full.col==1 && full.row==1 && full.span_w==2 && full.span_h==1);
- assert(!tile_geometry::supported(TILE_SWITCH,0,0,2,0.5));
+ // Switch, Cover and Climate may be half a row high (compact, no bar or
+ // mini fields); Media may not.
+ assert(tile_geometry::supported(TILE_SWITCH,0,0,2,0.5));
+ assert(!tile_geometry::supported(TILE_MEDIA,0,0,2,0.5));
+ assert(tile_geometry::supported(TILE_CLIMATE,0,0,2,0.5));
+ assert(tile_geometry::supported(TILE_COVER,0,0,1,0.5));
  assert(tile_geometry::supported(TILE_SENSOR,0,0,1,0.5));
  assert(!tile_geometry::supported(TILE_SENSOR,0,0,.5f,.5f));
  for(float width=1;width<=GRID_COLS;width+=.5f)assert(tile_geometry::supported(TILE_SENSOR,0,0,width,.5f));
@@ -115,7 +152,10 @@ int main(){
   auto*value=lv_label_create(card);lv_label_set_text(value,"22.5 C");
   compact_sensor_layout::apply(card,icon,title,value,tile);lv_obj_update_layout(card);
   const auto* disc=lv_obj_get_parent(icon);
-  assert(lv_obj_get_style_radius(disc,LV_PART_MAIN)==tile_radius::kMinimum-compact_sensor_layout::inset());
+  // The corner circle keeps the bar pill's inset: drawn smaller around its
+  // middle, its radius smaller by the same amount (concentric).
+  assert(lv_obj_get_style_radius(disc,LV_PART_MAIN)==ui_surface_style::radius(tile_radius::kMinimum-compact_sensor_layout::inset()-tile_icon_disc::corner_shrink()));
+  assert(lv_obj_get_style_transform_width(disc,LV_PART_MAIN)==-tile_icon_disc::corner_shrink());
   lv_area_t bounds,t,v;lv_obj_get_coords(card,&bounds);lv_obj_get_coords(title,&t);lv_obj_get_coords(value,&v);
   assert(std::strchr(lv_label_get_text(title),'\\n')==nullptr);
   assert(t.x1==v.x1 && t.y2<v.y1 && v.y2<=bounds.y2);
@@ -124,8 +164,14 @@ int main(){
   lv_obj_add_state(card,LV_STATE_PRESSED);lv_obj_update_layout(card);
   lv_area_t pressed;lv_obj_get_coords(value,&pressed);assert(memcmp(&pressed,&v,sizeof(v))==0);
   // Half-height values use the title size by default and for 20, 24 for 24,
-  // and 28 for 28, 32 and 40; every size fits below the title.
-  const lv_font_t* expected=choice==2?tile_layout::content_font_24():choice>=3?tile_layout::content_font_28():tile_layout::content_font_20();
+  // and 28 for 28, 32 and 40 - stepping down while the size would not fit
+  // below the title (the 1280x800 classic half tile, 62 px, shows 24;
+  // user 2026-10-08); every size fits.
+  const lv_font_t* steps[]={tile_layout::content_font_20(),tile_layout::content_font_24(),tile_layout::content_font_28()};
+  int step=choice==2?1:choice>=3?2:0;
+  while(step>0&&tile_layout::header_title_font()->line_height+steps[step]->line_height>(GRID_CELL_H-GRID_GAP)/2) --step;
+  const lv_font_t* expected=steps[step];
+  if(Device::kScreenWidth==1280&&Device::kScreenHeight==800&&choice>=3) assert(expected==tile_layout::content_font_24()&&"The 1280x800 classic half tile shows 24");
   assert(lv_obj_get_style_text_font(value, LV_PART_MAIN)==expected&&compact_sensor_layout::value_font(choice)==expected);
   lv_obj_delete(card);
  }

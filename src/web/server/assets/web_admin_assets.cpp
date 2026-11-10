@@ -1,5 +1,7 @@
 #include "src/web/server/assets/web_admin_assets.h"
 
+#include "src/web/server/web_admin_utils.h"
+
 #include <algorithm>
 
 #include "src/web/generated/admin_assets_meta.h"
@@ -14,12 +16,19 @@ static const uint8_t kAdminJsGzip[] PROGMEM = {
 #include "src/web/generated/admin_js_gzip.inc"
 };
 
+static const uint8_t kAuthJsGzip[] PROGMEM = {
+#include "src/web/generated/auth_js_gzip.inc"
+};
+
 static_assert(
     sizeof(kAdminCssGzip) == web_admin_assets_generated::kAdminCssGzipSize,
     "Generated admin CSS size mismatch");
 static_assert(
     sizeof(kAdminJsGzip) == web_admin_assets_generated::kAdminJsGzipSize,
     "Generated admin JavaScript size mismatch");
+static_assert(
+    sizeof(kAuthJsGzip) == web_admin_assets_generated::kAdminAuthJsGzipSize,
+    "Generated auth JavaScript size mismatch");
 
 struct GzipWebAsset {
   const uint8_t* data;
@@ -50,6 +59,7 @@ void sendGzipProgmemAsset(WebServer& server,
 
   server.send(200, asset.content_type, "");
 
+  WebSendPacer pacer;
   for (size_t offset = 0; offset < asset.size; offset += chunk_size) {
     const size_t length = std::min(chunk_size, asset.size - offset);
     server.sendContent_P(
@@ -58,6 +68,7 @@ void sendGzipProgmemAsset(WebServer& server,
     // much shorter without increasing SDIO pressure per write.
     delay(2);
     yield();
+    pacer.wait();
   }
 }
 
@@ -69,6 +80,10 @@ const char* adminCssAssetPath() {
 
 const char* adminJsAssetPath() {
   return web_admin_assets_generated::kAdminJsPath;
+}
+
+const char* authJsAssetPath() {
+  return web_admin_assets_generated::kAdminAuthJsPath;
 }
 
 void sendAdminCssAsset(WebServer& server) {
@@ -86,5 +101,14 @@ void sendAdminJsAsset(WebServer& server) {
       sizeof(kAdminJsGzip),
       web_admin_assets_generated::kAdminJsContentType,
       web_admin_assets_generated::kAdminJsEtag};
+  sendGzipProgmemAsset(server, asset);
+}
+
+void sendAuthJsAsset(WebServer& server) {
+  const GzipWebAsset asset{
+      kAuthJsGzip,
+      sizeof(kAuthJsGzip),
+      web_admin_assets_generated::kAdminAuthJsContentType,
+      web_admin_assets_generated::kAdminAuthJsEtag};
   sendGzipProgmemAsset(server, asset);
 }

@@ -1,7 +1,7 @@
 // Sensor, Number, Select, Date/Time, Binary Sensor and Energy popups show the
 // entity's current value in the shared header: a smaller white title above
-// the white value, both next to the icon disc. Every other popup keeps the
-// classic header. The value is copied from a hidden holder label, so live
+// the white value, both next to the icon disc; the PIN popup shows the state
+// "Locked" there, the Media popup the player's state (user 2026-10-19). Every other popup keeps the classic header. The value is copied from a hidden holder label, so live
 // updates repaint only the header line and an unchanged header never redraws.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -10,6 +10,8 @@ import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {cppFunctionDefinitions} from '../../lib/cpp-source.mjs';
 import {lvglHost} from '../../lib/lvgl-host.mjs';
+import {valueUnitSource} from '../../lib/value-unit-source.mjs';
+import {radiusPolicyHost, toneColorHost, popupSurfaceHost} from '../../lib/surface-style-host.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const read = file => fs.readFileSync(path.join(root, file), 'utf8').replace(/\r\n?/g, '\n');
@@ -39,7 +41,7 @@ for (const marker of [
   'set_title_single_line(shell.title, with_value);',
   'popup_layout::alignHeaderWithValue(shell.header, shell.title, shell.value, shell.icon,',
   'popup_layout::alignHeader(shell.header, shell.title, shell.icon, shell.icon_disc);',
-  'lv_obj_set_style_text_color(shell.value, lv_color_white(), 0);',
+  'lv_obj_set_style_text_color(shell.value, lv_color_hex(ui_theme::text()), 0);',
 ]) assert.ok(shellSource.includes(marker), `popup_shell.cpp: ${marker}`);
 
 // Only the value popups pass a holder; every other popup keeps its header.
@@ -52,13 +54,21 @@ const shellCalls = file => [...code(read(file)).matchAll(/show_popup_shell\(([^;
   }
   return {count, args: match[1].replace(/\s+/g, ' ')};
 });
-for (const file of ['src/ui/popups/sensor/sensor_popup.cpp', 'src/ui/popups/energy/energy_popup.cpp']) {
+for (const file of ['src/ui/popups/sensor/sensor_popup.cpp', 'src/ui/popups/energy/energy_popup.cpp',
+  'src/ui/popups/media/media_popup.cpp']) {
   const calls = shellCalls(file);
   assert.ok(calls.length > 0, file);
   for (const call of calls)
     assert.ok(call.count === 7 && /nullptr, g_\w+_popup_ctx->value_label$/.test(call.args), `${file} passes its value holder`);
 }
-for (const popup of ['light', 'climate', 'cover', 'media', 'camera', 'pin', 'weather']) {
+// The PIN popup shows the protected tile's state ("Locked") the same way.
+{
+  const calls = shellCalls('src/ui/popups/pin/pin_popup.cpp');
+  assert.ok(calls.length === 2, 'PIN popup create and reuse');
+  for (const call of calls)
+    assert.ok(call.count === 7 && /nullptr, g_ctx->state_label$/.test(call.args), 'PIN popup passes its state holder');
+}
+for (const popup of ['light', 'climate', 'cover', 'camera', 'weather']) {
   const file = `src/ui/popups/${popup}/${popup}_popup.cpp`;
   for (const call of shellCalls(file)) assert.ok(call.count <= 6, `${popup} keeps the classic header`);
 }
@@ -71,23 +81,24 @@ assert.match(code(fn(sensor, 'build_popup_shell')),
   /ctx->value_label = lv_label_create\(parts\.card\);[\s\S]*lv_obj_add_flag\(ctx->value_label, LV_OBJ_FLAG_HIDDEN\);/,
   'The Sensor value holder is hidden and exists before the first frame');
 assert.match(code(fn(sensor, 'update_value_label')),
-  /sensor_value_display\(value, unit, ctx->decimals, categorical_state\)[\s\S]*set_label_text_if_changed\(ctx->value_label/,
+  /show_header_value\(ctx, sensor_value_display\(value, ctx->decimals, categorical_state\), unit\);/,
   'Numeric and textual Sensors keep the established value formatting');
-assert.match(code(fn(sensor, 'update_binary_state')), /lv_label_set_text\(\s*ctx->value_label,\s*i18n::binary_sensor_state_label/,
+assert.match(code(fn(sensor, 'update_binary_state')), /show_header_value\(ctx,\s*missing \? String\(\"--\"\)\s*:\s*String\(i18n::binary_sensor_state_label/,
   'Binary Sensors show their translated state');
 assert.match(code(fn(sensor, 'apply_init_to_context')),
-  /if \(init\.editable\) \{\s*set_label_text_if_changed\(ctx->value_label,\s*editable_display_value\(editable_value\)\.c_str\(\)\);/,
+  /if \(init\.editable\) \{\s*show_header_value\(ctx, editable_display_number\(editable_value\), editable_display_unit\(editable_value\)\);/,
   'Number, Select and Date/Time show the tile value');
 assert.match(code(fn(sensor, 'process_sensor_popup_queue')),
-  /parse_editable_value\([\s\S]*set_label_text_if_changed\(ctx->value_label, editable_display_value\(value\)\.c_str\(\)\);/,
+  /parse_editable_value\([\s\S]*show_header_value\(ctx, editable_display_number\(value\), editable_display_unit\(value\)\);/,
   'Editor values update while the popup is open');
 const show = code(fn(sensor, 'show_sensor_popup'));
 assert.ok(show.indexOf('apply_sensor_header_value(ctx, init);') > 0 &&
   show.indexOf('apply_sensor_header_value(ctx, init);') < show.indexOf('show_popup_shell('),
   'The first frame shows the value of the opened entity');
 const firstFrame = code(fn(sensor, 'apply_sensor_header_value'));
-for (const marker of ['editable_display_value(value)', 'update_binary_state(ctx, init.value, init.binary_available,',
-  'sensor_value_display(init.value, init.unit, init.decimals,'])
+for (const marker of ['show_header_value(ctx, editable_display_number(value), editable_display_unit(value));',
+  'update_binary_state(ctx, init.value, init.binary_available,',
+  'show_header_value(ctx, sensor_value_display(init.value, init.decimals, init.state_history_mode), init.unit);'])
   assert.ok(firstFrame.includes(marker), `First frame: ${marker}`);
 // Energy: the hidden holder carries today's value from the first frame on.
 const energy = read('src/ui/popups/energy/energy_popup.cpp');
@@ -105,6 +116,7 @@ const out = path.join(root, 'build/tests/popup-header-value');
 fs.mkdirSync(out, {recursive: true});
 const cpp = String.raw`
 #include <lvgl.h>
+#include <lvgl_private.h>
 #include <algorithm>
 #include <cassert>
 #include <cstdlib>
@@ -117,6 +129,7 @@ const cpp = String.raw`
 #include "src/ui/popups/popup_first_frame.h"
 #include "src/ui/popups/popup_body.h"
 extern "C" {LV_FONT_DECLARE(ui_font_12);LV_FONT_DECLARE(ui_font_14);LV_FONT_DECLARE(ui_font_16);LV_FONT_DECLARE(ui_font_20);LV_FONT_DECLARE(ui_font_24);LV_FONT_DECLARE(ui_font_28);LV_FONT_DECLARE(ui_font_32);LV_FONT_DECLARE(ui_font_40);LV_FONT_DECLARE(ui_font_48);LV_FONT_DECLARE(ui_font_56);LV_FONT_DECLARE(ui_font_64);LV_FONT_DECLARE(ui_font_72);LV_FONT_DECLARE(ui_font_80);LV_FONT_DECLARE(ui_font_96);LV_FONT_DECLARE(mdi_icons_32);LV_FONT_DECLARE(mdi_icons_40);LV_FONT_DECLARE(mdi_icons_48);}
+${valueUnitSource(root)}
 #if defined(DEVICE_LAYOUT_480X480)
 #define FONT_MDI_ICONS (&mdi_icons_32)
 #elif defined(DEVICE_LAYOUT_1024X600)
@@ -126,17 +139,24 @@ extern "C" {LV_FONT_DECLARE(ui_font_12);LV_FONT_DECLARE(ui_font_14);LV_FONT_DECL
 #endif
 std::string getMdiChar(const char*){return "\xF3\xB0\x96\xAD";}
 // Surface styles are covered by the shell tests; this test needs geometry only.
+${toneColorHost(root)}
 namespace ui_surface_style {
 template<class T> void apply_radius(lv_obj_t* obj,T radius,lv_style_selector_t selector){lv_obj_set_style_radius(obj,static_cast<int32_t>(radius),selector);}
-inline void apply_global_tile_border(lv_obj_t*){}inline void apply_popup_border(lv_obj_t*,lv_color_t,lv_opa_t){}inline lv_opa_t icon_glow_opa(){return 64;}inline lv_opa_t icon_neutral_opa(){return 38;}inline bool icon_discs_shown(){return true;}
+inline void apply_global_tile_border(lv_obj_t*){}inline void apply_popup_border(lv_obj_t*,lv_color_t,lv_opa_t){}inline uint8_t icon_glow_percent(){return 25;}inline bool icon_discs_shown(){return true;}
 inline lv_color_t border_hint(lv_color_t c){return lv_color_mix(lv_color_white(),c,128);}
 }
 constexpr int MALLOC_CAP_SPIRAM=1,MALLOC_CAP_8BIT=2;
 void* heap_caps_malloc(size_t n,int){return malloc(n);}void heap_caps_free(void*p){free(p);}
+${radiusPolicyHost(root)}
+namespace Device { constexpr int kGridGap = SCREEN_WIDTH == 480 ? 10 : 16; }  // the profile's grid gap (popup header rule)
 ${strip(read('src/ui/popups/popup_layout.h'))}
 ${strip(read('src/ui/popups/popup_open.h'))}
 ${strip(read('src/ui/popups/popup_shell.h'))}
+${popupSurfaceHost(root)}
 ${strip(read('src/ui/popups/popup_open.cpp'))}
+${strip(read('src/ui/shared/ui_pulse.h'))}
+${strip(read('src/tiles/icons/mdi_bar_icons.h'))}
+${strip(read('src/ui/shared/icon_lock_mark.h'))}
 ${strip(read('src/ui/popups/popup_shell.cpp'))}
 int flushed=0;lv_area_t flushed_area{};
 struct Body{PopupShellParts parts;lv_obj_t* value=nullptr;};
@@ -163,7 +183,8 @@ void check_value_header(const char* expected){
  assert(line(shell.title)+line(shell.value)<=popup_layout::kHeaderIconDiscSize&&"The block fits beside the disc");
  assert(std::abs((title.y1+value.y2)-(disc.y1+disc.y2))<=2&&"The block is centered on the icon disc");
  assert(title.x2<close.x1&&value.x2<close.x1&&"Close button unchanged and clear of the text");
- assert(lv_obj_get_width(shell.close)==popup_layout::kCloseButtonSize);
+ // The X presses at the head buttons' size, centred where the full X box is.
+ assert(lv_obj_get_width(shell.close)==(popup_layout::kCloseButtonSize+popup_layout::kHeaderIconDiscSize)/2);
 }
 int main(){
  lv_init();auto* display=lv_display_create(SCREEN_WIDTH,SCREEN_HEIGHT);std::vector<uint32_t> band(SCREEN_WIDTH*16);
@@ -206,16 +227,18 @@ int main(){
  lv_obj_set_style_text_color(light.parts.icon,lv_color_hex(0xFFC107),0);hide_popup_shell(sensor.parts.card);
  auto disc_opa=[]{return lv_obj_get_style_bg_opa(shell.icon_disc,LV_PART_MAIN);};
  auto disc_rgb=[]{return lv_color_to_u32(lv_obj_get_style_bg_color(shell.icon_disc,LV_PART_MAIN))&0xFFFFFFu;};
- show(light);render(display);assert(disc_rgb()==0xFFC107u&&disc_opa()>0&&"Without a tile a colored icon tints the disc");
+ // The circle color over the card (tone_color::fill), tinted or neutral.
+ auto expected=[](bool tinted){return tone_color::fill(lv_color_to_u32(lv_obj_get_style_bg_color(shell.frame,LV_PART_MAIN))&0xFFFFFFu,0xFFC107u,tinted,25).disc_color;};
+ show(light);render(display);assert(disc_rgb()==expected(true)&&disc_opa()>0&&"Without a tile a colored icon tints the disc");
  hide_popup_shell(light.parts.card);popup_shell_use_tile_disc(false,true,false);show(light);render(display);
- assert(disc_rgb()==0xFFFFFFu&&disc_opa()>0&&"Without Circle in icon color the disc stays white");
- sync_popup_shell();assert(disc_rgb()==0xFFFFFFu&&"A re-sync keeps the tile options");
+ assert(disc_rgb()==expected(false)&&disc_opa()>0&&"Without Circle in icon color the disc stays neutral");
+ sync_popup_shell();assert(disc_rgb()==expected(false)&&"A re-sync keeps the tile options");
  hide_popup_shell(light.parts.card);popup_shell_use_tile_disc(true,false,true);show(light);render(display);
  assert(disc_opa()==LV_OPA_TRANSP&&"A tile with its circle off shows no disc");
  hide_popup_shell(light.parts.card);popup_shell_use_tile_disc(false,false,true);show(light);render(display);
- assert(disc_rgb()==0xFFC107u&&disc_opa()>0&&"Circle in icon color tints the disc");
+ assert(disc_rgb()==expected(true)&&disc_opa()>0&&"Circle in icon color tints the disc");
  hide_popup_shell(light.parts.card);show(light);render(display);
- assert(disc_rgb()==0xFFC107u&&disc_opa()>0&&"A popup without a tile returns to the default disc");
+ assert(disc_rgb()==expected(true)&&disc_opa()>0&&"A popup without a tile returns to the default disc");
  hide_popup_shell(light.parts.card);lv_obj_delete(sensor.parts.overlay);lv_obj_delete(light.parts.overlay);
  lv_deinit();std::cout<<SCREEN_WIDTH<<"x"<<SCREEN_HEIGHT<<": header value passed\n";
 }

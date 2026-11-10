@@ -31,6 +31,14 @@ constexpr uint16_t kChipId = 0xeb52;
 // sensor outputs exactly the JPEG size, so no crop pass runs.
 constexpr uint32_t kFrameWidth = 1280;
 constexpr uint32_t kFrameHeight = 720;
+// The other window: a centred 544x720 strip, sent when the Bridge turns the
+// image a quarter (an upright layout, or a camera rotation of 90 degrees;
+// the sensor then stands upright): 4:3 landscape once turned (user 2026-10-08:
+// a strip is 4:3; 544 for whole 16x16 MCUs in 4:2:0). User 2026-10-08, the 8-inch way: a sensor standing upright
+// sends a landscape strip - cropping on the sensor costs nothing and sends
+// less - a lying one everything.
+constexpr uint32_t kTurnedFrameWidth = 544;
+constexpr uint32_t kTurnedFrameHeight = 720;
 constexpr uint32_t kDataLanes = 1;
 constexpr uint8_t kRawBits = 8;
 // esp_cam_sensor: mipi_clk 576000000 for the RAW8 modes (lane rate in Mbps).
@@ -94,6 +102,13 @@ class Transport {
 
 class Sensor {
  public:
+  // The turned window (kTurnedFrameWidth x kTurnedFrameHeight) for the core.
+  // An upright layout turns the picture a quarter back: counter-clockwise
+  // when this sensor's picture (board mirror on) is mirrored that way
+  // (local_camera.cpp displayQuarterTurns(); assumed like the V2, Tab5 hardware check pending).
+  static constexpr bool kUprightTurnCounterClockwise = false;
+  static constexpr uint32_t kTurnedWidth = kTurnedFrameWidth;
+  static constexpr uint32_t kTurnedHeight = kTurnedFrameHeight;
   // Uses the board transport. Never creates or releases a bus.
   esp_err_t attach(Transport* transport);
   esp_err_t detach();
@@ -103,9 +118,9 @@ class Sensor {
   // the raw value even when it does not match kChipId.
   esp_err_t probe(uint16_t* chip_id);
   // Mode table (it starts with the software reset), 30 fps VTS, default
-  // exposure at 1x gain, stream off, board mirror. The readout is then
-  // orientation state 0.
-  esp_err_t loadDefaultMode(bool mirror);
+  // exposure at 1x gain, stream off, board mirror; turned: the 544x720
+  // window. The readout is then orientation state 0.
+  esp_err_t loadDefaultMode(bool mirror, bool turned = false);
   // Readout orientation relative to state 0: mirror horizontally, flip
   // vertically, both = 180 degrees (0x3221). The sensor keeps the Bayer
   // order itself; the output window stays at the table start. Read back.
@@ -120,6 +135,8 @@ class Sensor {
 
   Transport* transport_ = nullptr;
   bool default_mirror_ = false;
+  // The turned window (loadDefaultMode()): its start for setOrientation().
+  bool turned_ = false;
 };
 
 }  // namespace sc202cs

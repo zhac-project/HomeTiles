@@ -1,5 +1,8 @@
 #include "src/types/sensor/web_handler.h"
 
+#include "src/types/sensor/gauge_range.h"
+#include "src/types/sensor/sensor_look.h"
+
 void apply_sensor_fields_from_request(WebServer& server, Tile& tile) {
   tile.sensor_entity = server.hasArg("sensor_entity") ? server.arg("sensor_entity") : "";
   tile.sensor_unit = server.hasArg("sensor_unit") ? server.arg("sensor_unit") : "";
@@ -30,25 +33,33 @@ void apply_sensor_fields_from_request(WebServer& server, Tile& tile) {
   }
   setTilePopupOpenMode(tile, popup_mode);
   tile.sensor_display_mode = 0;
-  tile.sensor_gauge_min = 0;
-  tile.sensor_gauge_max = 100;
   if (server.hasArg("sensor_display_mode")) {
     int mode = server.arg("sensor_display_mode").toInt();
-    if (mode >= 0 && mode <= 2) tile.sensor_display_mode = static_cast<uint8_t>(mode);
+    // 0-2 and the looks (sensor_look.h).
+    if (mode >= 0 && mode <= sensor_look::kLastMode) tile.sensor_display_mode = static_cast<uint8_t>(mode);
   }
-  if (server.hasArg("sensor_gauge_min")) {
-    String raw = server.arg("sensor_gauge_min");
-    raw.trim();
-    if (raw.length() > 0) tile.sensor_gauge_min = raw.toInt();
+  // The bounds with their decimals (issue #83: 3.7 to 4.2 V became 4 to 4);
+  // an empty or unreadable bound keeps its default, an empty range 0-100.
+  double gauge_min = 0;
+  double gauge_max = 100;
+  uint8_t min_decimals = 0;
+  uint8_t max_decimals = 0;
+  if (server.hasArg("sensor_gauge_min") &&
+      !sensor_gauge::parse(server.arg("sensor_gauge_min").c_str(), gauge_min, min_decimals)) {
+    gauge_min = 0;
+    min_decimals = 0;
   }
-  if (server.hasArg("sensor_gauge_max")) {
-    String raw = server.arg("sensor_gauge_max");
-    raw.trim();
-    if (raw.length() > 0) tile.sensor_gauge_max = raw.toInt();
+  if (server.hasArg("sensor_gauge_max") &&
+      !sensor_gauge::parse(server.arg("sensor_gauge_max").c_str(), gauge_max, max_decimals)) {
+    gauge_max = 100;
+    max_decimals = 0;
   }
+  sensor_gauge::store(gauge_min, gauge_max, min_decimals > max_decimals ? min_decimals : max_decimals,
+                      tile.sensor_gauge_min, tile.sensor_gauge_max, tile.sensor_gauge_decimals);
   if (tile.sensor_gauge_max <= tile.sensor_gauge_min) {
     tile.sensor_gauge_min = 0;
     tile.sensor_gauge_max = 100;
+    tile.sensor_gauge_decimals = 0;
   }
   // Gauge appearance settings - preserve existing values if no new value sent
   if (server.hasArg("sensor_gauge_arc")) {

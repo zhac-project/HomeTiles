@@ -7,6 +7,15 @@ function assert(condition, message) {
   if (!condition) throw new Error(`Device catalog: ${message}`);
 }
 
+const POST_V3_TARGETS = Object.freeze({
+  waveshare_touch_lcd_7b_rev3: { metadataDeviceKey: 'waveshare_touch_lcd_7b', define: 'DEVICE_WAVESHARE_TOUCH_LCD_7B' },
+  waveshare_touch_lcd_10_1_rev3: { metadataDeviceKey: 'waveshare_touch_lcd_10_1', define: 'DEVICE_WAVESHARE_TOUCH_LCD_10_1' },
+  guition_jc8012p4a1_v3: { metadataDeviceKey: 'guition_jc8012p4a1_v2', define: 'DEVICE_GUITION_JC8012P4A1_V2' },
+  waveshare_touch_lcd_5_rev3: { metadataDeviceKey: 'waveshare_touch_lcd_5', define: 'DEVICE_WAVESHARE_TOUCH_LCD_5' },
+  waveshare_touch_lcd_4_3_rev3: { metadataDeviceKey: 'waveshare_touch_lcd_4_3', define: 'DEVICE_WAVESHARE_TOUCH_LCD_4_3' },
+  waveshare_touch_lcd_8_rev3: { metadataDeviceKey: 'waveshare_touch_lcd_8', define: 'DEVICE_WAVESHARE_TOUCH_LCD_8' },
+});
+
 function validateCatalog(catalog) {
   assert(catalog?.schemaVersion === 1, 'unsupported schema version');
   assert(Array.isArray(catalog.profiles) && catalog.profiles.length > 0, 'profiles are missing');
@@ -30,24 +39,26 @@ function validateCatalog(catalog) {
     assert(typeof profile.publish === 'boolean', `publish must be explicit for ${profile.key}`);
     const s3 = profile.chipFamily === 'ESP32-S3';
     const revision = profile.siliconVariant;
-    assert(s3 ? revision === 'default' : ['pre_v3', 'rev3_1', 'post_v3'].includes(revision),
+    assert(s3 ? revision === 'default' : ['pre_v3', 'post_v3'].includes(revision),
       `invalid silicon variant for ${profile.key}`);
-    const [minimum, maximum] = s3 ? [0, 65535] : revision === 'pre_v3' ? [1, 199] : revision === 'rev3_1' ? [301, 301] : [301, 399];
+    const [minimum, maximum] = s3 ? [0, 65535] : revision === 'pre_v3' ? [1, 199] : [301, 399];
     assert(profile.minimumRevision === minimum && profile.maximumRevision === maximum,
       `unsafe revision range for ${profile.key}`);
-    assert(revision !== 'rev3_1' || (profile.key === 'waveshare_touch_lcd_7b_rev3_1' &&
-      profile.metadataDeviceKey === 'waveshare_touch_lcd_7b' && profile.define === 'DEVICE_WAVESHARE_TOUCH_LCD_7B'),
-    `unsupported exact-v3.1 target ${profile.key}`);
-    assert(revision !== 'post_v3' || (profile.key === 'waveshare_touch_lcd_10_1_rev3' &&
-      profile.metadataDeviceKey === 'waveshare_touch_lcd_10_1' && profile.define === 'DEVICE_WAVESHARE_TOUCH_LCD_10_1'),
+    // Only profiles whose device code selects the v3 DSI clock may build for v3.x.
+    const v3 = POST_V3_TARGETS[profile.key];
+    assert(revision !== 'post_v3' || (v3 && profile.metadataDeviceKey === v3.metadataDeviceKey &&
+      profile.define === v3.define),
     `unsupported v3.x target ${profile.key}`);
     const identity = `${profile.define}:${revision}`;
     assert(!identities.has(identity), `ambiguous define/silicon identity ${identity}`);
     identities.add(identity);
     const isGuitionV1 = profile.key === 'guition_jc8012p4a1';
+    // The 7B with P4 v3.x: SDIO at 20 MHz and no C6 version query (issue #41).
+    const is7bRev3 = profile.key === 'waveshare_touch_lcd_7b_rev3';
     assert(profile.rxVariant === (s3 ? 'native-s3' : isGuitionV1 ? 'repo-guition-jc8012-rx-single-block' : 'repo-a8204'),
       `unsafe transport variant for ${profile.key}`);
-    assert(profile.elfFlags === (isGuitionV1 ? '-Wl,--wrap=esp_hosted_get_default_sdio_config' : ''),
+    assert(profile.elfFlags === (isGuitionV1 ? '-Wl,--wrap=esp_hosted_get_default_sdio_config'
+      : is7bRev3 ? '-Wl,--wrap=esp_hosted_get_default_sdio_config -Wl,--wrap=esp_hosted_get_coprocessor_fwversion' : ''),
       `unsafe linker flags for ${profile.key}`);
     if (!profile.publish) {
       assert(!profile.installer && profile.ciOrder === undefined, `non-release profile ${profile.key} cannot be published`);
@@ -120,10 +131,14 @@ function releaseAssetNames(version) {
   ]).sort();
 }
 
+// The MDI icon files (tools/generate-icon-files.mjs) a panel fetches from the
+// release of its own version after an update; one per icon size.
+const iconFileNames = ['hometiles-icons-32.bin', 'hometiles-icons-40.bin', 'hometiles-icons-48.bin'];
+
 function verifyReleaseAssets(directory, version) {
   const actual = fs.readdirSync(directory, { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith('.bin')).map((entry) => entry.name).sort();
-  const expected = releaseAssetNames(version);
+  const expected = [...releaseAssetNames(version), ...iconFileNames].sort();
   assert(JSON.stringify(actual) === JSON.stringify(expected),
     `release asset set mismatch; missing: ${expected.filter((name) => !actual.includes(name)).join(', ') || '(none)'}; unexpected: ${actual.filter((name) => !expected.includes(name)).join(', ') || '(none)'}`);
 }
@@ -146,4 +161,4 @@ if (require.main === module) {
 }
 
 module.exports = { profiles, releaseProfiles, validateCatalog, getBuildProfile, getReleaseProfile,
-  installerProfiles, releaseFileVersion, releaseAssetNames, verifyReleaseAssets };
+  installerProfiles, releaseFileVersion, releaseAssetNames, iconFileNames, verifyReleaseAssets };

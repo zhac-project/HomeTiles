@@ -9,8 +9,9 @@ Note:
 - The shared layout keeps both OTA app slots below `16MB`.
 - The normal ESP32-P4 profiles use the vendors' P4NRW32/pre-v3 modules and
   HomeTiles explicitly guards them to chip revisions 1–199. They are not
-  generic all-revision P4 builds. The only separate post-v3 profile is the
-  experimental, exact-v3.1 Waveshare 7B entry documented below.
+  generic all-revision P4 builds. Separate, experimental v3.1-or-newer
+  profiles exist for the Waveshare 5-inch, 7B and 10.1 and the Guition
+  JC8012P4A1 V3, documented below.
 
 ## M5Stacks Tab5
 
@@ -74,14 +75,19 @@ Arduino IDE:
 
 Used for:
 - `src/devices/waveshare_touch_lcd_4_3`
-- build profile `waveshare_4_3`
+- build profile `waveshare_4_3` for ESP32-P4 before v3.0 (1–199)
+- build profile `waveshare_4_3_rev3` for ESP32-P4 v3.1 or newer (301–399)
 
 Important:
 - This profile is only for the exact `ESP32-P4-WIFI6-Touch-LCD-4.3` product.
 - The native panel is a `480x800` ST7701 MIPI-DSI display. HomeTiles renders
   it as an `800x480` landscape dashboard.
 - The tested board reports ESP32-P4 revision v1.3 and uses the pre-v3
-  revisions 1–199 firmware contract.
+  revisions 1–199 firmware contract. Boards with ESP32-P4 v3.1 or newer
+  (#135, v3.2) use `waveshare_4_3_rev3` with `Chip Variant: v3.00 or newer`;
+  the same code then selects the default MIPI DSI PHY clock that v3 silicon
+  accepts. Check the revision with `esptool chip-id` first. The v3 build is
+  experimental and not yet hardware-tested.
 - Touch uses GT911 on SDA GPIO7 and SCL GPIO8 without interrupt or reset pins.
 - The active-low backlight is GPIO26 and the active-low panel reset is GPIO27.
 - The microSD interface uses SDMMC slot 0 on GPIO39-44 and P4 LDO channel 4.
@@ -108,14 +114,64 @@ Arduino IDE:
 - Upload Speed: `921600`
 - USB Mode: `USB-OTG (TinyUSB)`
 
+## Waveshare Touch LCD 5
+
+Used for:
+- `src/devices/waveshare_touch_lcd_5` (a board description for the shared
+  driver in `src/devices/waveshare_touch_lcd_5/dsi_driver`)
+- build profile `waveshare_5` for ESP32-P4 before v3.0 (revisions 1–199)
+- build profile `waveshare_5_rev3` for ESP32-P4 v3.1 or newer (301–399)
+
+Important:
+- This profile is only for the exact `ESP32-P4-WIFI6-Touch-LCD-5`
+  ([issue #76](https://github.com/GalusPeres/HomeTiles/issues/76)). It is
+  built from Waveshare's BSP and documentation; no board has been tested yet.
+- ESP32-P4 with `32MB` flash and `32MB` PSRAM. Waveshare ships units with
+  rev1.x and rev3.x silicon: check the revision with `esptool chip-id` and
+  pick the matching image. Revision v3.0 is unsupported by the pinned
+  toolchain.
+- The native panel is a `720x1280` HX8394 MIPI-DSI display (2 lanes at
+  700 Mbps, 58 MHz DPI clock). HomeTiles renders it as a `1280x720`
+  landscape dashboard like the Tab5 and the 7-inch, with the upright layout.
+- The LCD reset is GPIO27 (active high); the backlight is GPIO26 with 5kHz,
+  10-bit LEDC PWM.
+- Touch uses GT911 on SDA GPIO7 and SCL GPIO8 without interrupt or reset pins.
+- The microSD interface uses SDMMC slot 0 on GPIO39-44 and P4 LDO channel 4,
+  mounted at 20MHz like the 8-inch.
+- Voice: ES8311 (0x18) and ES7210 (0x40) with the amplifier enable on GPIO53.
+- Camera: an optional OV5647 module on the MIPI-CSI connector (SCCB on SDA 7
+  / SCL 8), off until enabled in the Web Admin.
+- Hardware facts, sources and the open checks are in the
+  [device README](src/devices/waveshare_touch_lcd_5/README.md).
+- Use the repository's `partitions.csv`; HomeTiles needs two 6.5MB OTA slots.
+
+Arduino IDE:
+- Board: `ESP32P4 Dev Module`
+- USB CDC On Boot: `Disabled`
+- Chip Variant: `Before v3.00` for `waveshare_5`, or `v3.00 or newer` for
+  `waveshare_5_rev3`.
+- Core Debug Level: `None`
+- USB DFU On Boot: `Disabled`
+- Erase All Flash Before Sketch Upload: `Disabled`
+- Flash Frequency: `80MHz`
+- Flash Mode: `QIO`
+- Flash Size: `32MB (256Mb)`
+- JTAG Adapter: `Disabled`
+- USB Firmware MSC On Boot: `Disabled`
+- Partition Scheme: `32M Flash (13MB APP/6.75MB SPIFFS)`
+- PSRAM: `Enabled`
+- Upload Mode: `UART0 / Hardware CDC`
+- Upload Speed: `921600`
+- USB Mode: `USB-OTG (TinyUSB)`
+
 ## Waveshare Touch LCD 7 / 8 / 10.1
 
 Used for:
 - `src/devices/waveshare_touch_lcd_7`
 - `src/devices/waveshare_touch_lcd_8`
 - `src/devices/waveshare_touch_lcd_10_1`
-- build profiles `waveshare_7`, `waveshare_8`, `waveshare_10_1`, and
-  `waveshare_10_1_rev3`
+- build profiles `waveshare_7`, `waveshare_8`, `waveshare_8_rev3`,
+  `waveshare_10_1`, and `waveshare_10_1_rev3`
 
 Important:
 - The 8-inch profile is hardware-confirmed. The 7-inch and 10.1-inch profiles
@@ -130,9 +186,12 @@ Important:
 - Leave `Partition Scheme` on the normal 32MB ESP32-P4 setting.
 - The actual partition layout still comes from the shared repo `partitions.csv`.
 - The `Chip Variant` must be set to `Before v3.00` for this hardware, except
-  for 10.1-inch boards with ESP32-P4 v3.1 or newer: use `waveshare_10_1_rev3`
-  with `v3.00 or newer`. Check the revision with `esptool chip-id` first. The
-  v3 build is experimental and contributor-tested on v3.2 only.
+  for 8-inch and 10.1-inch boards with ESP32-P4 v3.1 or newer: use
+  `waveshare_8_rev3` (#140, v3.2) or `waveshare_10_1_rev3` with
+  `v3.00 or newer`; the same code then selects the default MIPI DSI PHY clock
+  that v3 silicon accepts. Check the revision with `esptool chip-id` first.
+  The v3 builds are experimental; the 10.1 one is contributor-tested on v3.2,
+  the 8-inch one is not yet hardware-tested.
 
 Arduino IDE:
 - Board: `ESP32P4 Dev Module`
@@ -157,7 +216,7 @@ Arduino IDE:
 Used for:
 - `src/devices/waveshare_touch_lcd_7b`
 - build profile `waveshare_7b` for P4NRW32/pre-v3 revisions 1–199
-- build profile `waveshare_7b_rev3_1` for exact ESP32-P4 revision v3.1 (301)
+- build profile `waveshare_7b_rev3` for ESP32-P4 v3.1 or newer (301–399)
 
 Important:
 - This is the `1024x600` EK79007 7B/7B-C profile. It is not interchangeable
@@ -168,29 +227,25 @@ Important:
 - Touch uses SDA 7 and SCL 8. The panel reset is GPIO 33.
 - The microSD interface uses SDMMC slot 0 on GPIO39-44 and P4 LDO channel 4.
 - The browser installer shows two explicit device entries: **ESP32-P4 before
-  v3.0 (revisions 1–199)** and **exact ESP32-P4 v3.1**. The selected entry
+  v3.0 (revisions 1–199)** and **ESP32-P4 v3.1 or newer**. The selected entry
   determines the release asset. Revision detection rejects a mismatch before
   flashing; it does not change the selection automatically.
-- The exact-v3.1 entry is experimental and has not been validated on that
-  hardware. ESP32-P4 v3.2 or newer is unsupported with Arduino-ESP32 3.3.7 /
-  ESP-IDF 5.5.2 and must not be flashed.
-- HomeTiles browser, Web Admin, and OTA paths enforce exact revision metadata.
-  A direct Arduino IDE or `esptool` write bypasses that HomeTiles check. The
-  underlying ESP header from the Arduino `v3.00 or newer` choice can cover
-  revisions 301–399, so directly writing the v3.1 image to v3.2 or newer is
-  unsafe.
-- For an Arduino IDE build, use `esptool chip-id` first. Continue only for
-  revisions 1–199 or exact v3.1; stop for v3.2 or newer and do not guess.
-- Complete validation on both paths, especially exact v3.1 hardware, is still
-  pending in [issue #7](https://github.com/GalusPeres/HomeTiles/issues/7).
+- The v3 entry is experimental and has not been validated on 7B hardware. It
+  replaces the former exact-v3.1 image, which v3.2 boards could not use
+  ([issue #41](https://github.com/GalusPeres/HomeTiles/issues/41)). A panel
+  running that former image rejects the new one over OTA and needs one browser
+  installer Update.
+- HomeTiles browser, Web Admin, and OTA paths enforce the revision metadata.
+  For an Arduino IDE build, use `esptool chip-id` first.
+- Complete validation on both paths is still pending in
+  [issue #7](https://github.com/GalusPeres/HomeTiles/issues/7).
 - Use the repository's `partitions.csv`; HomeTiles needs two 6.5MB OTA slots.
 
 Arduino IDE:
 - Board: `ESP32P4 Dev Module`
 - USB CDC On Boot: `Disabled`
 - Chip Variant: `Before v3.00` for `waveshare_7b`, or `v3.00 or newer` for
-  `waveshare_7b_rev3_1`. HomeTiles v0.6.8 narrows the latter firmware contract
-  to exact v3.1 even though the Arduino/ESP image header remains 301–399.
+  `waveshare_7b_rev3`.
 - Core Debug Level: `None`
 - USB DFU On Boot: `Disabled`
 - Erase All Flash Before Sketch Upload: `Disabled`
@@ -262,6 +317,12 @@ Important:
   the browser log viewer shows only ESP-IDF system errors.
 - Physical release and OTA validation is tracked in
   [issue #18](https://github.com/GalusPeres/HomeTiles/issues/18).
+- The JC8012P4A1 V3 is this board with ESP32-P4 v3.2 silicon. It uses the V2
+  code and device key with build profile `guition_jc8012p4a1_v3` (Chip
+  Variant `v3.00 or newer`, revisions 301–399); the V2 image does not start
+  on v3 silicon. That build selects the MIPI DSI PHY clock that v3 accepts
+  instead of PLL_F20M. Experimental, hardware validation is pending in
+  [issue #44](https://github.com/GalusPeres/HomeTiles/issues/44).
 
 ## Guition JC1060P470C_I_W_Y
 
@@ -418,6 +479,41 @@ Arduino IDE:
 - Partition Scheme: `Custom`
 - PSRAM: `OPI PSRAM`
 - Upload Mode: `UART0 / Hardware CDC`
+- Upload Speed: `921600`
+- USB Mode: `Hardware CDC and JTAG`
+
+## Golden Security GS-T3E v2
+
+Used for:
+- `src/devices/golden_security_gs_t3e_v2` (board description; it runs the
+  `src/devices/guition_esp32_4848s040` driver)
+- build profile `golden_security_gs_t3e_v2`
+
+Important:
+- Community profile for PCB v2.3; hardware validation is pending in
+  [issue #93](https://github.com/GalusPeres/HomeTiles/issues/93). The
+  discontinued v1.23 board uses different wiring.
+- ESP32-S3-WROOM-1 N16R8 with `16MB` flash and `8MB` octal PSRAM.
+- The panel is a `480x480` ST7701S RGB display: 3-wire SPI init on CS 4,
+  SCK 15, MOSI 48 (SCK/MOSI are also RGB B0/B1), RGB bus DE 40, VSYNC 39,
+  HSYNC 38, PCLK 41, R(8,18,17,16,0), G(13,12,11,10,9,3), B(15,48,47,21,14),
+  Arduino_GFX type1 init table, 12MHz.
+- Capacitive touch is GT911 on SDA 7 / SCL 6.
+- Backlight PWM is active-high on GPIO 42 (150Hz, rate unconfirmed).
+- No microSD interface is documented. Runtime files use LittleFS.
+- The serial log is on UART0 (TX 43 / RX 44), as in the Guition profile.
+- Use the repository's `partitions.csv`; HomeTiles needs two 6.5MB OTA slots.
+- Sources and open points: [device README](src/devices/golden_security_gs_t3e_v2/README.md).
+
+Arduino IDE (the `sketch.yaml` profile):
+- Board: `ESP32S3 Dev Module`
+- USB CDC On Boot: `Disabled`
+- CPU Frequency: `240MHz (WiFi)`
+- Core Debug Level: `None`
+- Flash Mode: `QIO 80MHz`
+- Flash Size: `16MB (128Mb)`
+- Partition Scheme: `Custom`
+- PSRAM: `OPI PSRAM`
 - Upload Speed: `921600`
 - USB Mode: `Hardware CDC and JTAG`
 

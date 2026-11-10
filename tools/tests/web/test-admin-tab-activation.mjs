@@ -12,12 +12,25 @@ import {runDomHarness} from '../../lib/headless-dom.mjs';
 const html = readRepoFile("src/web/server/render/web_admin_html.cpp");
 
 // Every tab button, static or per folder, must name the panel it opens.
-for (const target of ['tab-tiles-screensaver', 'tab-hardware', 'tab-network']) {
+for (const target of ['tab-tiles-screensaver', 'tab-network']) {
   assert.ok(html.includes(`data-tab-target="${target}"`),
     `The ${target} button must name its panel`);
 }
+// I/O is a Settings page now; a remembered or linked I/O tab opens that page.
+assert.doesNotMatch(html, /data-tab-target="tab-hardware"/, 'I/O has no tab of its own');
+assert.match(adminSource, /if \(tabName === 'tab-hardware'\) \{\s*tabName = 'tab-network';\s*showSettingsPage\('io'\);/,
+  'switchTab opens the I/O page for the former tab');
 assert.ok(html.includes('html += R"html(" data-tab-target="tab-tiles-)html";'),
   'Folder tab buttons must name their panel too');
+// Home alone, a divider, the folder row, a divider, then the other tabs; no
+// menu hides a page.
+assert.ok(html.includes('<div class="tab-folders" id="folderTabs" role="group"'),
+  'The folders must sit in their own row');
+assert.equal((html.match(/<span class="tab-sep" aria-hidden="true"><\/span>/g) || []).length, 2,
+  'Two dividers set Home and the right-hand tabs apart');
+assert.doesNotMatch(html, /folder-menu|folderMenu/, 'No page may hide in a menu');
+assert.doesNotMatch(adminSource, /syncFolderMenuButton|toggleFolderMenu/,
+  'The menu code must be gone');
 
 assert.doesNotMatch(adminSource, /getAttribute\('onclick'\)/,
   'switchTab must not identify the active tab from its inline handler');
@@ -28,15 +41,24 @@ assert.ok(adminSource.includes('setActiveTabButton(tabName);'),
 
 const harness = `<!doctype html><html><body>
   <div class="tab-nav">
-    <button class="tab-btn folder-tab-btn" type="button"
-            data-tab-target="tab-tiles-folder1"
-            onclick="switchTab('tab-tiles-folder1')">Folder 1</button>
-    <button class="tab-btn folder-tab-btn" type="button"
-            data-tab-target="tab-tiles-folder10"
-            onclick="switchTab('tab-tiles-folder10')">Folder 10</button>
-    <button class="tab-btn" type="button" data-tab-target="tab-network"
-            onclick="switchTab('tab-network')">Settings</button>
+    <button class="tab-btn folder-tab-btn" type="button" data-folder-name="Home"
+            data-tab-target="tab-tiles-folder0">Home</button>
+    <span class="tab-sep" aria-hidden="true"></span>
+    <div class="tab-folders" id="folderTabs">
+      <button class="tab-btn folder-tab-btn" type="button" data-folder-name="Folder 1"
+              data-tab-target="tab-tiles-folder1"
+              onclick="switchTab('tab-tiles-folder1')">Folder 1</button>
+      <button class="tab-btn folder-tab-btn" type="button" data-folder-name="Folder 10"
+              data-tab-target="tab-tiles-folder10"
+              onclick="switchTab('tab-tiles-folder10')">Folder 10</button>
+    </div>
+    <span class="tab-sep" aria-hidden="true"></span>
+    <div class="tab-system">
+      <button class="tab-btn" type="button" data-tab-target="tab-network"
+              onclick="switchTab('tab-network')">Settings</button>
+    </div>
   </div>
+  <div id="tab-tiles-folder0" class="tab-content"></div>
   <div id="tab-tiles-folder1" class="tab-content active"></div>
   <div id="tab-tiles-folder10" class="tab-content"></div>
   <div id="tab-network" class="tab-content"></div>
@@ -61,7 +83,6 @@ const harness = `<!doctype html><html><body>
       if (!document.getElementById('tab-network').classList.contains('active')) {
         throw new Error('The opened panel must be active');
       }
-
       activate('tab-tiles-folder10');
       if (currents().join(',') !== 'tab-tiles-folder10') {
         throw new Error('Switching must move aria-current: ' + currents());
@@ -71,12 +92,15 @@ const harness = `<!doctype html><html><body>
       if (painted.join(',') !== 'tab-tiles-folder10') {
         throw new Error('Only one button may look active: ' + painted);
       }
-
       // folder1 is a prefix of folder10. A substring match would pick whichever
       // button comes first in the document; the lookup has to be exact.
       activate('tab-tiles-folder1');
       if (currents().join(',') !== 'tab-tiles-folder1') {
         throw new Error('A prefix folder id must resolve exactly: ' + currents());
+      }
+      activate('tab-tiles-folder0');
+      if (currents().join(',') !== 'tab-tiles-folder0') {
+        throw new Error('Home must become current: ' + currents());
       }
 
       document.body.dataset.result = 'pass';

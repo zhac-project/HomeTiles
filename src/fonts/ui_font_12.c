@@ -12,6 +12,10 @@
 
 #include "src/devices/device_select.h"
 
+extern const lv_font_t ui_font_cyrillic_12;
+
+#include "src/fonts/glyph_cache.h"
+
 #ifndef UI_FONT_12
 #if defined(DEVICE_LAYOUT_480X480)
 #define UI_FONT_12 1
@@ -2880,6 +2884,10 @@ static const lv_font_fmt_txt_cmap_t cmaps[] =
     {
         .range_start = 8279, .range_length = 86, .glyph_id_start = 393,
         .unicode_list = unicode_list_7, .glyph_id_ofs_list = NULL, .list_length = 3, .type = LV_FONT_FMT_TXT_CMAP_SPARSE_TINY
+    },
+    {
+        .range_start = 956, .range_length = 1, .glyph_id_start = 116,
+        .unicode_list = NULL, .glyph_id_ofs_list = NULL, .list_length = 0, .type = LV_FONT_FMT_TXT_CMAP_FORMAT0_TINY
     }
 };
 
@@ -3247,7 +3255,7 @@ static lv_font_fmt_txt_dsc_t font_dsc = {
     .cmaps = cmaps,
     .kern_dsc = &kern_classes,
     .kern_scale = 16,
-    .cmap_num = 8,
+    .cmap_num = 9,
     .bpp = 4,
     .kern_classes = 1,
     .bitmap_format = 0,
@@ -3269,7 +3277,7 @@ const lv_font_t ui_font_12 = {
 lv_font_t ui_font_12 = {
 #endif
     .get_glyph_dsc = lv_font_get_glyph_dsc_fmt_txt,    /*Function pointer to get glyph's data*/
-    .get_glyph_bitmap = lv_font_get_bitmap_fmt_txt,    /*Function pointer to get glyph's bitmap*/
+    .get_glyph_bitmap = glyph_cache_bitmap,    /*Unpacked once, src/fonts/glyph_cache.c*/
     .line_height = 17,          /*The maximum line height required by the font*/
     .base_line = 4,             /*Baseline measured from the bottom of the line*/
 #if !(LVGL_VERSION_MAJOR == 6 && LVGL_VERSION_MINOR == 0)
@@ -3281,7 +3289,7 @@ lv_font_t ui_font_12 = {
 #endif
     .dsc = &font_dsc,          /*The custom font data. Will be accessed by `get_glyph_bitmap/dsc` */
 #if LV_VERSION_CHECK(8, 2, 0) || LVGL_VERSION_MAJOR >= 9
-    .fallback = NULL,
+    .fallback = &ui_font_cyrillic_12,
 #endif
     .user_data = NULL,
 };

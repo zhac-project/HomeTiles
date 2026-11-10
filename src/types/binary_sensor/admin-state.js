@@ -97,7 +97,7 @@
 
   function binarySensorPreviewColor(state) {
     return state?.valid === true && state?.available === true &&
-      state?.state === 'on' ? '#ffc107' : '#9e9e9e';
+      state?.state === 'on' ? '#ffc107' : panelRoleHex('icon-rest', '#9e9e9e');
   }
 
   function binarySensorPreviewStateText(state) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <lvgl.h>
+#include "src/ui/shared/ui_theme.h"
 
 struct PopupShellParts {
   lv_obj_t* overlay;
@@ -13,7 +14,7 @@ struct PopupShellParts {
 // Build a cached content owner with the standard Light geometry. Header
 // objects retain each type's state; show_popup_shell presents the shared header.
 PopupShellParts create_popup_body(lv_event_cb_t close_handler, void* context,
-                                 uint32_t color = 0x2A2A2A);
+                                 uint32_t color = ui_theme::popup_card());
 
 // The UI owns one visible frame/header. Type-specific resident cards supply
 // only their cached content and keep their existing event/state ownership.
@@ -28,6 +29,8 @@ void sync_popup_shell();
 // True from show_popup_shell() until the popup is hidden again. Every tile
 // popup and the PIN pad open through the shell.
 bool popup_shell_active();
+// The open popup's body (its card), nullptr without one.
+lv_obj_t* popup_shell_body();
 // Sets the active popup body's background; the frame copies it on the next
 // sync. Used when an open popup follows its tile's color.
 void popup_shell_follow_tile_color(uint32_t color);
@@ -35,8 +38,59 @@ void popup_shell_follow_tile_color(uint32_t color);
 // Off/Global/On and "Circle in icon color"), so the header disc looks like
 // the tile's disc. The next show_popup_shell() takes them; popups opened
 // without a tile keep the default disc (tinted by a colored icon, shown).
-void popup_shell_use_tile_disc(bool off, bool follows_global, bool glow);
+// `from_icon`: the popup shows the tile color and that is "From icon": the
+// circle is computed for the popup's own card. `tile_tint`: the strength of
+// the tile color "From icon" (0 = another tile color); every other popup
+// computes the circle for the card that strength gives, so header circle and
+// controls are exactly the tile's.
+void popup_shell_use_tile_disc(bool off, bool follows_global, bool glow, bool from_icon = false,
+                               uint8_t tile_tint = 0);
+// A popup opened without a tile (Settings) drops options a tile click left
+// behind without opening a popup, for example a folder without a PIN.
+void popup_shell_use_no_tile_disc();
+// While a control is dragged (the Light popup's color wheel and Kelvin
+// slider), the close button keeps its press color: it only shows while the
+// close button is pressed, and restyling it on every step drew one more area
+// per frame. It takes the current color once the drag ends (false) and when
+// the popup closes.
+void popup_shell_hold_close_fill(bool hold);
+// The fill of the controls around the header for a popup (card) and icon
+// color, with the options of the tile that opens (or opened) the popup: the
+// circle's color whenever the circle is tinted, else the neutral step
+// (tone_color::fill), and its control opacity. The pressed close button, the
+// footer controls (popup_nav_style.h), the editors, the PIN keys and the
+// Light popup's track and buttons use it.
+void popup_shell_control_fill(uint32_t card_rgb, uint32_t icon_rgb, lv_color_t& color, lv_opa_t& opa,
+                              bool* tinted = nullptr);
+// A control pressed on a control surface (a pressed PIN key, the date arrows
+// on their field): one more control step (tone_color::Fill::raised_color).
+void popup_shell_control_raised_fill(uint32_t card_rgb, uint32_t icon_rgb, lv_color_t& color, lv_opa_t& opa);
+// The header disc's fill as shown now (color and opacity), for a popup's own
+// parts in the circle's color (the Media popup's list scrollbar). False
+// without a shown shell.
+bool popup_shell_disc_fill(lv_color_t& color, lv_opa_t& opa);
 
-// Register an existing background tree, once after construction. Opaque popup
-// pixels can skip its covered draw calls without hiding or rebuilding widgets.
-void register_popup_background(lv_obj_t* root);
+// Home Assistant pulses the state icon while a command runs or the device
+// needs attention (Lock, Alarm panel): the shared header icon, while the
+// popup showing `body` is the active one. Another popup stops it.
+void popup_shell_pulse_icon(lv_obj_t* body, bool on);
+
+// A PIN-protected Folder or Settings: the shared header icon carries the lock
+// of its tile (icon_lock_mark.h) while the popup showing `body` is the active
+// one. Another popup removes it.
+void popup_shell_icon_lock(lv_obj_t* body, bool on);
+
+// The theme changed (UIManager::processThemeChange): hides the shown popup and
+// deletes every popup body and the shell. Each popup's own delete handler
+// frees its context; the preloads and the next opening build them again in
+// the new colors.
+void popup_shell_delete_popups();
+
+// A popup that takes its tile's color shows it with the open surface
+// (popup_surface::g_open_surface): its fixed texts and icons, colored when it
+// was built, take that surface's roles (and back on the next opening).
+void popup_follow_surface(lv_obj_t* root);
+// The surface `root`'s content was last shown with (kThemeSurface before its
+// first show): a hidden popup that refreshes draws with it, so the next show
+// recolors it like the rest of its content.
+int8_t popup_drawn_surface(lv_obj_t* root);

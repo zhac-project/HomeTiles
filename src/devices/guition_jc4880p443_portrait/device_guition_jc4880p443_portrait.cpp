@@ -24,6 +24,8 @@
 
 #include "src/core/display/dma2d_arbiter.h"
 #include "src/devices/common/p4_dsi_camera_presenter.h"
+#include "src/devices/common/p4_dsi_cpu_rotate.h"
+#include "src/devices/common/p4_dsi_ui_ppa.h"
 #include "src/devices/guition_jc4880p443_portrait/sdmmc.h"
 #include "src/devices/guition_jc4880p443_portrait/vendor/displays_config.h"
 #include "src/devices/guition_jc4880p443_portrait/vendor/gt911.h"
@@ -854,7 +856,6 @@ void ensure_storage_layout() {
   }
   LittleFS.mkdir("/_tile_grids");
   LittleFS.mkdir("/_tile_links");
-  LittleFS.mkdir("/icons");
 }
 
 bool draw_portrait_area(int32_t x, int32_t y, int32_t w, int32_t h, const uint16_t* data) {
@@ -905,6 +906,43 @@ bool draw_portrait_area(int32_t x, int32_t y, int32_t w, int32_t h, const uint16
   return draw_physical(dst_x, dst_y, w, h, g_rotate_buf);
 }
 
+// The turned layout (grid_layout::turned(), user 2026-10-11): the UI shown
+// in landscape, a quarter turned against this panel. The same quarter turn
+// as the panels upright by themselves (the V2's landscape UI, p4_dsi_ui_ppa and
+// p4_dsi_cpu_rotate), the other way round, so DisplayManager's shared touch
+// turn maps this panel's points onto it: UI (x, y) at panel (y, h - 1 - x),
+// with 180 the mirrored place.
+bool g_turned = false;
+p4_dsi_ui_ppa::Client g_turn_ppa("GuitionJC4880P443Portrait");
+bool g_turn_ppa_started = false;
+
+uint8_t turn_rotation() { return g_rotation ^ 0x02; }
+// The camera popup's frames turn with the UI.
+uint8_t frame_rotation() { return g_turned ? turn_rotation() : g_rotation; }
+
+bool draw_turned_area(int32_t x, int32_t y, int32_t w, int32_t h, const uint16_t* data) {
+  if (!data || w <= 0 || h <= 0) return false;
+  const uint8_t turn = turn_rotation();
+  const int32_t panel_w = static_cast<int32_t>(display_cfg.width);
+  const int32_t panel_h = static_cast<int32_t>(display_cfg.height);
+  const int32_t dst_x = (turn & 0x02) ? y : panel_w - y - h;
+  const int32_t dst_y = (turn & 0x02) ? panel_h - x - w : x;
+  const auto ppa_result = g_turn_ppa.rotate(g_camera_presenter, panel_w, panel_h, x, y, w, h, data, turn);
+  if (ppa_result == p4_dsi_ui_ppa::Result::Drawn) {
+    mark_dirty_rect(dst_x, dst_y, h, w);
+    return true;
+  }
+  if (ppa_result == p4_dsi_ui_ppa::Result::Failed) return false;
+  // Small regions: the CPU turn straight into the panel framebuffer.
+  uint16_t* fb = panel_fb();
+  if (!fb) return false;
+  p4_dsi_cpu_rotate::rotate_into(fb, panel_w, dst_x, dst_y, w, h, data, (turn & 0x02) != 0);
+  flush_framebuffer_rect(fb, dst_x, dst_y, h, w);
+  mark_dirty_rect(dst_x, dst_y, h, w);
+  g_camera_presenter.noteUiWrite(dst_x, dst_y, h, w, false);
+  return true;
+}
+
 }  // namespace
 
 bool DeviceGuitionJC4880P443Portrait::init() {
@@ -953,11 +991,19 @@ bool DeviceGuitionJC4880P443Portrait::ppaCooldownActive() {
 
 void DeviceGuitionJC4880P443Portrait::displayPushPixels(int32_t x, int32_t y, int32_t w, int32_t h,
                                                   const uint16_t* data) {
+  if (g_turned) {
+    draw_turned_area(x, y, w, h, data);
+    return;
+  }
   draw_portrait_area(x, y, w, h, data);
 }
 
 void DeviceGuitionJC4880P443Portrait::displayPushPixelsDMA(int32_t x, int32_t y, int32_t w, int32_t h,
                                                      const uint16_t* data) {
+  if (g_turned) {
+    draw_turned_area(x, y, w, h, data);
+    return;
+  }
   draw_portrait_area(x, y, w, h, data);
 }
 
@@ -975,7 +1021,7 @@ bool DeviceGuitionJC4880P443Portrait::displayTryFullFramePreview(
       nullptr,
   };
   const bool presented = g_camera_presenter.present(
-      x, y, w, h, source_stride, data, data_size, byte_swap, g_rotation,
+      x, y, w, h, source_stride, data, data_size, byte_swap, frame_rotation(),
       runtime);
   if (presented) g_ppa_consecutive_faults = 0;
   return presented;
@@ -983,6 +1029,29 @@ bool DeviceGuitionJC4880P443Portrait::displayTryFullFramePreview(
 
 void DeviceGuitionJC4880P443Portrait::displayEndFullFramePreview() {
   g_camera_presenter.end();
+}
+
+bool DeviceGuitionJC4880P443Portrait::displayFullFrameInfo(uint16_t& width, uint16_t& height,
+                                                           uint16_t& turn_cw) {
+  return g_panel_fb_ready &&
+         g_camera_presenter.fullFrameInfo(frame_rotation(), width, height, turn_cw);
+}
+
+bool DeviceGuitionJC4880P443Portrait::displayBeginFullFrames() {
+  return g_panel_fb_ready && g_camera_presenter.beginFullFrames();
+}
+
+uint16_t* DeviceGuitionJC4880P443Portrait::displayAcquireFullFrame(size_t& bytes) {
+  bytes = 0;
+  return g_panel_fb_ready ? g_camera_presenter.acquireFullFrame(bytes) : nullptr;
+}
+
+bool DeviceGuitionJC4880P443Portrait::displaySubmitFullFrame() {
+  return g_panel_fb_ready && g_camera_presenter.submitFullFrame();
+}
+
+void DeviceGuitionJC4880P443Portrait::displayEndFullFrames() {
+  if (g_panel_fb_ready) g_camera_presenter.endFullFrames();
 }
 
 void DeviceGuitionJC4880P443Portrait::displayWaitDMA() {
@@ -1043,6 +1112,16 @@ void DeviceGuitionJC4880P443Portrait::displaySetRotation(uint8_t rotation) {
                 (g_rotation & 0x02) ? "180-deg CPU mirror" : "native");
   // Changing the ST7701 scan direction over DCS loses DSI video lock, so the
   // flip is mirrored on the CPU in draw_portrait_area.
+}
+
+void DeviceGuitionJC4880P443Portrait::displaySetUpright(bool upright) {
+  // The turned layout: the UI and the camera popup's frames a quarter turned.
+  g_turned = upright;
+  if (upright && !g_turn_ppa_started) {
+    g_turn_ppa_started = true;
+    g_turn_ppa.init();
+  }
+  g_camera_presenter.setUpright(upright);
 }
 
 void DeviceGuitionJC4880P443Portrait::setBrightness(uint8_t value) {
@@ -1372,13 +1451,11 @@ void DeviceGuitionJC4880P443Portrait::migrateStorageFromSD() {
 
   LittleFS.mkdir("/_tile_grids");
   LittleFS.mkdir("/_tile_links");
-  LittleFS.mkdir("/icons");
 
   if (initSDCard()) {
     Serial.println("[Storage] Migrating data from SD to LittleFS...");
     copyDirectory(GuitionPortraitSDMMC, LittleFS, "/_tile_grids");
     copyDirectory(GuitionPortraitSDMMC, LittleFS, "/_tile_links");
-    copyDirectory(GuitionPortraitSDMMC, LittleFS, "/icons");
     Serial.println("[Storage] Migration complete");
   } else {
     Serial.println("[Storage] No SD card, starting fresh");

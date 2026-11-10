@@ -1,5 +1,16 @@
 
+  // Every pick in the editor (a tile, the parked Settings tile, a free page
+  // field): a tab switch that waited for its grid keeps one made meanwhile.
+  let tileSelectionSeq = 0;
+  // Each tab's pick (user 2026-10-22: an empty cell or a page field jumped
+  // to the top left tile on the way back): {kind: 'tile', index}, an empty
+  // cell {kind: 'empty', index, spot}, {kind: 'page', slot} or
+  // {kind: 'settings'}. The way back and the refreshes show it again.
+  const tileSelectionByTab = {};
+
   function selectTile(index, tab) {
+    ++tileSelectionSeq;
+    clearPageFieldMark();
     if (currentTileTab &&
         typeof parkClimateMiniEditor === 'function') {
       parkClimateMiniEditor(currentTileTab);
@@ -10,6 +21,7 @@
     newTileSpot = Number(getTilesData(tab)?.[index]?.type || 0) === 0
       ? { tab, index, layout: getTileElementLayout(tab, index) }
       : null;
+    tileSelectionByTab[tab] = newTileSpot ? {kind: 'empty', index, spot: newTileSpot.layout} : {kind: 'tile', index};
     document.getElementById('settingsHiddenTile')?.classList.remove('active');
     persistSelectedTileState();
     document.querySelectorAll(
@@ -40,6 +52,7 @@
       if (tileSpecific) {
         tileSpecific.classList.remove('hidden');
       }
+      setSettingsPane(tab, 'tile');
     }
     // Bind the live handlers right away. This used to happen only after the
     // asynchronous GET of the tile data, and until then size, position and style
@@ -51,6 +64,9 @@
   function selectHiddenSettingsTile() {
     const hiddenTile = document.getElementById('settingsHiddenTile');
     if (!hiddenTile || hiddenTile.dataset.hidden !== '1') return;
+    ++tileSelectionSeq;
+    tileSelectionByTab.folder0 = {kind: 'settings'};
+    clearPageFieldMark();
     if (currentTileTab && typeof parkClimateMiniEditor === 'function') {
       parkClimateMiniEditor(currentTileTab);
     }
@@ -66,6 +82,7 @@
     if (specific) {
       specific.classList.remove('hidden');
     }
+    setSettingsPane('folder0', 'tile');
     applyFolderTypeLock('folder0', false);
     const snapshot = normalizeHiddenSettingsSnapshot();
     if (!applyDraft('folder0', HIDDEN_SETTINGS_TILE_INDEX)) {
@@ -84,16 +101,36 @@
     updateTileSettingsMaxHeight();
   }
 
-  function titleFromOption(option) {
-    if (!option) return '';
-    // The first option is the translated "No selection" placeholder.  It is
-    // not an entity name and must never become a persisted tile title.
-    if (!String(option.value || '').trim().length) return '';
-    const label = String(option.textContent || option.innerText || '').trim();
-    if (!label.length) return '';
-    const sep = label.indexOf(' - ');
-    if (sep > 0) return label.substring(0, sep).trim();
-    return label;
+  // The tab's pick again (tileSelectionByTab): the tile, an empty cell at its
+  // spot while that is free (or the tile it became), a free page field, the
+  // parked Settings tile. False when it is gone; the caller picks then.
+  function restoreTabSelection(tab) {
+    const pick = tileSelectionByTab[tab];
+    if (!pick) return false;
+    if (pick.kind === 'page') {
+      if (tab !== 'folder0' || !pageFieldsShown() || !pageSlotsShown() || pageSlotList()[pick.slot]) return false;
+      selectPageField(pick.slot);
+      return pageFieldPicked();
+    }
+    if (pick.kind === 'settings') {
+      selectHiddenSettingsTile();
+      return currentTileIndex === HIDDEN_SETTINGS_TILE_INDEX;
+    }
+    const el = document.getElementById(tab + '-tile-' + pick.index);
+    if (!el) return false;
+    if (Number(getTilesData(tab)?.[pick.index]?.type || 0) !== 0) {
+      if (el.classList.contains('tile-unplaced')) return false;
+      selectTile(pick.index, tab);
+      return true;
+    }
+    if (pick.kind !== 'empty' || !pick.spot) return false;
+    const {col, row, span_w: spanW, span_h: spanH} = pick.spot;
+    if (!slotFits(tab, occupiedFromGrid(tab, getTileGrid(tab), el), col, row, spanW, spanH)) return false;
+    delete el.dataset.freeSlot;
+    setTileGridPosition(el, col, row, spanW, spanH);
+    el.style.display = '';
+    selectTile(pick.index, tab);
+    return true;
   }
 
   function titleFromEntity(entity) {
@@ -112,8 +149,8 @@
     const selectEl = document.getElementById(prefix + selectSuffix);
     if (!titleInput || !selectEl) return;
     if (titleInput.value && titleInput.value.trim().length) return;
-    const opt = selectEl.selectedOptions && selectEl.selectedOptions[0];
-    let title = titleFromOption(opt);
+    if (!String(selectEl.value || '').trim()) return;
+    let title = entityPickerName(selectEl);
     if (!title.length) title = titleFromEntity(selectEl.value);
     if (title.length) titleInput.value = title;
   }
@@ -142,8 +179,6 @@
     const spanWInput = document.getElementById(prefix + '_tile_span_w');
     const spanHInput = document.getElementById(prefix + '_tile_span_h');
     const typeSelect = document.getElementById(prefix + '_tile_type');
-    const opacityInput = isScreensaverTileTab(tab)
-      ? document.getElementById('screensaver_tile_opacity') : null;
     const entitySelect = document.getElementById(prefix + '_sensor_entity');
     const binarySensorSelect = document.getElementById(
       prefix + '_binary_sensor_entity');
@@ -163,15 +198,19 @@
       const graphHeightInput = document.getElementById(prefix + '_sensor_graph_height');
       const weatherSelect = document.getElementById(prefix + '_weather_entity');
       const weatherPopupModeSelect = document.getElementById(prefix + '_weather_popup_open_mode');
+      const weatherColoredIconsCheck = document.getElementById(prefix + '_weather_colored_icons');
       const energySelect = document.getElementById(prefix + '_energy_entity');
       const energyUnitInput = document.getElementById(prefix + '_energy_unit');
       const energyDecimalsInput = document.getElementById(prefix + '_energy_decimals');
       const energyValueFontSelect = document.getElementById(prefix + '_energy_value_font');
       const energyPopupModeSelect = document.getElementById(prefix + '_energy_popup_open_mode');
+      const energyDisplayModeSelect = document.getElementById(prefix + '_energy_display_mode');
       const energyValueYOffsetInput = document.getElementById(prefix + '_energy_value_y_offset');
       const sceneInput = document.getElementById(prefix + '_scene_alias');
     const textInput = document.getElementById(prefix + '_text_value');
     const textFontInput = document.getElementById(prefix + '_text_value_font');
+    const textAlignInput = document.getElementById(prefix + '_text_align');
+    const textValignInput = document.getElementById(prefix + '_text_valign');
     const navigateSelect = document.getElementById(prefix + '_navigate_target');
     const folderPinToggle = document.getElementById(prefix + '_folder_pin_enabled');
     const folderPinApply = document.getElementById(prefix + '_folder_pin_apply');
@@ -210,16 +249,14 @@
       updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab);
     });
     bindLive(iconInput, 'input', 'tileIcon', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
-    bindLive(document.getElementById(prefix + '_tile_icon_disc'), 'change', 'tileIconDisc', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
-    bindLive(document.getElementById(prefix + '_tile_icon_glow'), 'change', 'tileIconGlow', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(colorInput, 'input', 'tileColor', () => { markTileColorInputExplicit(tab); updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
-    bindLive(opacityInput, 'input', 'tileOpacity', () => { updateTilePreview(tab); updateDraft(tab); });
-    bindLive(opacityInput, 'change', 'tileOpacitySave', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(colInput, 'input', 'tileCol', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(rowInput, 'input', 'tileRow', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(spanWInput, 'input', 'tileSpanW', () => { syncClimateSlotFields(tab); updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(spanHInput, 'input', 'tileSpanH', () => { syncClimateSlotFields(tab); updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(typeSelect, 'change', 'tileType', () => {
+      // A picked free page field: Folder makes its page (page-fields.js).
+      if (tab === 'folder0' && pageFieldTypeChosen(typeSelect)) return;
       const tileEl = document.getElementById(tab + '-tile-' + currentTileIndex);
       const previousType = Number(tileEl?.dataset.type ?? 0);
       const nextType = Number(typeSelect.value);
@@ -244,19 +281,26 @@
         setTileColorInputFromStored(
           tab, 0, nextMeta.defaultBg || '#2A2A2A');
       }
-      if (isScreensaverTileTab(tab) && previousType === 0 &&
-          nextType !== 0 && opacityInput) {
-        opacityInput.value = String(SCREENSAVER_TILE_DEFAULT_OPACITY);
-      }
       updateTileType(tab);
-      // New tiles start in the HomeTiles look: a type with icon colors tints
-      // the tile with the color its icon shows at 20 % (Tile color "From
-      // icon"). Existing tiles and the screensaver keep their own style.
+      // New Clocks and Texts sit on the screen: Transparent, without a frame
+      // line (user 2026-10-12).
+      if (previousType === 0 && tileTypeBlackIsTransparent(String(nextType)) && !isScreensaverTileTab(tab)) {
+        const color = document.getElementById(tab + '_tile_color');
+        if (color) {
+          color.value = '#000000';
+          color.dataset.bgColorDefault = '0';
+          color.dataset.colorMode = 'transparent';
+        }
+        const border = document.getElementById(tab + (Number(nextType) === 9 ? '_clock_tile_border' : '_text_tile_border'));
+        if (border) border.checked = false;
+        syncTileColorMode(tab);
+      }
+      // New tiles start in the HomeTiles look: a type with icon colors is
+      // filled with the color its icon shows ("Fill"). Existing tiles and the
+      // screensaver keep their own style.
       if (previousType === 0 && nextType !== 0 && !isScreensaverTileTab(tab) &&
           typeof tileTypeHasIconColors === 'function' &&
           tileTypeHasIconColors(String(nextType))) {
-        const strength = document.getElementById(tab + '_tile_icon_fill_strength');
-        if (strength) strength.value = '20';
         const fill = document.getElementById(tab + '_tile_icon_fill');
         if (fill) fill.checked = true;
         syncTileColorMode(tab);
@@ -272,8 +316,6 @@
     for (const kind of ['number', 'select', 'datetime']) {
       const select = document.getElementById(prefix + '_' + kind + '_entity');
       bindLive(select, 'change', kind + 'Entity', () => {
-        if (select.value) select.dataset.configuredValue = select.value;
-        else delete select.dataset.configuredValue;
         maybeFillTitleFromEntity(tab, '_' + kind + '_entity');
         updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab);
       });
@@ -285,25 +327,28 @@
       });
     }
     bindLive(binarySensorSelect, 'change', 'binarySensorEntity', () => {
-      if (binarySensorSelect.value) {
-        binarySensorSelect.dataset.configuredValue = binarySensorSelect.value;
-      } else {
-        delete binarySensorSelect.dataset.configuredValue;
-      }
       maybeFillTitleFromEntity(tab, '_binary_sensor_entity');
       updateTilePreview(tab);
       updateDraft(tab);
       scheduleAutoSave(tab);
     });
     bindLive(document.getElementById(prefix + '_binary_sensor_value_font'), 'change', 'binarySensorValueFont', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
+    bindLive(document.getElementById(prefix + '_switch_value_font'), 'change', 'switchValueFont', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(binarySensorPopupModeSelect, 'change', 'binarySensorPopupMode', () => {
       updateDraft(tab);
       scheduleAutoSave(tab);
     });
     bindLive(weatherSelect, 'change', 'weatherEntity', () => { maybeFillTitleFromWeather(tab); updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
+    // Temperature/humidity sensors replace the weather entity's current values.
+    for (const [field, name] of [['weather_temperature_sensor', 'weatherTemperatureSensor'],
+                                 ['weather_humidity_sensor', 'weatherHumiditySensor']]) {
+      bindLive(document.getElementById(prefix + '_' + field), 'change', name, () => {
+        updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab);
+      });
+    }
     bindLive(weatherPopupModeSelect, 'change', 'weatherPopupMode', () => { updateDraft(tab); scheduleAutoSave(tab); });
+    bindLive(weatherColoredIconsCheck, 'change', 'weatherColoredIcons', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(energySelect, 'change', 'energyEntity', () => {
-      energySelect.dataset.configuredValue = energySelect.value || '';
       maybeFillTitleFromEnergy(tab);
       updateTilePreview(tab);
       updateEnergyValuePreview(tab);
@@ -314,22 +359,29 @@
     bindLive(energyDecimalsInput, 'input', 'energyDecimals', () => { updateEnergyValuePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(energyValueFontSelect, 'change', 'energyValueFont', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(energyPopupModeSelect, 'change', 'energyPopupMode', () => { updateDraft(tab); scheduleAutoSave(tab); });
+    bindLive(energyDisplayModeSelect, 'change', 'energyDisplayMode', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(energyValueYOffsetInput, 'input', 'energyValueYOffset', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(unitInput, 'input', 'sensorUnit', () => { updateSensorValuePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(decimalsInput, 'input', 'sensorDecimals', () => { updateSensorValuePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(valueFontSelect, 'change', 'sensorValueFont', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(sensorPopupModeSelect, 'change', 'sensorPopupMode', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(displayModeSelect, 'change', 'sensorDisplayMode', () => { syncGaugeUi(tab); updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
-    bindLive(gaugeMinInput, 'input', 'sensorGaugeMin', () => { updateDraft(tab); scheduleAutoSave(tab); });
-    bindLive(gaugeMaxInput, 'input', 'sensorGaugeMax', () => { updateDraft(tab); scheduleAutoSave(tab); });
+    // The Sensor menu's choices set the display mode (admin-editor.js).
+    for (const field of ['sensor_layout', 'sensor_form', 'sensor_orientation', 'sensor_ring', 'sensor_place']) {
+      bindLive(document.getElementById(prefix + '_' + field), 'change', 'sensorChoice_' + field, () => applySensorLayoutChoices(tab));
+    }
+    bindLive(gaugeMinInput, 'input', 'sensorGaugeMin', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
+    bindLive(gaugeMaxInput, 'input', 'sensorGaugeMax', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(gaugeArcInput, 'input', 'sensorGaugeArc', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(gaugeSizeInput, 'input', 'sensorGaugeSize', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(gaugeYOffsetInput, 'input', 'sensorGaugeYOffset', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(valueYOffsetInput, 'input', 'sensorValueYOffset', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(graphHeightInput, 'input', 'sensorGraphHeight', () => { updateDraft(tab); scheduleAutoSave(tab); });
-    bindLive(sceneInput, 'input', 'sceneAlias', () => { maybeFillTitleFromScene(tab); updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
+    bindLive(sceneInput, 'change', 'sceneAlias', () => { maybeFillTitleFromScene(tab); updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(textInput, 'input', 'textValue', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(textFontInput, 'change', 'textFont', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
+    bindLive(textAlignInput, 'change', 'textAlign', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
+    bindLive(textValignInput, 'change', 'textValign', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(navigateSelect, 'change', 'navigateTarget', () => {
       syncFolderPinControls(tab);
       updateTilePreview(tab);
@@ -350,26 +402,35 @@
     });
     bindLive(switchSelect, 'change', 'switchEntity', () => { maybeFillTitleFromSwitch(tab); updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(switchStyleSelect, 'change', 'switchStyle', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
+    // The bar upright (bar_orientation.h): Switch and Fan.
+    for (const id of ['_switch_orientation', '_fan_orientation']) {
+      bindLive(document.getElementById(prefix + id), 'change', id === '_fan_orientation' ? 'fanOrientation' : 'switchOrientation',
+        () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
+    }
+    // The Vacuum popup's layout (map left or centred).
+    bindLive(document.getElementById(prefix + '_vacuum_layout'), 'change', 'vacuumLayout', () => { updateDraft(tab); scheduleAutoSave(tab); });
+    // The Vacuum's map (empty: the map the Bridge finds on its device).
+    bindLive(document.getElementById(prefix + '_vacuum_map'), 'change', 'vacuumMap', () => { updateDraft(tab); scheduleAutoSave(tab); });
+    // A camera map's interval.
+    bindLive(document.getElementById(prefix + '_vacuum_every'), 'change', 'vacuumEvery', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(switchPopupModeSelect, 'change', 'switchPopupMode', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(mediaSelect, 'change', 'mediaEntity', () => { maybeFillTitleFromMedia(tab); updateTilePreview(tab); updateMediaValuePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(climateSelect, 'change', 'climateEntity', () => {
-      if (climateSelect.value) {
-        climateSelect.dataset.configuredValue = climateSelect.value;
-      } else {
-        delete climateSelect.dataset.configuredValue;
-      }
       maybeFillTitleFromEntity(tab, '_climate_entity');
       updateTilePreview(tab);
       updateDraft(tab);
       scheduleAutoSave(tab);
     });
     bindLive(climatePopupModeSelect, 'change', 'climatePopupMode', () => { updateDraft(tab); scheduleAutoSave(tab); });
+    // Layout "with value" drops the current temperature from the automatic
+    // mini fields (climateAutomaticEditorKinds).
+    bindLive(document.getElementById(prefix + '_climate_view'), 'change', 'climateView', () => {
+      syncClimateSlotFields(tab); updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab);
+    });
+    bindLive(document.getElementById(prefix + '_cover_value_font'), 'change', 'coverValueFont', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
+    // The Media popup's layout (cover left or centred); the tile looks the same.
+    bindLive(document.getElementById(prefix + '_media_layout'), 'change', 'mediaLayout', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(coverSelect, 'change', 'coverEntity', () => {
-      if (coverSelect.value) {
-        coverSelect.dataset.configuredValue = coverSelect.value;
-      } else {
-        delete coverSelect.dataset.configuredValue;
-      }
       maybeFillTitleFromEntity(tab, '_cover_entity');
       updateTilePreview(tab);
       updateDraft(tab);
@@ -379,17 +440,68 @@
       updateDraft(tab);
       scheduleAutoSave(tab);
     });
+    // Lock, Alarm panel, Fan and Vacuum: entity, state size and popup gesture.
+    for (const kind of ['lock', 'alarm', 'fan', 'vacuum']) {
+      const select = document.getElementById(prefix + '_' + kind + '_entity');
+      bindLive(document.getElementById(prefix + '_' + kind + '_value_font'), 'change', kind + 'ValueFont', () => {
+        updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab);
+      });
+      bindLive(select, 'change', kind + 'Entity', () => {
+        maybeFillTitleFromEntity(tab, '_' + kind + '_entity');
+        updateTilePreview(tab);
+        updateDraft(tab);
+        scheduleAutoSave(tab);
+      });
+      bindLive(document.getElementById(prefix + '_' + kind + '_popup_open_mode'), 'change', kind + 'PopupMode', () => {
+        updateDraft(tab);
+        scheduleAutoSave(tab);
+      });
+    }
+    // Power flow: the node sensors and the options (types/power_flow).
+    for (const field of ['flow_pv_entity', 'flow_grid_entity', 'flow_battery_entity', 'flow_battery_charge_entity',
+                         'flow_home_entity', 'flow_header', 'flow_card', 'flow_grid_invert', 'flow_battery_invert']) {
+      bindLive(document.getElementById(prefix + '_' + field), 'change', field, () => {
+        if (field === 'flow_header') powerFlowHeaderTitle(prefix);
+        updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab);
+      });
+    }
+    // Calendar: up to four calendars, the view, the first day of the week and
+    // the popup gesture (types/calendar).
+    CALENDAR_FIELDS.forEach((field, i) => {
+      bindLive(document.getElementById(prefix + '_' + field), 'change', 'calendarEntity' + i, () => {
+        if (i === 0) maybeFillTitleFromEntity(tab, '_calendar_entity');
+        updateTilePreview(tab);
+        updateDraft(tab);
+        scheduleAutoSave(tab);
+      });
+    });
+    for (const [field, key] of [['_calendar_view', 'calendarView'], ['_calendar_week_start', 'calendarWeekStart']]) {
+      bindLive(document.getElementById(prefix + field), 'change', key, () => {
+        updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab);
+      });
+    }
+    bindLive(document.getElementById(prefix + '_calendar_popup_open_mode'), 'change', 'calendarPopupMode', () => {
+      updateDraft(tab);
+      scheduleAutoSave(tab);
+    });
     bindLive(cameraSelect, 'change', 'cameraEntity', () => {
-      if (cameraSelect.value) {
-        cameraSelect.dataset.configuredValue = cameraSelect.value;
-      } else {
-        delete cameraSelect.dataset.configuredValue;
-      }
       maybeFillTitleFromEntity(tab, '_camera_entity');
+      syncCameraFields(tab);
       updateTilePreview(tab);
       updateDraft(tab);
       scheduleAutoSave(tab);
     });
+    // The picture options (types/camera/admin.js); the slider follows live.
+    for (const [field, eventName] of [['camera_display', 'change'], ['camera_fit', 'change'],
+                                      ['camera_every', 'change'], ['camera_transparency', 'input'],
+                                      ['camera_head', 'change'], ['camera_tap', 'change']]) {
+      bindLive(document.getElementById(prefix + '_' + field), eventName, field, () => {
+        syncCameraFields(tab);
+        updateTilePreview(tab);
+        updateDraft(tab);
+        scheduleAutoSave(tab);
+      });
+    }
     climateSlotSelects.forEach((select, index) => {
       bindLive(select, 'change', 'climateSlot' + index, () => {
         syncClimateSlotFields(tab);
@@ -450,8 +562,14 @@
         if (!target || !target.id) return;
         if (
           target.id === (prefix + '_clock_show_time') ||
-          target.id === (prefix + '_clock_show_date')
+          target.id === (prefix + '_clock_show_date') ||
+          target.id === (prefix + '_clock_weekday') ||
+          target.id === (prefix + '_clock_align') ||
+          target.id === (prefix + '_clock_style') ||
+          target.id === (prefix + '_clock_dial') ||
+          target.id === (prefix + '_clock_hands')
         ) {
+          if (target.id === (prefix + '_clock_style') && typeof syncClockStyleFields === 'function') syncClockStyleFields(prefix);
           ensureClockSelection(prefix);
           updateTilePreview(tab);
           updateDraft(tab);
@@ -462,7 +580,8 @@
           target.id === (prefix + '_clock_time_font') ||
           target.id === (prefix + '_clock_date_font') ||
           target.id === (prefix + '_clock_time_format') ||
-          target.id === (prefix + '_clock_date_format')
+          target.id === (prefix + '_clock_date_format') ||
+          target.id === (prefix + '_clock_roll')
         ) {
           updateClockValuePreview(tab);
           updateDraft(tab);

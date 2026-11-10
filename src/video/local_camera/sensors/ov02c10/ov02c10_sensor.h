@@ -32,6 +32,14 @@ constexpr uint16_t kChipId = 0x5602;
 // size, so no crop pass runs; the array window stays 1296x732.
 constexpr uint32_t kFrameWidth = 1280;
 constexpr uint32_t kFrameHeight = 720;
+// The other window: a centred 544x720 strip, sent when the Bridge turns the
+// image a quarter (an upright layout, or a camera rotation of 90 degrees;
+// the sensor then stands upright): 4:3 landscape once turned (user 2026-10-08:
+// a strip is 4:3; 544 for whole 16x16 MCUs in 4:2:0). User 2026-10-08, the 8-inch way: a sensor standing upright
+// sends a landscape strip - cropping on the sensor costs nothing and sends
+// less - a lying one everything.
+constexpr uint32_t kTurnedFrameWidth = 544;
+constexpr uint32_t kTurnedFrameHeight = 720;
 constexpr uint32_t kArrayWindowWidth = 1296;
 constexpr uint32_t kArrayWindowHeight = 732;
 constexpr uint32_t kDataLanes = 1;
@@ -66,6 +74,13 @@ constexpr uint16_t frameLengthFor(uint16_t lines) {
 
 class Sensor {
  public:
+  // The turned window (kTurnedFrameWidth x kTurnedFrameHeight) for the core.
+  // An upright layout turns the picture a quarter back: counter-clockwise
+  // when this sensor's picture (board mirror on) is mirrored that way
+  // (local_camera.cpp displayQuarterTurns(); V2 hardware 2026-10-08).
+  static constexpr bool kUprightTurnCounterClockwise = false;
+  static constexpr uint32_t kTurnedWidth = kTurnedFrameWidth;
+  static constexpr uint32_t kTurnedHeight = kTurnedFrameHeight;
   // Adds the SCCB device to an existing bus. Never creates a bus.
   esp_err_t attach(i2c_master_bus_handle_t bus);
   // Removes the device from the bus; the bus itself stays untouched. On an
@@ -76,9 +91,9 @@ class Sensor {
   // ACK probe followed by the chip-ID read. chip_id receives the raw value
   // even when it does not match kChipId.
   esp_err_t probe(uint16_t* chip_id);
-  // Software reset, 1288x728 table, 1280x720 window, stream off,
-  // demo-default mirror. The readout is then orientation state 0.
-  esp_err_t loadDefaultMode(bool mirror);
+  // Software reset, 1288x728 table, 1280x720 window (turned: 544x720),
+  // stream off, demo-default mirror. The readout is then orientation state 0.
+  esp_err_t loadDefaultMode(bool mirror, bool turned = false);
   // Sensor readout orientation relative to the table readout: mirror turns it
   // horizontally, flip vertically, both = 180 degrees. The ISP window offsets
   // move with the flips so the Bayer order stays the same in every state.
@@ -100,6 +115,8 @@ class Sensor {
   // Last digital gain register value (24 bit); the mode table's value after
   // loadDefaultMode(), so an unchanged gain costs no SCCB write.
   uint32_t digital_gain_reg_ = 0;
+  // The turned window (loadDefaultMode()): its offsets for setOrientation().
+  bool turned_ = false;
 };
 
 }  // namespace ov02c10

@@ -46,7 +46,7 @@ struct ModeEntry {
 };
 
 // Every mode streams the full board image (whatever size the board delivers:
-// 1280x720 on the V2, 960x544 on the Waveshare 8-inch); a mode is only a rate
+// 1280x720 on the V2, 960x720 on the Waveshare 8-inch); a mode is only a rate
 // and a start quality. Higher rates use a lower quality to keep the frames
 // small. Adding a mode is one line here.
 constexpr ModeEntry kModes[] = {
@@ -424,10 +424,14 @@ constexpr size_t kUploadHandshakeMaxBytes = 256;
 constexpr uint32_t kHelloTimeoutMs = 5000;
 // Send of one chunk plus its ACK; the Bridge itself waits 5 s per chunk.
 constexpr uint32_t kChunkAckTimeoutMs = 2000;
-// TEST: chunks sent ahead of their ACK (sendJpegFrame()). One chunk per round
-// trip capped the upload at about 6.5 Mbit/s. Each extra chunk holds up to
-// 8 KB of network buffers in the internal RAM the SDIO link and the UI share.
-constexpr uint32_t kChunkWindow = 2;
+// Chunks sent ahead of their ACK (sendJpegFrame()). One chunk per round trip
+// capped the upload at about 6.5 Mbit/s, two at about 13 Mbit/s: bright,
+// noisy V2 frames of 100 KB then reached only 15 fps and the stream stalled
+// (2026-10-03, ACK 8 ms per 8 KB chunk). Each extra chunk holds up to 8 KB of
+// network buffers in the internal RAM the SDIO link and the UI share; the
+// stream kept 160 KB or more of DMA-capable RAM free (dma_min), and the DMA
+// headroom check before every chunk still stops at 24 KB.
+constexpr uint32_t kChunkWindow = 4;
 constexpr uint32_t kEndSendTimeoutMs = 100;
 // The Bridge closes after 10 s without a frame header; a flush keeps an idle
 // but healthy connection open.
@@ -794,7 +798,62 @@ struct StreamWindow {
   uint32_t ack_ms_total = 0;
   uint32_t ack_ms_max = 0;
   uint32_t dma_min_bytes = UINT32_MAX;
+  // Where a frame interval goes (V2 2026-10-03: bright, noisy frames dropped
+  // the stream from 25 to 15 fps). Waits for the sender to take the previous
+  // frame, for a fresh CSI frame, and for exposure / white balance statistics.
+  uint32_t sender_waits = 0;
+  uint32_t sender_wait_ms_total = 0;
+  uint32_t sender_wait_ms_max = 0;
+  uint32_t freezes = 0;
+  uint32_t freeze_ms_total = 0;
+  uint32_t freeze_ms_max = 0;
+  uint32_t tune_ok = 0;       // Statistics reads that returned.
+  uint32_t tune_timeout = 0;  // Reads that timed out.
+  uint32_t tune_forced = 0;   // Reads that waited a whole frame (overdue).
+  uint32_t tune_ms_total = 0;
+  uint32_t tune_ms_max = 0;
+  uint32_t loop_ms_max = 0;   // Longest capture + encode + tune pass.
+  uint32_t ae_results = 0;    // Continuous AE statistics results received.
+  // Exposure steps and how long each took to show in the measured luma:
+  // waits ended by a timeout or by a scene change, and failed sensor writes.
+  uint32_t settles = 0;
+  uint32_t settle_ms_total = 0;
+  uint32_t settle_ms_max = 0;
+  uint32_t settle_timeouts = 0;
+  uint32_t scene_changes = 0;
+  uint32_t sensor_fail = 0;
 };
+
+// Timing of one window as JSON (/api/local-camera "stream_timing") and as a
+// log line: averages per event and maxima in ms.
+inline size_t formatTimingJson(char* out, size_t capacity, const StreamWindow& w) {
+  if (!out || capacity == 0) return 0;
+  const uint32_t reads = w.tune_ok + w.tune_timeout;
+  const int written = snprintf(
+      out, capacity,
+      "{\"sender_waits\":%u,\"sender_wait_ms\":%u,\"sender_wait_max\":%u,"
+      "\"freezes\":%u,\"freeze_ms\":%u,\"freeze_max\":%u,"
+      "\"tune_ok\":%u,\"tune_timeout\":%u,\"tune_forced\":%u,\"tune_ms\":%u,\"tune_max\":%u,"
+      "\"loop_max\":%u,\"ae_results\":%u,\"settles\":%u,\"settle_ms\":%u,"
+      "\"settle_max\":%u,\"settle_timeouts\":%u,\"scene_changes\":%u,\"sensor_fail\":%u}",
+      static_cast<unsigned>(w.sender_waits),
+      static_cast<unsigned>(w.sender_waits ? w.sender_wait_ms_total / w.sender_waits : 0),
+      static_cast<unsigned>(w.sender_wait_ms_max), static_cast<unsigned>(w.freezes),
+      static_cast<unsigned>(w.freezes ? w.freeze_ms_total / w.freezes : 0),
+      static_cast<unsigned>(w.freeze_ms_max), static_cast<unsigned>(w.tune_ok),
+      static_cast<unsigned>(w.tune_timeout), static_cast<unsigned>(w.tune_forced),
+      static_cast<unsigned>(reads ? w.tune_ms_total / reads : 0),
+      static_cast<unsigned>(w.tune_ms_max), static_cast<unsigned>(w.loop_ms_max),
+      static_cast<unsigned>(w.ae_results), static_cast<unsigned>(w.settles),
+      static_cast<unsigned>(w.settles ? w.settle_ms_total / w.settles : 0),
+      static_cast<unsigned>(w.settle_ms_max), static_cast<unsigned>(w.settle_timeouts),
+      static_cast<unsigned>(w.scene_changes), static_cast<unsigned>(w.sensor_fail));
+  if (written < 0 || static_cast<size_t>(written) >= capacity) {
+    out[0] = '\0';
+    return 0;
+  }
+  return static_cast<size_t>(written);
+}
 
 inline uint32_t windowSkipped(const StreamWindow& w) {
   return w.busy + w.big + w.dma + w.arb + w.late + w.noframe;

@@ -1,32 +1,20 @@
 #include "src/types/climate/web_html.h"
+#include "src/types/switch/web_html.h"
 
 #include "src/core/config/config_manager.h"
 #include "src/core/i18n/i18n.h"
 #include "src/tiles/config/tile_config.h"
 #include "src/web/server/web_admin_utils.h"
 
-void append_climate_fields_html(String& html,
-                                const String& tab_id,
-                                const std::vector<String>& climate_options) {
+void append_climate_fields_html(String& html, const String& tab_id) {
   const auto& tr = i18n::strings(configManager.getConfig().language);
   const char* language = configManager.getConfig().language;
   html += "<div id=\"";
   html += tab_id;
-  html += "_climate_fields\" class=\"type-fields\"><label>";
-  html += i18n::climate_entity_label(configManager.getConfig().language);
-  html += "</label><select id=\"";
-  html += tab_id;
-  html += "_climate_entity\"><option value=\"\">";
-  html += tr.no_selection;
-  html += "</option>";
-  for (const auto& entity : climate_options) {
-    html += "<option value=\"";
-    appendHtmlEscaped(html, entity);
-    html += "\">";
-    appendHtmlEscaped(html, humanizeIdentifier(entity, true) + " - " + entity);
-    html += "</option>";
-  }
-  html += "</select><label>";
+  html += "_climate_fields\" class=\"type-fields\">";
+  appendEntityPickerField(html, tab_id, "climate_entity",
+                          i18n::climate_entity_label(language), "climates");
+  html += "<label>";
   html += tr.popup_open;
   html += "</label><select id=\"";
   html += tab_id;
@@ -35,6 +23,9 @@ void append_climate_fields_html(String& html,
   html += "</option><option value=\"0\">";
   html += tr.long_press;
   html += "</option></select>";
+  // Layout like the Switch tile (climateTileShowsValue, sensor_display_mode).
+  const SwitchChoice layouts[] = {{"0", tr.climate_layout_title_only}, {"1", tr.climate_layout_with_value}};
+  append_switch_choice(html, tab_id, "climate_view", tr.switch_display, layouts, 2);
 
   html += "<div class=\"climate-content-config hidden\"><input type=\"hidden\" id=\"";
   html += tab_id;

@@ -25,7 +25,10 @@
 
   let settingsAccessSaveQueue = Promise.resolve();
   let settingsAccessCommittedState = null;
-  let settingsTileTransferInFlight = false;
+  // Settings moves between grid and parking slot still being saved, and the
+  // number of the latest one (hideSettingsTileFromGrid).
+  let settingsTileTransfersInFlight = 0;
+  let settingsTileTransferSeq = 0;
 
   function readSettingsAccessState() {
     const pinToggle = settingsAccessElement('settings_pin_enabled');
@@ -41,6 +44,23 @@
       revealEdge:
         String(settingsAccessElement('settings_reveal_edge')?.value || '0')
     };
+  }
+
+  // The gesture menu saved the Settings swipe (display-borders.js
+  // saveGestureEdge): the hidden fields and the committed state carry it, so
+  // a later access save keeps it.
+  function noteSettingsSwipeSaved(enabled, edge) {
+    const swipe = settingsAccessElement('settings_swipe_enabled');
+    const reveal = settingsAccessElement('settings_reveal_edge');
+    if (swipe) swipe.checked = !!enabled;
+    if (reveal && Number.isInteger(edge) && edge >= 0 && edge <= 3) reveal.value = String(edge);
+    if (settingsAccessCommittedState) {
+      settingsAccessCommittedState = {
+        ...settingsAccessCommittedState,
+        swipeEnabled: settingsAccessCommittedState.tileHidden || !!enabled,
+        revealEdge: reveal ? reveal.value : settingsAccessCommittedState.revealEdge
+      };
+    }
   }
 
   function settingsAccessStatesEqual(a, b) {
@@ -105,8 +125,10 @@
       bg_color: isDefault ? 0 : makeTileBgValue(hexToRgb(color)),
       col: String(Math.max(1, editorCoordinates ? rawCol : (rawCol + 1))),
       row: String(Math.max(1, editorCoordinates ? rawRow : (rawRow + 1))),
-      span_w: String(source?.span_w ?? hiddenTile?.dataset.spanW ?? 1),
-      span_h: String(source?.span_h ?? hiddenTile?.dataset.spanH ?? 1)
+      // Parked it is one cell and comes back as one (user 2026-10-22), like
+      // a page's folder.
+      span_w: '1',
+      span_h: '1'
     };
   }
 
@@ -131,6 +153,7 @@
     tile.dataset.spanW = String(snapshot.span_w || 1);
     tile.dataset.spanH = String(snapshot.span_h || 1);
     tile.innerHTML = '';
+    tile.style.removeProperty('--tile-border-tint');
     if (!hidden) {
       tile.style.background = 'transparent';
       const icon = document.createElement('i');
@@ -142,10 +165,17 @@
       ? tileBackgroundCss(getTileTypeMeta('7'), true,
           getTileTypeMeta('7').defaultBg || '#2A2A2A')
       : snapshot.color;
-    const iconName = normalizeMdiIconName(snapshot.icon);
+    // Its frame line from its card like every tile's (grid-preview.js): it
+    // showed the bright fallback line in its field (user 2026-10-14).
+    if (typeof applyFrameLine === 'function') applyFrameLine(tile);
+    // The Settings PIN shows its lock here too (previewTileLocked); without
+    // an icon the lock is the icon.
+    const locked = typeof previewTileLocked === 'function' && previewTileLocked('7', tile);
+    const iconName = normalizeMdiIconName(snapshot.icon) || (locked ? 'lock' : '');
     if (iconName) {
       const icon = document.createElement('i');
       icon.className = 'mdi mdi-' + iconName + ' tile-icon';
+      if (locked && iconName !== 'lock') icon.innerHTML = PREVIEW_LOCK_MARK;
       tile.appendChild(icon);
     }
     if (snapshot.title) {
@@ -158,6 +188,63 @@
         currentTileTab === 'folder0') {
       tile.classList.add('active');
     }
+  }
+
+  // The Settings tile shows a lock while the Settings PIN is on
+  // (previewTileLocked): redraw it, in the grid or parked, once the PIN is
+  // set or cleared.
+  function refreshSettingsTileLock() {
+    // The head's gear shows the lock too (home_bar.cpp).
+    const locked = typeof previewTileLocked === 'function' && previewTileLocked('7');
+    document.querySelectorAll('.head-bar-preview .head-gear > i').forEach(icon => {
+      icon.querySelector('.tile-icon-lock')?.remove();
+      if (locked) icon.insertAdjacentHTML('beforeend', PREVIEW_LOCK_MARK);
+    });
+    const editing = currentTileTab === 'folder0' &&
+      (currentTileIndex === HIDDEN_SETTINGS_TILE_INDEX ||
+       document.getElementById('folder0-tile-' + currentTileIndex)?.dataset.type === '7');
+    if (editing && typeof updateTilePreview === 'function') {
+      updateTilePreview('folder0');
+    } else if (document.getElementById('settingsHiddenTile')?.dataset.hidden === '1') {
+      renderSettingsHiddenSlot(true);
+    } else {
+      const tiles = getTilesData('folder0');
+      const index = tiles.findIndex(item => Number(item?.type || 0) === 7);
+      if (index >= 0) renderTileFromData('folder0', index, tiles[index], sensorMetaCache);
+    }
+  }
+
+  // Shows a Settings move between the grid and the parking slot at once,
+  // before the device has saved it (user 2026-10-02: the tile jumped back,
+  // its teal selection lagged and it took long to move). The grid data, the
+  // selection and the editor follow at once, so the tile can be moved again
+  // right away; the reload after the save (reconcileSettingsTileUi) draws the
+  // stored state, and a failed save draws it back. Restoring takes the first
+  // empty index like TileConfig::ensureSettingsTile.
+  // Returns the slot it showed the tile in, -1 when parked or not shown.
+  function previewSettingsTileTransfer(hidden, snapshot, target = null) {
+    const tiles = getTilesData('folder0');
+    const isSettings = tile => Number(tile?.type || 0) === 7;
+    const index = hidden
+      ? tiles.findIndex(isSettings)
+      : (tiles.some(isSettings) || !target ? -1 : tiles.findIndex(tile => !Number(tile?.type || 0)));
+    if (index < 0) return -1;
+    tiles[index] = hidden ? {type: 0} : {
+      type: 7,
+      title: snapshot.title,
+      icon_name: snapshot.icon,
+      bg_color: snapshot.bg_color,
+      col: target.col,
+      row: target.row,
+      span_w: snapshot.span_w,
+      span_h: snapshot.span_h
+    };
+    renderTileFromData('folder0', index, tiles[index], sensorMetaCache);
+    layoutTiles('folder0', tiles);
+    renderSettingsHiddenSlot(hidden, snapshot);
+    if (hidden) selectHiddenSettingsTile();
+    else selectTile(index, 'folder0');
+    return hidden ? -1 : index;
   }
 
   function currentGridSettingsSnapshot() {
@@ -232,15 +319,11 @@
     }
     if (tileSnapshot) {
       const snapshot = normalizeHiddenSettingsSnapshot(tileSnapshot);
-      const layout = normalizeSnapshotLayout(
-        snapshot, HIDDEN_SETTINGS_TILE_INDEX, 'folder0');
       body.set('settings_tile_snapshot_present', '1');
       body.set('settings_tile_title', snapshot.title);
       body.set('settings_tile_icon', snapshot.icon);
-      body.set('settings_tile_col', String(layout.col));
-      body.set('settings_tile_row', String(layout.row));
-      body.set('settings_tile_span_w', String(layout.span_w));
-      body.set('settings_tile_span_h', String(layout.span_h));
+      // Its look only: parked it is one cell with no place kept, the panel
+      // puts it where it is dropped or on a free cell (user 2026-10-22).
       if (snapshot.bg_color_default === '1') {
         body.set('settings_tile_bg_color_default', '1');
       } else {
@@ -249,6 +332,7 @@
       }
     }
 
+    const lockedBefore = pinToggle.dataset.pinConfigured === '1';
     if (pinApply && hasNewPin) pinApply.disabled = true;
     try {
       const response = await fetch('mqtt', {
@@ -284,12 +368,16 @@
         setSettingsPinStatus(false);
       }
       toggleSettingsAccessFields();
+      if ((pinToggle.dataset.pinConfigured === '1') !== lockedBefore) refreshSettingsTileLock();
       const savedState = {
         ...requested,
         pinEnabled: persistPinEnabled,
         pinConfigured: persistPinEnabled
       };
       settingsAccessCommittedState = savedState;
+      // A hidden tile keeps its swipe: the gesture menu shows what the panel
+      // keeps.
+      if (typeof refreshGestureMenu === 'function') refreshGestureMenu();
       if (reconcileAfterSave &&
           (visibilityChanged || visibilityMismatch)) {
         await reconcileSettingsTileUi(requested.tileHidden, snapshotHint);
@@ -297,7 +385,8 @@
                  requested.tileHidden) {
         renderSettingsHiddenSlot(true, tileSnapshot);
       }
-      return true;
+      // The device's answer (truthy): a Settings move reads settings_tile_index.
+      return result;
     } catch (error) {
       if (!hasNewPin &&
           settingsAccessStatesEqual(readSettingsAccessState(), requested)) {
@@ -379,7 +468,8 @@
         form.elements.namedItem('language')?.value || '').toLowerCase();
       const currentLanguage = String(
         document.documentElement.lang || APP_LOCALE || '').toLowerCase();
-      const submitButton =
+      // Several pages carry a Save for this form; the pressed one shows the result.
+      const submitButton = event.submitter ||
         document.querySelector('button[form="admin_settings_form"][type="submit"]');
       const originalLabel = submitButton ? submitButton.textContent : '';
       if (submitButton) submitButton.disabled = true;

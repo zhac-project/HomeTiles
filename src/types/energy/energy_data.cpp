@@ -12,7 +12,9 @@
 #include "src/network/network_manager.h"
 #include "src/tiles/config/tile_config.h"
 #include "src/tiles/runtime/tile_renderer.h"
+#include "src/types/energy/renderer.h"
 #include "src/ui/popups/energy/energy_popup.h"
+#include "src/ui/screensaver/screensaver_config.h"
 #include "src/ui/tabs/tiles/tab_tiles_unified.h"
 
 namespace {
@@ -23,33 +25,53 @@ struct PendingEnergyResponse {
 };
 
 // Responses for different periods must not overwrite each other, for example
-// when the periodic 24-hour response arrives just after a manual 7-day request.
+// when the periodic day response arrives just after a manual week request.
+// The Energy popup's periods: today by the hour, this week and this month by
+// the day, this year by the month.
 PendingEnergyResponse g_pending_day;
 PendingEnergyResponse g_pending_week;
 PendingEnergyResponse g_pending_month;
+PendingEnergyResponse g_pending_year;
 std::vector<EnergyEntryData> g_day_entries;
 std::vector<EnergyEntryData> g_week_entries;
 std::vector<EnergyEntryData> g_month_entries;
+std::vector<EnergyEntryData> g_year_entries;
 
 struct EnergyRequestState {
   uint32_t last_attempt_ms = 0;  // loop-task only
   volatile bool awaiting_response = false;
   volatile bool retry_requested = false;
+  // Timeouts in a row (loop-task only); the response clears it.
+  uint8_t timeouts = 0;
+  // millis() of the last response for this period (loop-task only).
+  uint32_t last_response_ms = 0;
 };
 
 EnergyRequestState g_day_request;
 EnergyRequestState g_week_request;
 EnergyRequestState g_month_request;
+EnergyRequestState g_year_request;
 uint32_t g_last_periodic_ms = 0;
 
 constexpr uint32_t kEnergyRequestThrottleMs = 10000UL;
 constexpr uint32_t kEnergyRetryBackoffMs = 2000UL;
 constexpr uint32_t kEnergyResponseTimeoutMs = 15000UL;
+// Home Assistant's statistics have five-minute resolution at best, so a
+// shorter periodic refresh of the tiles only repeats the same totals.
+constexpr uint32_t kEnergyPeriodicMs = 5UL * 60UL * 1000UL;
+// A Bridge without Energy dashboard never answers. After this many timeouts
+// in a row the request waits for the next periodic slot or a popup instead of
+// retrying every 15 seconds (each try logged a Home Assistant warning).
+constexpr uint8_t kEnergyMaxTimeoutsInRow = 2;
+// The popup asks again on every Day/Week/Month switch; within a minute the
+// statistics cannot have changed, so the cached answer is shown instead.
+constexpr uint32_t kEnergyFreshMs = 60UL * 1000UL;
 
 const char* normalize_period(const char* period) {
   if (!period || !*period) return "day";
   if (strcmp(period, "week") == 0) return "week";
   if (strcmp(period, "month") == 0) return "month";
+  if (strcmp(period, "year") == 0) return "year";
   return "day";
 }
 
@@ -57,6 +79,7 @@ PendingEnergyResponse& pending_for_period(const char* period) {
   const char* p = normalize_period(period);
   if (strcmp(p, "week") == 0) return g_pending_week;
   if (strcmp(p, "month") == 0) return g_pending_month;
+  if (strcmp(p, "year") == 0) return g_pending_year;
   return g_pending_day;
 }
 
@@ -76,6 +99,7 @@ const char* response_period(const char* payload) {
   const size_t len = static_cast<size_t>(end - begin);
   if (len == 4 && strncmp(begin, "week", len) == 0) return "week";
   if (len == 5 && strncmp(begin, "month", len) == 0) return "month";
+  if (len == 4 && strncmp(begin, "year", len) == 0) return "year";
   return "day";
 }
 
@@ -83,6 +107,7 @@ EnergyRequestState& request_state_for_period(const char* period) {
   const char* p = normalize_period(period);
   if (strcmp(p, "week") == 0) return g_week_request;
   if (strcmp(p, "month") == 0) return g_month_request;
+  if (strcmp(p, "year") == 0) return g_year_request;
   return g_day_request;
 }
 
@@ -108,7 +133,12 @@ void service_energy_retry(const char* period,
   if (state.awaiting_response) {
     if ((uint32_t)(now - state.last_attempt_ms) < kEnergyResponseTimeoutMs) return;
     state.awaiting_response = false;
-    state.retry_requested = true;
+    if (state.timeouts < 255) ++state.timeouts;
+    state.retry_requested = state.timeouts < kEnergyMaxTimeoutsInRow;
+    if (!state.retry_requested) {
+      Serial.printf("[Energy] No response to %s request (%u in a row); waiting for the next refresh\n",
+                    period, static_cast<unsigned>(state.timeouts));
+    }
   }
   if (!state.retry_requested) return;
   if (state.last_attempt_ms != 0 &&
@@ -122,13 +152,14 @@ std::vector<EnergyEntryData>& cache_for_period(const char* period) {
   const char* p = normalize_period(period);
   if (strcmp(p, "week") == 0) return g_week_entries;
   if (strcmp(p, "month") == 0) return g_month_entries;
+  if (strcmp(p, "year") == 0) return g_year_entries;
   return g_day_entries;
 }
 
 String cached_unit_for_entry(const String& id) {
   if (!id.length()) return String();
   const std::vector<EnergyEntryData>* caches[] = {
-      &g_day_entries, &g_week_entries, &g_month_entries};
+      &g_day_entries, &g_week_entries, &g_month_entries, &g_year_entries};
   for (const auto* cache : caches) {
     for (const auto& entry : *cache) {
       if (entry.id.equalsIgnoreCase(id) && entry.unit.length()) {
@@ -156,18 +187,6 @@ String format_energy_total(float value, bool is_cost) {
 float apply_energy_sign(float value, int8_t sign) {
   if (sign < 0 && value > 0.0f) return -value;
   return value;
-}
-
-const char* icon_for_energy(const EnergyEntryData& entry) {
-  if (entry.is_cost) return "currency-eur";
-  String cat = entry.category;
-  cat.toLowerCase();
-  if (cat == "solar") return "solar-power";
-  if (cat == "grid") return "transmission-tower";
-  if (cat == "battery") return "battery-charging";
-  if (cat == "gas") return "fire";
-  if (cat == "water" || cat == "device_water") return "water";
-  return "lightning-bolt";
 }
 
 void queue_energy_tile_update_for_entry(const EnergyEntryData& entry) {
@@ -273,11 +292,22 @@ void parse_energy_response(const char* payload) {
 
     if (strcmp(period, "day") == 0) {
       queue_energy_tile_update_for_entry(entry);
+      energy_tile_bars_update(entry);
     }
     parsed.push_back(entry);
   }
 
+  // A source without an icon so far gets its category's from this response:
+  // tiles that drew none redraw their icons.
+  bool new_icon = false;
+  for (const auto& entry : parsed) {
+    if (!energy_source_icon(entry.id).length()) {
+      new_icon = true;
+      break;
+    }
+  }
   cache_for_period(period) = parsed;
+  if (new_icon) tiles_request_icon_refresh();
   queue_energy_popup_refresh(period);
   // Timing of one response: since its request was sent, and the parse itself.
   const uint32_t now = millis();
@@ -300,16 +330,21 @@ void queue_energy_response(const char* payload, size_t len) {
   EnergyRequestState& request = request_state_for_period(period);
   request.awaiting_response = false;
   request.retry_requested = false;
+  request.timeouts = 0;
+  request.last_response_ms = millis();
+  if (request.last_response_ms == 0) request.last_response_ms = 1;
 }
 
 void process_energy_response_queue() {
-  // Weekly and monthly data usually follow a direct user action; process them
-  // before the periodic daily refresh.
+  // Week, month and year data usually follow a direct user action; process
+  // them before the periodic daily refresh.
   PendingEnergyResponse* pending = nullptr;
   if (g_pending_week.valid) {
     pending = &g_pending_week;
   } else if (g_pending_month.valid) {
     pending = &g_pending_month;
+  } else if (g_pending_year.valid) {
+    pending = &g_pending_year;
   } else if (g_pending_day.valid) {
     pending = &g_pending_day;
   }
@@ -337,6 +372,10 @@ bool energy_request_period(const char* period, bool force) {
     request.awaiting_response = false;
     request.retry_requested = true;
   }
+  if (force && !request.retry_requested && request.last_response_ms != 0 &&
+      (uint32_t)(now - request.last_response_ms) < kEnergyFreshMs) {
+    return true;
+  }
   if (request.retry_requested) {
     if (request.last_attempt_ms != 0 &&
         (uint32_t)(now - request.last_attempt_ms) < kEnergyRetryBackoffMs) {
@@ -355,13 +394,27 @@ bool energy_request_day_for_tiles(bool force) {
   return energy_request_period("day", force);
 }
 
+bool energy_request_waiting() {
+  return g_day_request.awaiting_response || g_week_request.awaiting_response ||
+         g_month_request.awaiting_response || g_year_request.awaiting_response;
+}
+
+bool energy_period_fresh(const char* period) {
+  const EnergyRequestState& request = request_state_for_period(period);
+  return request.last_response_ms != 0 && (uint32_t)(millis() - request.last_response_ms) < kEnergyFreshMs;
+}
+
 void energy_service_periodic() {
   if (!networkManager.isMqttConnected()) return;
   const uint32_t now = millis();
   service_energy_retry("day", g_day_request, now);
   service_energy_retry("week", g_week_request, now);
   service_energy_retry("month", g_month_request, now);
-  if (g_last_periodic_ms != 0 && (uint32_t)(now - g_last_periodic_ms) < 60UL * 1000UL) {
+  service_energy_retry("year", g_year_request, now);
+  // Without an energy section the Bridge has nothing to answer; Energy tiles
+  // and the popup still ask on their own when they are shown.
+  if (!haBridgeConfig.hasEnergyEntries()) return;
+  if (g_last_periodic_ms != 0 && (uint32_t)(now - g_last_periodic_ms) < kEnergyPeriodicMs) {
     return;
   }
   if (energy_request_day_for_tiles(false)) {
@@ -385,20 +438,63 @@ String energy_find_cached_unit(const String& id) {
   return cached_unit_for_entry(id);
 }
 
-void energy_append_cached_entity_ids(std::vector<String>& ids) {
+namespace {
+
+// The source in any received Energy response, nullptr without one.
+const EnergyEntryData* cached_entry(const String& id) {
+  if (!id.length()) return nullptr;
   const std::vector<EnergyEntryData>* caches[] = {
-      &g_day_entries, &g_week_entries, &g_month_entries};
+      &g_day_entries, &g_week_entries, &g_month_entries, &g_year_entries};
   for (const auto* cache : caches) {
     for (const auto& entry : *cache) {
-      if (!entry.id.length()) continue;
-      bool exists = false;
-      for (const auto& id : ids) {
-        if (id.equalsIgnoreCase(entry.id)) {
-          exists = true;
-          break;
-        }
-      }
-      if (!exists) ids.push_back(entry.id);
+      if (entry.id.equalsIgnoreCase(id)) return &entry;
     }
+  }
+  return nullptr;
+}
+
+void append_unique(std::vector<String>& ids, const char* id) {
+  if (!id || !*id) return;
+  for (const auto& known : ids) {
+    if (known.equalsIgnoreCase(id)) return;
+  }
+  ids.push_back(String(id));
+}
+
+}  // namespace
+
+String energy_source_icon(const String& id) {
+  String icon = haBridgeConfig.findEntityIcon(id);
+  if (icon.length()) return icon;
+  const EnergyEntryData* entry = cached_entry(id);
+  return entry ? String(energySourceIcon(entry->category, entry->id, entry->unit)) : String();
+}
+
+String energy_source_name(const String& id) {
+  String name = haBridgeConfig.findSensorName(id);
+  if (name.length()) return name;
+  const EnergyEntryData* entry = cached_entry(id);
+  return entry ? entry->name : String();
+}
+
+void energy_append_tile_entity_ids(std::vector<String>& ids) {
+  FolderEntitySlotView slots[TILES_PER_GRID];
+  for (const FolderEntry& folder : tileConfig.getFolders()) {
+    if (!tileConfig.getFolderEntitiesCached(folder.id, slots, TILES_PER_GRID)) continue;
+    for (size_t i = 0; i < TILES_PER_GRID; ++i) {
+      if (slots[i].type == TILE_ENERGY) append_unique(ids, slots[i].entity);
+    }
+  }
+  const TileGridConfig& screensaver = screensaverConfig.tileGrid();
+  for (size_t i = 0; i < TILES_PER_GRID; ++i) {
+    if (screensaver.tiles[i].type == TILE_ENERGY) append_unique(ids, screensaver.tiles[i].sensor_entity.c_str());
+  }
+}
+
+void energy_append_cached_entity_ids(std::vector<String>& ids) {
+  const std::vector<EnergyEntryData>* caches[] = {
+      &g_day_entries, &g_week_entries, &g_month_entries, &g_year_entries};
+  for (const auto* cache : caches) {
+    for (const auto& entry : *cache) append_unique(ids, entry.id.c_str());
   }
 }

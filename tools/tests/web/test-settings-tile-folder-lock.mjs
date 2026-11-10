@@ -17,7 +17,6 @@ const html = `<!doctype html><html lang="en"><head>
   <div class="tile-settings-head">
     <select id="folder0_tile_type"><option value="0">Empty</option>
       <option value="4">Folder</option><option value="5">Switch</option></select>
-    <p class="hint hidden" id="folder0_tile_type_hint">Folder type locked</p>
   </div>
   <div class="tile-settings-body">
     <label>Title</label><textarea id="folder0_tile_title"></textarea>
@@ -73,7 +72,6 @@ try {
      col: 2, row: 0, span_w: 1, span_h: 1}
   ];
   const checkSettings = title => {
-    check(!visible($('tile_type_hint')), 'Settings must not show the folder type-lock hint');
     check($('tile_type').value === '7' && $('tile_type').disabled,
       'Settings keeps its fixed type');
     check($('tile_type').selectedOptions[0]?.textContent === 'Settings',
@@ -85,11 +83,9 @@ try {
   };
   const selectFullFolder = () => {
     selectTile(0, 'folder0');
-    check(visible($('tile_type_hint')), 'A full folder still shows its type-lock hint');
-    check($('tile_type').querySelector('option[value="5"]').disabled,
-      'A full folder cannot change to Switch');
-    check(!$('tile_type').querySelector('option[value="0"]').disabled,
-      'A full folder can still be emptied');
+    // The whole type list greyed out, Empty too (user 2026-10-12: Empty
+    // deleted the folder with its tiles); it goes only by Delete.
+    check($('tile_type').disabled, 'A full folder cannot change its type at all');
     check(visible($('folder_pin')), 'The folder PIN field is visible when enabled');
   };
   selectTile(1, 'folder0');
@@ -105,7 +101,6 @@ try {
     selectHiddenSettingsTile();
     checkSettings(dirty ? 'My settings' : 'Settings');
     selectTile(2, 'folder0');
-    check(!visible($('tile_type_hint')), 'An empty folder has no lock hint');
     check(!$('tile_type').disabled && !$('tile_type').querySelector('option[value="5"]').disabled,
       'An empty folder can change type after leaving Settings');
   }

@@ -20,25 +20,14 @@ struct Strings {
   const char* home;
   const char* folder_prefix;
 
-  const char* admin_window_title;
   const char* admin_panel_title;
-  const char* admin_subtitle;
   const char* admin_tile_hint;
   const char* admin_delete_folder_tab;
-  const char* admin_tile_settings;
   const char* admin_type;
-  const char* admin_folder_type_locked;
   const char* admin_title;
   const char* admin_tile_title_placeholder;
-  const char* admin_icon_label;
   const char* admin_icon_placeholder;
-  const char* admin_icon_list;
   const char* admin_color;
-  const char* admin_column;
-  const char* admin_row;
-  const char* admin_width_cells;
-  const char* admin_height_cells;
-  const char* admin_autosave;
   const char* admin_copy;
   const char* admin_paste;
   const char* admin_delete;
@@ -46,37 +35,26 @@ struct Strings {
   const char* admin_export;
   const char* admin_import;
   const char* admin_import_overwrite;
-  const char* admin_settings_wifi;
-  const char* admin_settings_mqtt;
   const char* admin_settings_language;
   const char* admin_settings_screenshot;
-  const char* admin_settings_ota;
   const char* screenshot_create_download;
   const char* screenshot_saved_note;
   const char* ota_firmware_file;
-  const char* ota_current_version;
   const char* ota_upload_install;
   const char* ota_update_note;
   const char* ota_choose_file;
   const char* ota_no_file_selected;
 
-  const char* wifi_status;
   const char* wifi_connected;
   const char* wifi_disconnected;
-  const char* wifi_offline;
-  const char* wifi_ap_active;
   const char* wifi_label;
   const char* ssid_label;
-  const char* ip_label;
   const char* wifi_password_label;
   const char* wifi_static_ip_label;
   const char* wifi_gateway_label;
   const char* wifi_subnet_label;
   const char* wifi_dns_label;
-  const char* wifi_dhcp_hint;
   const char* mqtt_not_configured;
-  const char* ap_enable;
-  const char* ap_disable;
   const char* yes;
   const char* no;
 
@@ -89,8 +67,6 @@ struct Strings {
   const char* mqtt_client_id_hint;
   const char* mqtt_base_topic;
   const char* ha_prefix;
-  const char* status_time_font;
-  const char* status_date_font;
   const char* save;
   const char* restart_confirm;
   const char* restart_button;
@@ -127,34 +103,8 @@ struct Strings {
   // to change the connection, install firmware or write files.
   const char* cloud_remote_blocked;
 
-  const char* ap_window_title;
-  const char* ap_heading;
-  const char* ap_subtitle;
-  const char* ap_wifi_section;
-  const char* ap_wifi_ssid_label;
-  const char* ap_wifi_ssid_placeholder;
-  const char* ap_wifi_password_label;
-  const char* ap_wifi_password_placeholder;
-  const char* ap_wifi_open_hint;
-  const char* ap_info_notice;
-  const char* ap_info_message;
-  const char* ap_save_connect;
-  const char* ap_success_title;
-  const char* ap_success_message;
-  const char* ap_success_notice;
-  const char* ap_wifi_required;
-
   const char* display_label;
-  const char* brightness_label;
-  const char* screensaver_brightness_label;
-  const char* hue_label;
-  const char* saturation_label;
-  const char* sleep_label;
-  const char* sleep_after;
   const char* sleep_never;
-  const char* screensaver_label;
-  const char* touch_label;
-  const char* no_imu_hint;
 
   const char* tile_type_empty;
   const char* tile_type_sensor;
@@ -179,6 +129,20 @@ struct Strings {
   const char* sensor_display_none;
   const char* sensor_display_gauge;
   const char* sensor_display_graph;
+  // The Sensor menu (types/sensor/web_html.cpp): layouts, forms, an open or
+  // closed ring, the value's place and the range (display modes 3-14).
+  const char* sensor_layout_value;
+  const char* sensor_layout_bar;
+  const char* sensor_layout_ring;
+  const char* sensor_form;
+  const char* sensor_form_level;
+  const char* sensor_form_line;
+  const char* sensor_form_stripes;
+  const char* sensor_ring_open;
+  const char* sensor_ring_closed;
+  const char* sensor_value_top;
+  const char* sensor_value_inside;
+  const char* sensor_gauge_range;
   const char* sensor_gauge_min;
   const char* sensor_gauge_max;
   const char* sensor_arc_degree;
@@ -192,9 +156,17 @@ struct Strings {
   const char* weather_entity;
   const char* energy_entity;
   const char* switch_light;
+  // Switch tile Layout field and its options (switch_layout::Layout):
+  // icon button, switch, dimmer, automatic.
   const char* switch_display;
   const char* switch_icon_button;
-  const char* switch_lvgl_switch;
+  const char* switch_layout_switch;
+  const char* switch_layout_dimmer;
+  const char* switch_layout_automatic;
+  // Climate tile Layout field: the title only (the title top right) or with
+  // the value pair beside the disc (climateTileShowsValue).
+  const char* climate_layout_title_only;
+  const char* climate_layout_with_value;
   const char* media_entity;
   const char* show_time;
   const char* show_date;
@@ -205,7 +177,6 @@ struct Strings {
   const char* text_size;
   const char* text_max_chars;
   const char* target_folder;
-  const char* new_folder;
   const char* scene_label;
 
   const char* js_select_tile_first;
@@ -232,6 +203,12 @@ struct Strings {
   const char* js_import_failed;
   const char* js_import_running;
   const char* js_import_complete;
+  // The import's progress line: {done} and {total} are filled in by the page.
+  const char* js_import_progress;
+  // Import checks: {tile} and {folder} are filled in by the page.
+  const char* js_import_conflict;
+  const char* js_import_stopped;
+  const char* js_import_screensaver;
   const char* js_tile_does_not_fit;
   const char* js_no_layout_found;
   const char* js_tiles_moved_saved;
@@ -249,48 +226,22 @@ struct Strings {
   const char* js_ota_success;
   const char* js_ota_failed;
 
-  // On-device Wi-Fi selection (Settings popup, see tab_settings.cpp).
-  const char* wifi_scan_searching;
-  const char* wifi_scan_none;
-  const char* wifi_scan_retry;
-  const char* wifi_manual_entry;
-  const char* wifi_open_network;
-  const char* wifi_password_for_fmt;
+  // Wi-Fi selection texts (wifi_back_btn is Back in the first-start setup).
   const char* wifi_back_btn;
-  const char* wifi_connect_btn;
-  const char* wifi_saved_restarting;
-  const char* wifi_save_failed;
 
-  // Keyboard layout localization. The option names "Deutsch (QWERTZ)" and
-  // "English (QWERTY)" identify the layouts and remain untranslated.
-  const char* keyboard_layout_label;
-
-  // Settings tiles: short descriptions of the controls behind each tile.
-  const char* settings_tile_desc_display;
-  const char* settings_tile_desc_wifi;
-  const char* settings_tile_desc_locale;
-  const char* settings_tile_desc_firmware_fmt;  // %s = firmware version
-
-  // Display popup: rotation button label.
-  const char* display_rotate_btn_text;
-
-  // System popup (formerly Firmware): device row, GitHub update check and OTA.
-  const char* system_device_label;
+  // System: GitHub update check and OTA.
   const char* system_check_updates_btn;
   const char* system_checking;
   const char* system_up_to_date;
   const char* system_update_available_fmt;  // %s = new version (release tag)
-  const char* system_update_restart_note;
   const char* system_install_btn_fmt;       // %s = new version (release tag)
   const char* system_check_failed;
   const char* system_downloading;
   const char* system_install_failed;
   const char* system_installed_restarting;
 
-  // Wi-Fi popup disconnect button; System popup HA pairing button and status.
+  // Wi-Fi disconnect button.
   const char* wifi_disconnect_btn;
-  const char* system_pair_btn;
-  const char* system_pair_status;
 
   // Dedicated screensaver editor in Web Admin.
   const char* screensaver_use_wallpapers;
@@ -309,25 +260,65 @@ struct Strings {
   const char* alignment_center;
   const char* alignment_right;
   const char* screensaver_tile_shadow;
-  const char* tile_radius;
-  // Global display setting: strength of every icon disc (icon_glow.h).
-  const char* icon_glow_strength;
   const char* tile_fractional_type_hint;
   const char* screensaver_tile_border;
-  // Web Admin: global display settings row below the grid preview.
-  const char* global_settings_heading;
-  const char* icon_discs;
-  const char* default_tile_color;
-  // Tile color choice: global tile color, own color or a tint from the icon.
+  // The gesture menu in the Global tab (swipe_gestures.h).
+  const char* swipe_gestures_heading;
+  // The theme field (ui_theme.h) and its choices; a tile's own Design field
+  // offers the same three.
+  const char* theme_label;
+  const char* theme_dark;
+  const char* theme_light;
+  const char* theme_auto;
+  // Web Admin: the tabs on top of the settings panel (tile settings, the
+  // global tile settings; on the screensaver page its picture settings).
+  const char* panel_tab_tile;
+  const char* panel_tab_global;
+  const char* panel_tab_screensaver;
+  // The layouts (grid_layout.h) and their "Layout ändern" window: the field
+  // in the global settings, the three layouts, the window's buttons and
+  // status ("**...**" is shown bold, {n} a count, {layout}/{tile} a name).
+  const char* layout_label;
+  const char* layout_change;
+  const char* layout_classic;
+  const char* layout_bar;
+  const char* layout_portrait;
+  const char* layout_active;
+  const char* layout_copy_from;
+  const char* layout_undo;
+  const char* layout_saved;
+  const char* layout_switch;
+  const char* layout_switch_confirm;
+  const char* layout_folders_missing;
+  const char* layout_folder_missing;
+  const char* layout_tiles_missing;
+  const char* layout_tile_missing;
+  // The Settings tile outside the layout's screen (it must be reached).
+  const char* layout_settings_missing;
+  const char* layout_all_fit;
+  const char* layout_unsaved_confirm;
+  const char* layout_storage;
+  const char* layout_storage_hint;
+  const char* layout_parked_tiles;
+  const char* layout_parked_tile;
+  // A layout's storage holds more tiles than it has entries ({n} of {max}).
+  const char* layout_storage_full;
+  // A free cell of a folder whose every entry is used ({n} of {max}).
+  const char* folder_full;
+  // Web Admin System page: the Icons card's title and its icon file row.
+  const char* icons_section;
+  const char* icon_file_label;
+  const char* layout_delete_tile;
+  const char* layout_delete_confirm;
+  // Color of a tile without an icon (Clock, Text, Pixel animation): the
+  // theme's card or an own color.
   const char* tile_color_mode_global;
   const char* tile_color_mode_custom;
-  const char* tile_color_mode_from_icon;
-  // Web Admin tile editor: per-tile icon disc override.
-  const char* icon_disc_label;
-  const char* icon_disc_global;
+  // Media tiles: "From cover", the color of the album cover as icon color.
+  const char* tile_color_mode_from_cover;
+  // Off/On choice buttons (the rules' switch in the tile editor).
   const char* icon_disc_on;
   const char* icon_disc_off;
-  const char* icon_glow;
   // Web Admin tile editor: per-tile icon color, color bar for numeric states
   // ("by value"), state colors for text states ("by state") and the On/Off
   // colors of Binary sensors (Sensor family, Binary sensor, Energy).
@@ -353,56 +344,38 @@ struct Strings {
   const char* tile_icon_color_state_on;
   const char* tile_icon_color_state_off;
   // Icon-and-title tiles: the source entity of their icon color.
-  const char* tile_icon_color_source;
-  const char* tile_icon_color_source_none;
   const char* tile_icon_color_source_auto;
   const char* tile_icon_color_source_rules;
   const char* tile_icon_color_source_hint;
-  // The rule layer of every tile: source, targets and tile tint strength.
+  // The rule layer of every tile: its source entity (the rules color the icon).
   const char* tile_rules;
   const char* tile_rules_own_entity;
   const char* tile_rules_other_entity;
-  const char* tile_rules_color_icon;
-  const char* tile_rules_tint_tile;
-  const char* tile_rules_strength;
   const char* tile_rules_priority_hint;
-  const char* tile_rules_tile_follows_icon;
-  // Tile Settings group captions: what belongs to the icon, what to the tile.
+  // The icon picker's label beside the title, and the one Tile Settings
+  // caption above the colors and the type's options (user 2026-10-11: one
+  // section instead of Icon and Tile).
   const char* tile_group_icon;
-  const char* tile_group_tile;
+  const char* tile_group_advanced;
   const char* screensaver_background_opacity;
-  const char* screensaver_hint;
   const char* screensaver_storage_hint;
+  // The slideshow list without a card.
+  const char* screensaver_no_sd;
   const char* screensaver_no_wallpapers;
   const char* js_screensaver_saved;
   const char* js_screensaver_save_failed;
   const char* js_screensaver_load_failed;
 
-  // Network mode switch in the Wi-Fi popup and Web Admin. Select fixed
-  // Wi-Fi or Ethernet mode; a change takes effect after restarting.
-  const char* net_mode_to_ethernet;
-  const char* net_mode_to_wifi;
-  const char* net_mode_restart_note;
-  const char* admin_ethernet_mode;
-
   // Static network addressing on the device and in Web Admin.
-  const char* ethernet_dhcp_reset;
-  const char* ethernet_static_restore;
-  const char* ethernet_dhcp_selected;
-  const char* ethernet_static_selected;
   const char* admin_ip_configuration;
-  const char* admin_ip_dhcp;
-  const char* admin_ip_static;
   const char* admin_ip_dhcp_note;
   const char* admin_ip_static_note;
-  const char* admin_ip_invalid;
 
   // Web Admin: heading ("<Device> Admin Panel") and slideshow editor.
   const char* admin_panel_word;
   const char* admin_slideshow;
 
   // Web Admin: network section on Ethernet-capable devices.
-  const char* admin_network_section;
   const char* admin_connection_type;
   const char* admin_connection_type_note;
   const char* admin_ip_use_static;
@@ -453,7 +426,6 @@ struct Strings {
 
   // Camera tile, popup and video runtime status.
   const char* camera_tile_type;
-  const char* camera_entity;
   const char* camera_ready;
   const char* camera_preparing;
   const char* camera_bridge_requesting;
@@ -475,7 +447,6 @@ struct Strings {
   const char* camera_input_memory_failed;
   const char* camera_buffering;
   const char* camera_connection_ended;
-  const char* camera_resolution_error_fmt;  // %u = decoded frame size
   const char* camera_http_error_fmt;        // %d = HTTP status
   const char* camera_device_only;
   const char* camera_unknown;
@@ -487,6 +458,8 @@ struct Strings {
   const char* camera_mqtt_disconnected;
   const char* camera_mqtt_topic_missing;
   const char* camera_mqtt_queue_full;
+  // View select (Home Assistant): a camera tile opened straight in full screen.
+  const char* camera_view_full_screen;
 
   // Web Admin: local I/O assignments. Even shared technical terms use the
   // central language schema; the UI has no language branches or hardcoded
@@ -522,16 +495,25 @@ struct Strings {
   const char* admin_io_restarting;
 
   // Web Admin and device UI: local parental-control PIN protection.
-  const char* admin_access_control;
   const char* settings_lock_enable;
   const char* settings_hide_tile;
   const char* settings_pin_label;
   const char* settings_pin_placeholder;
   const char* settings_pin_configured;
   const char* settings_pin_not_configured;
-  const char* settings_swipe_enable;
-  const char* settings_reveal_edge;
-  const char* settings_swipe_note;
+  // With a bar layout: the gear in Home's head opens Settings too.
+  const char* settings_head_gear;
+  // The settings panel's head bar tab (user 2026-10-13): its name, the
+  // gear (the same setting as settings_head_gear), the time and the pages'
+  // overview on a tap on the dots.
+  const char* head_bar_heading;
+  const char* head_bar_gear;
+  const char* head_bar_clock;
+  const char* head_bar_overview;
+  // Home's own title in its head and the hint of its Auto switch ("Home" in
+  // the panel's language).
+  const char* head_bar_home_title;
+  const char* head_bar_home_auto_hint;
   const char* edge_left;
   const char* edge_right;
   const char* edge_top;
@@ -547,9 +529,11 @@ struct Strings {
   const char* folder_pin_saved;
   const char* folder_pin_save_failed;
   const char* folder_pin_create_first;
-  const char* pin_popup_settings_title;
+  // PIN popup: the header state of a protected folder or Settings, and the
+  // prompt shown below the lock until the first digit.
+  const char* pin_popup_locked;
   const char* pin_popup_incorrect;
-  const char* pin_popup_unlock_format;
+  const char* pin_popup_enter;
   const char* settings_tile_parking;
   // Built-in camera opt-in (Web Admin Settings, camera profiles only).
   const char* local_camera_section;
@@ -595,12 +579,338 @@ struct Strings {
   // Collapsed Web Admin block with the fine-tuning controls (rotation,
   // mirror, red/blue swap, image controls).
   const char* local_camera_advanced;
-  // Clockwise rotation select; the degree values stay untranslated.
+  // Clockwise rotation select, one for every layout; the degree values stay
+  // untranslated.
   const char* local_camera_rotation;
   // Red/blue swap checkbox and its note (applies from the next start).
   const char* local_camera_rb_swap;
   const char* local_camera_rb_swap_note;
 
+  // Optional Web Admin password: login page, Web Admin settings section and
+  // the Security view in the device System popup. %s is a number of seconds.
+  const char* web_auth_section;
+  const char* web_auth_new_password;
+  const char* web_auth_repeat_password;
+  const char* web_auth_set;
+  const char* web_auth_remove;
+  const char* web_auth_logout;
+  const char* web_auth_too_short;
+  const char* web_auth_mismatch;
+  const char* web_auth_saved;
+  const char* web_auth_removed;
+  const char* web_auth_change_failed;
+  const char* web_auth_remove_confirm;
+  const char* web_auth_note;
+  const char* web_auth_login_title;
+  const char* web_auth_password_label;
+  const char* web_auth_login_button;
+  const char* web_auth_checking;
+  const char* web_auth_wrong_password;
+  const char* web_auth_wait_fmt;
+  const char* web_auth_login_failed;
+  const char* web_auth_forgot;
+  const char* security_btn;
+  const char* security_state_on;
+  // Stored Wi-Fi/MQTT passwords and PINs are not sent to browsers while a
+  // Web Admin password is set; they can only be replaced.
+  const char* secret_hidden_placeholder;
+  const char* web_auth_secrets_note;
+  const char* ap_wifi_keep_password_hint;
+  // Settings System page: Home Assistant connected or offline, the pairing
+  // (the panel and Home Assistant show the same number) and the Web Admin
+  // password.
+  const char* security_value_connected;
+  const char* security_value_offline;
+  const char* security_password_question;
+  const char* security_password_question_hint;
+  const char* security_remove;
+  const char* security_cancel;
+  const char* security_confirm;
+  const char* security_close;
+  const char* security_unpaired_offline;
+  const char* pairing_asking;
+  const char* pairing_compare;
+  const char* pairing_compare_hint;
+  const char* pairing_waiting;
+  const char* pairing_no_answer;
+  const char* pairing_already_paired;
+  const char* pairing_busy;
+  const char* pairing_rejected;
+  const char* pairing_failed;
+  // Pair on a panel without a direct Bridge link: two minutes to add it.
+  const char* pairing_discoverable;
+  // Web Admin header badge: whether a Web Admin password protects the page.
+  const char* web_auth_badge_on;
+  const char* web_auth_badge_off;
+  // Web Admin header: "<prefix> <stars> <or> Buy Me a Coffee"; both are links.
+  const char* web_support_prefix;
+  const char* web_support_stars;
+  const char* web_support_or;
+  // Weather tile setting: filled, colored weather icons (off: white outlines).
+  const char* weather_colored_icons;
+  // Web Admin navigation: the menu with every folder besides Home.
+  const char* admin_folders;
+  // Icon color choice: Automatic (the type's and entity's own colors).
+  const char* tile_icon_color_auto;
+  // Web Admin: the first password needs a tap on the display first.
+  const char* web_auth_panel_tap_required;
+  // Title switch: the tile takes its entity's name from Home Assistant
+  const char* tile_title_auto;
+  // Hint of the title switch
+  const char* tile_title_auto_hint;
+  // Settings Display page: section of the screen controls.
+  const char* settings_screen;
+  // Settings row labels (no colon).
+  const char* settings_brightness;
+  const char* settings_sleep;
+  const char* settings_rotation;
+  const char* settings_screensaver;
+  const char* settings_starts_after;
+  // Settings Display page, Sound group (#123, P4 boards with a speaker):
+  // its heading, the volume slider and the microphone switch.
+  const char* settings_sound;
+  const char* settings_volume;
+  const char* settings_microphone;
+  // The Display category's name on the boards with the Sound group.
+  const char* settings_display_sound;
+  // Display category line: %s = sleep time ("5 min", "never").
+  const char* settings_sleep_summary_fmt;
+  // WiFi category line.
+  const char* settings_not_connected;
+  const char* settings_access_point_on;
+  // System category line.
+  const char* settings_update_available;
+  // Settings Localization page: row labels (no colon).
+  const char* settings_language;
+  const char* settings_time_zone;
+  const char* settings_time_format;
+  const char* settings_date_format;
+  const char* settings_keyboard;
+  // Settings System page: section headings and rows (no colon).
+  const char* settings_connection;
+  // The way to Home Assistant under its row: %s = the Bridge address on the
+  // direct link, the broker address over MQTT (panel and Web Admin).
+  const char* settings_link_direct_fmt;
+  const char* settings_link_mqtt_fmt;
+  const char* settings_pairing;
+  const char* settings_commands_encrypted;
+  // Paired over the direct link: states are sealed as well as commands (the
+  // camera video is not: it has its own ports).
+  const char* settings_states_encrypted;
+  // Web Admin MQTT row while the direct link is used: its line and the
+  // note above the kept broker fields.
+  const char* settings_mqtt_unused;
+  const char* settings_mqtt_unused_note;
+  const char* settings_paired;
+  const char* settings_not_paired;
+  const char* settings_pair;
+  const char* settings_password_asks;
+  const char* settings_password_none;
+  const char* settings_allow;
+  const char* settings_set_password_now;
+  const char* settings_setup;
+  // Settings System dialogs.
+  const char* settings_unpair_question;
+  const char* settings_unpair_text;
+  const char* settings_unpair;
+  const char* settings_restart_question;
+  const char* settings_restart_text;
+  const char* settings_github_text;
+  // Settings WiFi page (no colon).
+  const char* settings_choose_network;
+  const char* settings_hotspot;
+  const char* settings_hotspot_off_sub;
+  const char* settings_hotspot_on_sub;
+  // Hotspot details and the category title on Ethernet panels.
+  const char* settings_network;
+  const char* settings_address;
+  const char* settings_networks;
+  const char* settings_search;
+  const char* settings_searching;
+  const char* settings_add_network;
+  const char* settings_join_network;
+  const char* settings_network_name;
+  const char* settings_connecting;
+  const char* settings_connect_failed;
+  const char* settings_ethernet;
+  const char* settings_restart_to_switch;
+  const char* settings_ip_address;
+  const char* settings_automatic;
+  const char* settings_static;
+  const char* settings_static_address;
+  const char* settings_set_in_web_admin;
+  // First-start setup (no colon).
+  // The step line: %d = step, %d = number of steps.
+  const char* setup_step_fmt;
+  const char* setup_language_title;
+  const char* setup_wifi_title;
+  const char* setup_ha_title;
+  const char* setup_tiles_title;
+  const char* setup_next;
+  const char* setup_finish;
+  const char* setup_later;
+  const char* setup_other_network;
+  const char* setup_with_phone;
+  // The Home Assistant step in the order of the work (user 2026-10-12):
+  // 1 install HomeTiles in Home Assistant, 2 pair this panel, 3 add it there.
+  const char* setup_install_hometiles;
+  const char* setup_install_where;
+  const char* setup_pair_panel;
+  const char* setup_add_in_ha;
+  // Home Assistant's own menu names.
+  const char* setup_add_where;
+  const char* setup_back_to_pairing;
+  const char* setup_install_bridge;
+  const char* setup_pairing_code;
+  const char* setup_paired;
+  const char* setup_wifi_first;
+  const char* setup_scan_tiles;
+  const char* setup_password_hint;
+  const char* setup_password_hint_long;
+  const char* setup_leave_question;
+  // The path to the setup: %s = Settings, %s = Setup (their translations).
+  const char* setup_leave_text_fmt;
+  const char* setup_leave;
+  // The panel's update button beside the magnifier (Settings > System),
+  // short so the device name keeps its room.
+  const char* settings_update_short;
+  // The screensaver picture's source in Web Admin: the SD card slideshow or
+  // a picture Home Assistant sends (an image or a camera entity).
+  const char* screensaver_source_sd;
+  const char* screensaver_source_ha;
+  const char* screensaver_picture_entity;
+  const char* screensaver_picture_hint;
+  const char* screensaver_picture_fit;
+  const char* screensaver_fit_fill;
+  const char* screensaver_fit_contain;
+  const char* screensaver_fit_original;
+  const char* screensaver_picture_every;
+  // The Camera tile's picture (types/camera/picture.h): what the tile shows,
+  // its two choices, and the transparency of the circle and the title pill
+  // over the picture. Its entity, placement, interval and hint reuse the
+  // screensaver picture's texts above.
+  const char* camera_show;
+  const char* camera_show_icon;
+  const char* camera_show_picture;
+  const char* camera_head_transparency;
+  // The colors of circle and title over the picture (the design's, dark or
+  // light),
+  // and what a tap on a camera opens (the popup or straight the full screen).
+  const char* camera_head;
+  const char* camera_head_auto;
+  const char* camera_head_dark;
+  const char* camera_head_light;
+  const char* camera_tap;
+  const char* camera_tap_popup;
+  const char* camera_tap_full;
+  // The one tile color option (user 2026-10-11): the tile filled with its
+  // icon's color.
+  const char* tile_fill;
+  // A rule row's own fill: the tile is filled while the row matches (user 2026-10-11).
+  const char* tile_rule_fill;
+  // The Tile Settings caption above the icon color, the tile color and Fill (user 2026-10-11).
+  const char* tile_group_color;
+  // Clock tile (user 2026-10-11): the weekday choice and its options (none, short, long).
+  const char* clock_weekday_label;
+  // Clock tile weekday option: no weekday.
+  const char* clock_weekday_none;
+  // Clock tile weekday option: the short name (followed by an example).
+  const char* clock_weekday_short;
+  // Clock tile weekday option: the full name (followed by an example).
+  const char* clock_weekday_long;
+  // Clock tile: a changed digit rolls up once (user 2026-10-11).
+  const char* clock_roll_digits;
+  // Clock tile: the alignment of time and date (left, center, right; user 2026-10-12).
+  const char* clock_alignment_label;
+  // Clock tile style (user 2026-10-12): digital, analog, wall clock.
+  const char* clock_style_label;
+  // Clock style: the digital time (the default).
+  const char* clock_style_digital;
+  // Clock style: hands on a round dial in the theme's circle color.
+  const char* clock_style_analog;
+  // Clock style: a designer wall clock (batons, slim hands, chosen colors).
+  const char* clock_style_wall;
+  // Wall clock: the dial color select.
+  const char* clock_dial_label;
+  // Wall clock: the color of the hands and batons.
+  const char* clock_hands_label;
+  // Wall clock color: slate blue.
+  const char* clock_color_slate;
+  // Wall clock color: black.
+  const char* clock_color_black;
+  // Wall clock color: white.
+  const char* clock_color_white;
+  // Wall clock color: sage green.
+  const char* clock_color_sage;
+  // Wall clock color: navy blue.
+  const char* clock_color_navy;
+  // Wall clock color: terracotta.
+  const char* clock_color_terracotta;
+  // Wall clock color: gold.
+  const char* clock_color_gold;
+  // Wall clock color: silver.
+  const char* clock_color_silver;
+  // Text tile: the horizontal alignment select.
+  const char* text_align_horizontal;
+  // Text tile: the vertical alignment select.
+  const char* text_align_vertical;
+  // Vertical alignment: at the top.
+  const char* alignment_top;
+  // Vertical alignment: in the middle.
+  const char* alignment_middle;
+  // Vertical alignment: at the bottom.
+  const char* alignment_bottom;
+  // Tile color: no card at all (Clock and Text, black stored).
+  const char* tile_color_mode_transparent;
+  // A new panel's first page (new_panel_tiles.h): three folders and the
+  // welcome text with the hint to swipe, two lines that fit a Text tile's 31
+  // bytes (tile_config.cpp SCENE_MAX).
+  const char* new_panel_lights;
+  const char* new_panel_climate;
+  const char* new_panel_scenes;
+  const char* new_panel_welcome;
+  // The setup's first step: the head bar layout landscape or upright (a new
+  // panel's first setup only).
+  const char* setup_layout_landscape;
+  const char* setup_layout_upright;
+  // Web Admin: a locked folder dropped on a page slot (pages have no PIN).
+  const char* js_page_unlock_confirm;
+  const char* js_pages_saved;
+  // A layout switch refused: %u folders without a place there, %s the
+  // layout window's button ("Layout ändern").
+  const char* layout_switch_refused;
+  // Web Admin: a PIN for a page's folder is refused (pages have no PIN).
+  const char* folder_pin_page;
+  // Web Admin: the one word over the page slots under Home.
+  const char* pages_title;
+  // Web Admin: the tooltip on a full folder's greyed-out type list.
+  const char* js_folder_type_locked;
+  // Switch and Fan tile Orientation field (bar_orientation.h): the bar
+  // horizontal or upright.
+  const char* bar_orientation;
+  const char* bar_horizontal;
+  const char* bar_upright;
+  // Media tile: the popup's layout (Web Admin) and the popup's sub-views
+  // (source and sound mode, the speakers to group, the library).
+  const char* media_popup_layout;
+  const char* media_layout_cover_left;
+  const char* media_layout_cover_center;
+  const char* media_source;
+  const char* media_sound_mode;
+  const char* media_speakers;
+  const char* media_library;
+  const char* media_library_empty;
+  const char* media_library_failed;
+  // Media popup: the first speaker of the group list.
+  const char* media_this_player;
+  // Media library: the row that plays the opened playlist or album.
+  const char* media_play_all;
+  // Web Admin Settings > Localization: the first day of the week, with its
+  // colon like the rows above it (the Calendar tile's label without one).
+  const char* week_start_label;
+  // Settings: the System category's name (Russian brought it into the
+  // tables, 2026-10-29).
+  const char* settings_system;
 };
 
 // Locale-specific display rules and short runtime strings shared by
@@ -613,9 +923,17 @@ struct LocaleProfile {
 
   const char* weather_today;
   const char* weather_tomorrow;
+  // Today on the round footer buttons of the Weather and Energy popups, the
+  // standard short form where the word is long (French "Auj.").
+  const char* weather_today_button;
   const char* weather_weekdays_short[7];
   const char* weather_months_short[12];
   const char* weather_conditions[15];
+
+  // Optional sensors shown instead of the weather entity's own current
+  // temperature and humidity: temperature sensor, humidity sensor and the
+  // empty "use the weather entity's value" option.
+  const char* weather_sensor_labels[3];
 
   const char* tile_type_climate;
   const char* climate_entity;
@@ -674,7 +992,193 @@ struct LocaleProfile {
 
   // Types, entity labels, apply, invalid value, pending, failed, input formats.
   const char* editable_labels[19];
+
+  // Lock, Alarm panel and Fan tiles and their popups, indexed by
+  // i18n::DeviceLabel.
+  const char* device_labels[42];
+  // Lock states: locked, unlocked, locking, unlocking, open, opening,
+  // jammed, unavailable, unknown.
+  const char* lock_states[9];
+  // Alarm panel states: disarmed, armed_home, armed_away, armed_night,
+  // armed_vacation, armed_custom_bypass, pending, arming, disarming,
+  // triggered, unavailable, unknown.
+  const char* alarm_states[12];
+
+  // Calendar tile and popup (types/calendar), indexed by i18n::CalendarLabel.
+  const char* calendar_labels[25];
+  // Month names standing alone, for headings such as "October 2026"
+  // (month_names_in_date holds them as they stand in a date), January first.
+  const char* month_names[12];
+  // The first day of the week the Calendar tile uses unless the tile sets
+  // one (tm_wday: 0 Sunday, 1 Monday).
+  uint8_t first_weekday;
+  // The Vacuum tile and popup (types/vacuum), VacuumLabel order.
+  const char* vacuum_labels[17];
+  // Vacuum states: cleaning, docked, idle, paused, returning, error,
+  // unavailable, unknown.
+  const char* vacuum_states[8];
+  // The Power flow tile (types/power_flow), PowerFlowLabel order.
+  const char* power_flow_labels[9];
+
+  // Shared Web Admin entity picker (tiles/entity-picker.js). Order: choose,
+  // search, no match ({query}), load failed, try again, clear, none available,
+  // released only (no Web Admin password), and the switch under the search:
+  // recent, favorites (the panel's own entities), all.
+  const char* entity_picker_labels[11];
+  // Entity type shown on the right of a picker row, by Home Assistant
+  // domain. Order: sensor, binary_sensor, light, switch/input_boolean, fan,
+  // cover, climate, media_player, weather, camera, lock,
+  // alarm_control_panel, number/input_number, select/input_select,
+  // datetime/date/time/input_datetime, scene, script, button/input_button,
+  // automation, humidifier, siren, remote, calendar, vacuum.
+  const char* entity_kind_labels[24];
+  // Icon picker of the tile head and the rules (tiles/tile-head.js). Order:
+  // automatic, automatic hint, no icon, no icon hint, no match ({query}),
+  // a rule's automatic hint (the tile's own icon stays).
+  const char* icon_picker_labels[6];
+
+  // The clock's long dates (clock_tile::DATE_FORMAT_D_MONTH*, user
+  // 2026-10-11, issue #13): the month names as they stand in a date
+  // (Polish in the genitive), January first, and the order with
+  // {d}=day and {M}=month ("{d}. {M}" = "21. August").
+  const char* month_names_in_date[12];
+  const char* long_date_pattern;
+  // The same date with the year, {Y}=year ("{d} de {M} de {Y}" =
+  // "21 de agosto de 2026").
+  const char* long_date_year_pattern;
+
+  // The panel keyboard (settings_keyboard), as data so a language brings
+  // its own: the letter layout under Auto (0 QWERTY, 1 QWERTZ, 2 AZERTY,
+  // 3 JCUKEN, settings_keyboard::Layout) and the language's own letters and
+  // signs in lower case ("áčďéěíňóřšťúůýž"), first on the accent page and
+  // first among the forms of a held letter (keyboard_letters.h makes the
+  // capitals; Russian "ёъ" are held е and ь, its accent key switches to
+  // QWERTY). Only characters of the panel fonts.
+  uint8_t keyboard_layout;
+  const char* keyboard_letters;
+
+  // The Energy popup's period buttons left of Today (EnergyPeriodLabel):
+  // this year by the month, this month and this week by the day.
+  const char* energy_period_labels[3];
+
 };
+
+// Index into LocaleProfile::energy_period_labels.
+enum class EnergyPeriodLabel : uint8_t { Year, Month, Week, Count };
+static_assert(static_cast<int>(EnergyPeriodLabel::Count) == 3, "LocaleProfile::energy_period_labels size");
+// Index into LocaleProfile::vacuum_labels.
+enum class VacuumLabel : uint8_t {
+  Type,
+  Entity,
+  Clean,
+  Pause,
+  Dock,
+  Stop,
+  FanSpeed,
+  Rooms,
+  Locate,
+  Spot,
+  SpotHint,
+  LocateHint,
+  CleanRooms,  // printf pattern with one %u (the number of rooms)
+  Layout,
+  MapLeft,
+  MapCentered,
+  Map,  // the Web Admin map field; empty takes the device's map
+  Count,
+};
+static_assert(static_cast<int>(VacuumLabel::Count) == 17, "LocaleProfile::vacuum_labels size");
+// Index into LocaleProfile::power_flow_labels.
+enum class PowerFlowLabel : uint8_t {
+  Type,
+  SolarPower,
+  GridPower,
+  BatteryPower,
+  BatteryCharge,
+  HomePower,
+  ShowHeader,
+  ShowCard,
+  InvertSign,
+  Count,
+};
+// Index into LocaleProfile::calendar_labels.
+enum class CalendarLabel : uint8_t {
+  TypeCalendar,
+  EntityCalendar,
+  CalendarN,  // printf pattern with one %u (the field number)
+  View,
+  ViewAgenda,
+  ViewWeek,
+  ViewMonth,
+  WeekStart,
+  Automatic,
+  AllDay,
+  NoEvents,
+  NothingPlanned,
+  InDays,          // printf pattern with one %u
+  InHours,         // printf pattern with one %u
+  InHoursMinutes,  // printf pattern with two %u (hours, minutes)
+  InMinutes,       // printf pattern with one %u
+  Now,
+  Until,  // printf pattern with one %s (a time)
+  UpNext,
+  EventCount,  // printf pattern with one %u (two or more)
+  OneEvent,
+  ViewList,
+  NoData,
+  ViewToday,
+  Next,
+  Count
+};
+static_assert(static_cast<int>(CalendarLabel::Count) == 25, "LocaleProfile::calendar_labels size");
+
+// Index into LocaleProfile::device_labels.
+enum class DeviceLabel : uint8_t {
+  TypeLock,
+  TypeAlarm,
+  TypeFan,
+  EntityLock,
+  EntityAlarm,
+  EntityFan,
+  OpenDoor,
+  ReallyOpen,
+  DoorOpen,
+  Unlock,
+  Lock,
+  Disarm,
+  ModeHome,
+  ModeAway,
+  ModeNight,
+  ModeVacation,
+  ModeCustom,
+  FanPreset,
+  FanNone,
+  FanOscillate,
+  FanDirection,
+  FanForward,
+  FanReverse,
+  FanSpeed,  // printf pattern with one %u
+  EnterCode,
+  WrongCode,
+  TooManyCodes,  // printf pattern with one %u (seconds)
+  NeedPairAndPassword,
+  NeedPair,
+  NeedPassword,
+  UnlockOff,
+  DisarmOff,
+  TextCodeUnsupported,
+  ResultNotAllowed,
+  ResultBusy,
+  ResultUnsupported,
+  ResultUnavailable,
+  ResultExpired,
+  ResultNoAnswer,
+  ResultFailed,
+  ClockNotSet,
+  NoReaction,  // a sent Lock command the lock never answered with a state
+  Count
+};
+static_assert(static_cast<int>(DeviceLabel::Count) == 42, "LocaleProfile::device_labels size");
 
 // Locale-independent timezone catalog with codes and group assignments.
 // LocaleProfile::timezone_labels supplies display names in the same order.
@@ -707,7 +1211,18 @@ String weather_condition_label(const char* language_code, const String& conditio
 String weather_weekday_short(const char* language_code, const String& iso);
 const char* weather_month_short(const char* language_code, int month);
 const char* weather_today_label(const char* language_code);
+const char* weather_today_button_label(const char* language_code);
 const char* weather_tomorrow_label(const char* language_code);
+// 0 temperature sensor, 1 humidity sensor, 2 the empty "use the weather
+// entity's value" option.
+const char* weather_sensor_label(const char* language_code, uint8_t index);
+const char* power_flow_label(const char* language_code, PowerFlowLabel label);
+const char* vacuum_label(const char* language_code, VacuumLabel label);
+// A Home Assistant vacuum state ("cleaning", ...) as shown; an unknown one as
+// "unknown".
+const char* vacuum_state_label(const char* language_code, const char* state);
+// The Energy popup's period buttons (EnergyPeriodLabel).
+const char* energy_period_label(const char* language_code, EnergyPeriodLabel label);
 const char* climate_tile_type_label(const char* language_code);
 const char* climate_entity_label(const char* language_code);
 const char* climate_target_temperature_label(const char* language_code);
@@ -737,6 +1252,16 @@ const char* binary_sensor_label(const char* language_code, uint8_t index);
 const char* binary_sensor_state_label(const char* language_code,
                                       const String& state,
                                       const String& device_class);
+// Lock, Alarm panel and Fan texts (DeviceLabel) and the translated Home
+// Assistant lock and alarm panel states (raw states stay English; an unknown
+// raw state shows as Unknown).
+const char* device_label(const char* language_code, DeviceLabel label);
+const char* lock_state_label(const char* language_code, const char* state);
+const char* alarm_state_label(const char* language_code, const char* state);
+// Calendar tile and popup texts (CalendarLabel).
+const char* calendar_label(const char* language_code, CalendarLabel label);
+// A month standing alone (1 = January), for headings; "" outside 1..12.
+const char* month_name(const char* language_code, int month);
 
 }  // namespace i18n
 

@@ -1,9 +1,11 @@
 #include "src/core/display/display_manager.h"
+#include "src/core/display/display_flush_gate.h"
 #include "src/core/power/power_manager.h"
 #include "src/core/hardware/board_hal.h"
 #include "src/devices/device_select.h"
 #include "src/devices/guition_esp32_4848s040/s3_diagnostics.h"
 #include "src/core/diagnostics/popup_timing.h"
+#include "src/tiles/config/grid_layout.h"
 #if defined(DEVICE_WAVESHARE_TOUCH_LCD_X) || \
     defined(DEVICE_GUITION_JC1060P470C_FAMILY)
 #include "src/devices/active_device.h"
@@ -25,6 +27,8 @@ lv_color_t* DisplayManager::buf2 = nullptr;
 uint32_t DisplayManager::last_activity_time = 0;
 uint8_t DisplayManager::rotation = 0;
 static bool g_ignore_touch_until_release = false;
+// Last touch read reported a pressed point (loop task only).
+static bool g_touch_held = false;
 static bool g_input_enabled = true;
 static volatile uint16_t g_flush_log_budget = 0;
 static size_t g_buffer_lines = 0;
@@ -36,6 +40,17 @@ static size_t g_reverse_buf_width = 0;
 static constexpr size_t kReverseStripeWidth = 16;
 static constexpr bool kEnableReverseFlushEffect = true;
 static constexpr uintptr_t kCacheLineSize = 64;
+
+// Bytes of a draw buffer band of `lines` rows. LVGL 9.6 rounds the size a
+// band needs up to LV_DRAW_BUF_ALIGN (lv_draw_buf_reshape); a buffer of
+// exactly `lines` rows is then too small whenever a row is not a multiple of
+// it (720 px RGB565 = 1440 bytes on the Waveshare 4B), the first refresh
+// failed LVGL's assert and the boot hung silently. Bands are allocated and
+// reported to LVGL rounded up.
+static size_t draw_buffer_bytes(size_t lines) {
+  const size_t bytes = static_cast<size_t>(grid_layout::screen_w()) * lines * g_bytes_per_pixel;
+  return (bytes + LV_DRAW_BUF_ALIGN - 1) / LV_DRAW_BUF_ALIGN * LV_DRAW_BUF_ALIGN;
+}
 static bool g_reverse_flush_once = false;
 static volatile uint32_t g_fullscreen_flush_seq = 0;
 static size_t g_requested_buffer_lines = 0;
@@ -156,6 +171,9 @@ static void tab5_note_flush(uint32_t pixels, uint32_t flush_us, uint32_t push_us
 // is too scarce we fall back to the previous PSRAM double buffer, so behaviour
 // is never worse than before.
 static constexpr size_t kInternalDrawReserveBytes = 150 * 1024;  // keep free for WiFi/SDIO/lwIP
+// 72 KB on every board. The V2 with 100 KB (b588/b589, 40 rows) hung its PPA
+// rotation on a 614x71 piece of a wide tile drawn alone (crash log, user
+// 2026-10-28); with 72 KB that tile's pieces stay at most 58 rows.
 static constexpr size_t kInternalDrawMaxBytes     = 72 * 1024;   // cap one SRAM band
 static constexpr size_t kInternalDrawMinLines     = 16;          // below this SRAM isn't worth it
 // Restore after OTA preparation: Wi-Fi, MQTT and the server already own
@@ -215,7 +233,7 @@ static bool ensure_reverse_buf() {
     g_reverse_buf_width = 0;
   }
   uint8_t bpp = g_bytes_per_pixel ? g_bytes_per_pixel : 2;
-  const size_t bytes = kReverseStripeWidth * SCREEN_HEIGHT * bpp;
+  const size_t bytes = kReverseStripeWidth * grid_layout::screen_h() * bpp;
   lv_color_t* buf = (lv_color_t*)heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
   if (!buf) {
     buf = (lv_color_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
@@ -285,7 +303,7 @@ bool DisplayManager::allocDrawBuffers(size_t requested_lines, lv_display_render_
     g_bytes_per_pixel = lv_color_format_get_size(lv_display_get_color_format(disp));
     if (g_bytes_per_pixel == 0) g_bytes_per_pixel = 2;
   }
-  const size_t line_bytes = (size_t)SCREEN_WIDTH * g_bytes_per_pixel;
+  const size_t line_bytes = (size_t)grid_layout::screen_w() * g_bytes_per_pixel;
   if (line_bytes == 0) return false;
 
   lv_color_t* nb1 = nullptr;
@@ -310,7 +328,7 @@ bool DisplayManager::allocDrawBuffers(size_t requested_lines, lv_display_render_
   size_t sram_lines = cap_bytes / line_bytes;
   if (sram_lines > requested_lines) sram_lines = requested_lines;
   if (sram_lines >= kInternalDrawMinLines) {
-    nb1 = (lv_color_t*)heap_caps_aligned_alloc(64, line_bytes * sram_lines,
+    nb1 = (lv_color_t*)heap_caps_aligned_alloc(64, draw_buffer_bytes(sram_lines),
                                                MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
     if (nb1) {
       use_lines = sram_lines;
@@ -332,7 +350,7 @@ bool DisplayManager::allocDrawBuffers(size_t requested_lines, lv_display_render_
 
   // 2) Fallback: PSRAM double buffer at the requested size (previous behaviour).
   if (!nb1) {
-    const size_t bytes = line_bytes * requested_lines;
+    const size_t bytes = draw_buffer_bytes(requested_lines);
     nb1 = (lv_color_t*)heap_caps_aligned_alloc(64, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
     nb2 = (lv_color_t*)heap_caps_aligned_alloc(64, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
     if (nb1 && nb2) {
@@ -353,7 +371,7 @@ bool DisplayManager::allocDrawBuffers(size_t requested_lines, lv_display_render_
     single = false;
   }
 
-  const size_t buf_bytes = line_bytes * use_lines;
+  const size_t buf_bytes = draw_buffer_bytes(use_lines);
   lv_display_set_buffers(disp, nb1, nb2, buf_bytes, mode);
 
   if (buf1) heap_caps_free(buf1);
@@ -381,7 +399,7 @@ bool DisplayManager::setBufferLines(size_t lines) {
 }
 
 bool DisplayManager::setSinglePsramBufferLines(size_t lines) {
-  if (!disp || lines == 0 || lines > SCREEN_HEIGHT) return false;
+  if (!disp || lines == 0 || lines > static_cast<size_t>(grid_layout::screen_h())) return false;
   if (g_preserved_draw_buffer_active) {
     if (g_single_psram_draw_buffer && g_buffer_lines == lines && buf1 &&
         !buf2) {
@@ -400,8 +418,7 @@ bool DisplayManager::setSinglePsramBufferLines(size_t lines) {
     if (g_bytes_per_pixel == 0) g_bytes_per_pixel = 2;
   }
 
-  const size_t bytes =
-      static_cast<size_t>(SCREEN_WIDTH) * lines * g_bytes_per_pixel;
+  const size_t bytes = draw_buffer_bytes(lines);
   // On ESP32-P4 the PPA can read cache-synchronised external RAM, but the
   // generic heap does not advertise PSRAM as MALLOC_CAP_DMA. Requiring both
   // capabilities therefore reports zero available bytes and silently kept the
@@ -481,9 +498,7 @@ bool DisplayManager::restoreDrawBufferAfterSinglePsram() {
 
   lv_color_t* temporary_buf1 = buf1;
   lv_color_t* temporary_buf2 = buf2;
-  const size_t restored_bytes =
-      static_cast<size_t>(SCREEN_WIDTH) * g_preserved_buffer_lines *
-      g_bytes_per_pixel;
+  const size_t restored_bytes = draw_buffer_bytes(g_preserved_buffer_lines);
   lv_display_set_buffers(disp, g_preserved_buf1, g_preserved_buf2,
                          restored_bytes, g_preserved_render_mode);
 
@@ -551,7 +566,7 @@ bool DisplayManager::setBufferLines(size_t lines, lv_display_render_mode_t rende
   lv_refr_now(disp);
 
   if (g_requested_buffer_lines == lines && g_render_mode != render_mode && buf1) {
-    const size_t bytes = (size_t)SCREEN_WIDTH * g_buffer_lines * g_bytes_per_pixel;
+    const size_t bytes = draw_buffer_bytes(g_buffer_lines);
     lv_display_set_buffers(disp, buf1, buf2, bytes, render_mode);
     g_render_mode = render_mode;
     Serial.printf("[Display] Render mode changed: %d (lines=%d)\n", (int)render_mode, (int)g_buffer_lines);
@@ -589,6 +604,21 @@ void DisplayManager::setRotation(uint8_t rotation_value) {
   }
 }
 
+void DisplayManager::applyShownScreen() {
+  if (!disp) return;
+  const int32_t w = grid_layout::screen_w();
+  const int32_t h = grid_layout::screen_h();
+  if (lv_display_get_horizontal_resolution(disp) == w && lv_display_get_vertical_resolution(disp) == h) return;
+  // Only a panel that can draw upright gets a turned layout
+  // (grid_layout::switchable); the driver first, then LVGL's screen.
+  BoardHAL::displaySetUpright(grid_layout::turned());
+  lv_display_set_resolution(disp, w, h);
+  // The bands keep their lines at the new width.
+  allocDrawBuffers(static_cast<size_t>(h) / Device::kDisplayFlushBands, g_render_mode);
+  Serial.printf("[Display] Screen %ldx%ld (%s)\n", static_cast<long>(w), static_cast<long>(h),
+                grid_layout::turned() ? "turned" : "panel's own");
+}
+
 void DisplayManager::setRotationFlipped(bool flipped) {
   setRotation(flipped ? Device::kRotationFlipped : Device::kRotationDefault);
 }
@@ -615,6 +645,9 @@ void IRAM_ATTR DisplayManager::flush_cb(lv_display_t *lv_disp, const lv_area_t *
   const bool packed_rows = (stride_bytes == row_bytes);
   const uint32_t area_px = w * h;
   const bool is_last_flush = lv_display_flush_is_last(lv_disp);
+  // The previous band's background copy (display_flush_gate.h) completes
+  // before anything else reaches the panel.
+  display_flush_gate::settle();
   static constexpr uint32_t kMinPixelsForDma = 2048;  // avoid DMA overhead on tiny dirty areas
   static constexpr uint32_t kReverseMinPixels = (SCREEN_WIDTH * SCREEN_HEIGHT) / 8;  // trigger only on large image updates
 #if defined(DEVICE_M5STACKS_TAB5)
@@ -664,7 +697,8 @@ void IRAM_ATTR DisplayManager::flush_cb(lv_display_t *lv_disp, const lv_area_t *
       g_reverse_flush = false;
       g_reverse_flush_once = false;
     }
-    if (area->x1 == 0 && area->y1 == 0 && w == SCREEN_WIDTH && h == SCREEN_HEIGHT) {
+    if (area->x1 == 0 && area->y1 == 0 && w == static_cast<uint32_t>(grid_layout::screen_w()) &&
+        h == static_cast<uint32_t>(grid_layout::screen_h())) {
       g_fullscreen_flush_seq++;
     }
     commit_display_if_last(lv_disp);
@@ -696,6 +730,19 @@ void IRAM_ATTR DisplayManager::flush_cb(lv_display_t *lv_disp, const lv_area_t *
     tab5_cache_us += micros() - step_start_us;
     step_start_us = micros();
 #endif
+    // A band before the frame's last runs on in the background while LVGL
+    // walks the next band (display_flush_gate.h); its draw dispatch waits for
+    // the copy before the first pixel. The last band stays synchronous, so a
+    // frame always ends with every copy done.
+    if (!is_last_flush && display_flush_gate::begin(area->x1, area->y1, static_cast<int32_t>(w),
+                                                    static_cast<int32_t>(h), (const uint16_t*)px_map)) {
+      if (area->x1 == 0 && area->y1 == 0 && w == static_cast<uint32_t>(grid_layout::screen_w()) &&
+          h == static_cast<uint32_t>(grid_layout::screen_h())) {
+        g_fullscreen_flush_seq++;
+      }
+      lv_display_flush_ready(lv_disp);
+      return;
+    }
     BoardHAL::displayPushPixelsDMA(area->x1, area->y1, w, h, (uint16_t*)px_map);
 #if defined(DEVICE_M5STACKS_TAB5)
     tab5_push_us += micros() - step_start_us;
@@ -733,7 +780,8 @@ void IRAM_ATTR DisplayManager::flush_cb(lv_display_t *lv_disp, const lv_area_t *
     }
   }
 
-  if (area->x1 == 0 && area->y1 == 0 && w == SCREEN_WIDTH && h == SCREEN_HEIGHT) {
+  if (area->x1 == 0 && area->y1 == 0 && w == static_cast<uint32_t>(grid_layout::screen_w()) &&
+      h == static_cast<uint32_t>(grid_layout::screen_h())) {
     g_fullscreen_flush_seq++;
   }
   commit_display_if_last(lv_disp);
@@ -754,6 +802,7 @@ void IRAM_ATTR DisplayManager::flush_cb(lv_display_t *lv_disp, const lv_area_t *
 // ========== Touch Callback ==========
 // IRAM_ATTR keeps frequent touch polling in internal RAM for responsive input.
 void IRAM_ATTR DisplayManager::touch_cb(lv_indev_t* indev_drv, lv_indev_data_t *data) {
+  g_touch_held = false;
   // Wake from display sleep only on real touch. The normal loop does not
   // drive this callback during sleep, but lvglServiceDuringBlockingWork()
   // can call lv_timer_handler(), for example while logList() prints a large
@@ -815,9 +864,21 @@ void IRAM_ATTR DisplayManager::touch_cb(lv_indev_t* indev_drv, lv_indev_data_t *
     }
 #endif
 
+    // The upright layout (grid_layout::turned()): the drivers report the
+    // landscape UI's point; every P4 driver turns the landscape UI into its
+    // upright panel the same way (landscape (x, y) at panel (w - 1 - y, x),
+    // with 180 the mirrored place in both), and the upright UI is the panel
+    // itself, so the upright point is the same turn for every rotation.
+    if (grid_layout::turned()) {
+      const int16_t landscape_x = mapped_x;
+      mapped_x = static_cast<int16_t>(grid_layout::screen_w() - 1 - mapped_y);
+      mapped_y = landscape_x;
+    }
+
     data->state = LV_INDEV_STATE_PRESSED;
     data->point.x = mapped_x;
     data->point.y = mapped_y;
+    g_touch_held = true;
 
     // Reset the activity timer and wake the power manager.
     last_activity_time = millis();
@@ -872,6 +933,9 @@ bool DisplayManager::init() {
   }
 
   lv_display_set_flush_cb(disp, flush_cb);
+  // A board that copies bands in the background (display_flush_gate.h) gets
+  // its gate in front of LVGL's draw unit; others keep synchronous flushes.
+  display_flush_gate::install_dispatch();
 
 #if defined(DEVICE_M5STACKS_TAB5)
   lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565_SWAPPED);
@@ -939,6 +1003,10 @@ bool DisplayManager::init() {
 
   Serial.println("[OK] Display Manager initialized");
   return true;
+}
+
+bool DisplayManager::isTouchHeld() {
+  return g_touch_held;
 }
 
 void DisplayManager::resetActivityTimer() {

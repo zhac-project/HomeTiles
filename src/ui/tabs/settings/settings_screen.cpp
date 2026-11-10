@@ -1,0 +1,2052 @@
+#include "src/ui/tabs/settings/settings_screen.h"
+
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+
+#include "src/fonts/ui_fonts.h"
+#include "src/tiles/icons/mdi_icons.h"
+#include "src/ui/startup/hometiles_logo.h"
+#include "src/ui/tabs/settings/settings_entry.h"
+#include "src/ui/tabs/settings/settings_model.h"
+#include "src/ui/tabs/settings/settings_parts.h"
+#include "src/ui/tabs/settings/settings_style.h"
+#include "src/ui/tabs/settings/setup_screen.h"
+#include "src/ui/shared/text_scroll.h"
+#include "src/ui/shared/ui_theme.h"
+
+// The layout of the mockup (build/design-mockups/settings/settings-menu.html,
+// head=row with the headings in the groups, 2026-10-07): Settings is a popup
+// card at full size with the popup head (gear circle and title on the left,
+// the X in the corner). Landscape panels show the four categories as tiles in
+// the first two grid columns, sharing the height evenly (the one exception to
+// the grid), with the page beside them; square panels put them as round tabs
+// into the head beside the X; portrait panels show them as one row of 1x1
+// tiles above the page. The page has no card: its groups are the surfaces,
+// one grid gap apart and from the frame. Only the open page is built, while
+// Settings shows.
+namespace settings_screen {
+namespace {
+
+using settings_style::Colors;
+using settings_style::Tone;
+
+// The categories in their fixed order (mockup CATS).
+enum class Category : uint8_t { Display = 0, Wifi, Localization, System };
+constexpr uint8_t kCategoryCount = 4;
+constexpr uint32_t kCategoryColors[kCategoryCount] = {settings_style::kDisplayColor, settings_style::kWifiColor,
+                                                      settings_style::kLocalizationColor, settings_style::kSystemColor};
+
+// By the screen as this boot shows it: an upright layout on a landscape
+// panel takes the upright Settings (grid_layout::screen_w()).
+enum class Layout : uint8_t { Split, Tabs, Portrait };
+Layout layout() {
+  const int w = grid_layout::screen_w();
+  const int h = grid_layout::screen_h();
+  return w > h ? Layout::Split : h > w ? Layout::Portrait : Layout::Tabs;
+}
+
+struct CategoryView {
+  lv_obj_t* box;
+  lv_obj_t* disc;
+  lv_obj_t* icon;
+  lv_obj_t* title;
+  lv_obj_t* line;
+};
+
+lv_obj_t* g_panel = nullptr;
+CategoryView g_views[kCategoryCount] = {};
+lv_obj_t* g_bar_title = nullptr;
+lv_obj_t* g_close = nullptr;
+// The card's body: holds the open page.
+// The page card and its body (the open page).
+lv_obj_t* g_card = nullptr;
+lv_obj_t* g_page = nullptr;
+int g_page_width = 0;
+bool g_page_built = false;
+Category g_category = Category::Display;
+// What the frame was built with: another tile color, Circle strength or
+// language rebuilds it when Settings opens next.
+uint32_t g_built_card = 0xFFFFFFFF;
+uint8_t g_built_glow = 0xFF;
+const i18n::Strings* g_built_text = nullptr;
+// Refreshes the category lines (the time on Localization) while Settings shows.
+lv_timer_t* g_lines_timer = nullptr;
+
+// Display page.
+lv_obj_t* g_brightness_value = nullptr;
+lv_obj_t* g_volume_value = nullptr;
+lv_obj_t* g_sleep_value = nullptr;
+lv_obj_t* g_saver_value = nullptr;
+lv_obj_t* g_saver_brightness_value = nullptr;
+lv_obj_t* g_rotation_segment = nullptr;
+
+// Localization page: one dropdown row per list.
+struct LocaleRow {
+  lv_obj_t* row;
+  lv_obj_t* value;
+  lv_obj_t* chevron;
+};
+LocaleRow g_locale_rows[settings_model::kLocaleListCount] = {};
+int g_card_width = 0;
+
+// System page: what it was built for (a change rebuilds it), the labels that
+// count down, the download bar, the poll timer while it shows.
+uint32_t g_system_key = 0xFFFFFFFF;
+lv_obj_t* g_pair_time = nullptr;
+lv_obj_t* g_password_time = nullptr;
+lv_obj_t* g_progress_fill = nullptr;
+lv_timer_t* g_page_timer = nullptr;
+// The open dialog (on the panel, over a veil).
+enum class Dialog : uint8_t { None, Unpair, RemovePassword, Restart, GitHub, Pairing };
+Dialog g_dialog = Dialog::None;
+lv_obj_t* g_dialog_root = nullptr;
+settings_model::PairState g_dialog_pair = settings_model::PairState::NotPaired;
+
+Colors colors() { return settings_style::colors(g_built_card); }
+
+const char* category_title(Category category) {
+  const i18n::Strings& s = settings_model::text();
+  switch (category) {
+    case Category::Display:
+      // With the Sound group (#123) the page holds the speaker too.
+      return settings_model::sound_values().speaker ? s.settings_display_sound : s.display_label;
+    case Category::Wifi:
+      // Panels that can use Ethernet name the whole network.
+      return settings_model::ethernet_panel() ? s.settings_network : s.wifi_label;
+    case Category::Localization:
+      return s.admin_settings_language;
+    case Category::System:
+      return s.settings_system;
+  }
+  return "";
+}
+
+const char* category_icon(Category category) {
+  switch (category) {
+    case Category::Display:
+      return settings_model::sound_values().speaker ? "monitor-speaker" : "monitor";
+    case Category::Wifi:
+      return settings_model::ethernet_active()     ? "ethernet"
+             : settings_model::access_point_on()   ? "access-point"
+             : settings_model::network_connected() ? "wifi"
+                                                   : "wifi-off";
+    case Category::Localization:
+      return "translate";
+    case Category::System:
+      return "chip";
+  }
+  return "cog";
+}
+
+// A sleep or screensaver step as the mockup writes it: "30 s", "5 min",
+// "1 h", or Never past the last step.
+void format_step(char* buf, size_t len, int index) {
+  if (index >= settings_model::sleep_steps()) {
+    snprintf(buf, len, "%s", settings_model::text().sleep_never);
+    return;
+  }
+  const unsigned seconds = settings_model::sleep_step_seconds(index);
+  if (seconds < 60) {
+    snprintf(buf, len, "%u s", seconds);
+  } else if (seconds < 3600) {
+    snprintf(buf, len, "%u min", seconds / 60);
+  } else {
+    snprintf(buf, len, "%u h", seconds / 3600);
+  }
+}
+
+// The grey line under a category's name (mockup CATS sub): brightness and
+// sleep, the network, language and time, the version or a found update.
+void category_line(Category category, char* buf, size_t len, bool* warn) {
+  *warn = false;
+  const i18n::Strings& s = settings_model::text();
+  switch (category) {
+    case Category::Display: {
+      char step[24];
+      format_step(step, sizeof(step), settings_model::saved_sleep_index());
+      // "Sleep never": the step's first letter in lower case (ASCII only).
+      if (step[0] >= 'A' && step[0] <= 'Z') step[0] = static_cast<char>(step[0] - 'A' + 'a');
+      char sleep[48];
+      snprintf(sleep, sizeof(sleep), s.settings_sleep_summary_fmt, step);
+      snprintf(buf, len, "%d %% \xC2\xB7 %s", settings_model::saved_brightness(), sleep);
+      return;
+    }
+    case Category::Wifi:
+      if (settings_model::ethernet_active()) {
+        snprintf(buf, len, "%s", s.settings_ethernet);
+      } else if (settings_model::access_point_on()) {
+        snprintf(buf, len, "%s", s.settings_access_point_on);
+      } else if (settings_model::network_connected()) {
+        settings_model::network_name(buf, len);
+      } else {
+        snprintf(buf, len, "%s", s.settings_not_connected);
+      }
+      return;
+    case Category::Localization: {
+      char time[16];
+      if (settings_model::time_text(time, sizeof(time))) {
+        snprintf(buf, len, "%s \xC2\xB7 %s", settings_model::language_name(), time);
+      } else {
+        snprintf(buf, len, "%s", settings_model::language_name());
+      }
+      return;
+    }
+    case Category::System:
+      if (settings_model::update_available()) {
+        *warn = true;
+        snprintf(buf, len, "%s", s.settings_update_available);
+      } else {
+        snprintf(buf, len, "%s", settings_model::firmware_version());
+      }
+      return;
+  }
+  buf[0] = '\0';
+}
+
+void on_lines_timer(lv_timer_t*) { refresh_lines(); }
+
+// The light theme fills the selected category like a tinted tile (user
+// 2026-10-10: the dark theme's recipe, lighter; tone_color::jewel_card), its
+// circle one step above, its icon in its own color and its labels white
+// (ui_theme::kDarkTintedSurface). The others stay light.
+int8_t category_surface(uint8_t index) {
+  return ui_theme::theme_light() && index == static_cast<uint8_t>(g_category) ? ui_theme::kDarkTintedSurface : -1;
+}
+
+void refresh_line(uint8_t index);
+
+// Selected = the tile in its color (tile color "From icon") or the tab in
+// its circle; the others on the plain card.
+void style_category(uint8_t index) {
+  CategoryView& view = g_views[index];
+  if (!view.box) return;
+  const bool selected = index == static_cast<uint8_t>(g_category);
+  const uint32_t color = kCategoryColors[index];
+  const uint32_t card = g_built_card;
+  if (category_surface(index) == ui_theme::kDarkTintedSurface) {
+    const ui_theme::SurfaceScope surface(ui_theme::kDarkTintedSurface);
+    const uint32_t tile = tone_color::jewel_card(color, 0);
+    const tone_color::Fill fill = tone_color::jewel_fill(tile, color, ui_surface_style::icon_glow_percent(), 0);
+    // Pressed like a tile card (apply_card_background).
+    const uint32_t pressed = tone_color::pressed_card(tile);
+    lv_obj_set_style_bg_color(view.box, lv_color_hex(tile), 0);
+    lv_obj_set_style_bg_opa(view.box, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(view.box, lv_color_hex(pressed), LV_STATE_PRESSED);
+    if (view.disc) lv_obj_set_style_bg_color(view.disc, lv_color_hex(fill.disc), 0);
+    if (view.icon) lv_obj_set_style_text_color(view.icon, lv_color_hex(color), 0);
+    if (view.title) lv_obj_set_style_text_color(view.title, lv_color_hex(ui_theme::text()), 0);
+    refresh_line(index);
+    return;
+  }
+  // Back from the filled look: the theme's text.
+  if (view.title) lv_obj_set_style_text_color(view.title, lv_color_hex(ui_theme::text()), 0);
+  refresh_line(index);
+  if (layout() == Layout::Tabs) {
+    const Tone tone = settings_style::tone(card, color);
+    lv_obj_set_style_bg_color(view.box, lv_color_hex(tone.disc), 0);
+    lv_obj_set_style_bg_opa(view.box, selected ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_color(view.box, lv_color_hex(selected ? tone.disc : colors().button), LV_STATE_PRESSED);
+    if (view.icon) lv_obj_set_style_text_color(view.icon, lv_color_hex(tone.icon), 0);
+    return;
+  }
+  // The light theme marks the selected category with a "container" tint,
+  // twice a tile's, so it stands off the grey screen like Material 3's
+  // selected surfaces (a tile's 16 % nearly matched the screen).
+  const uint32_t tile = !selected                ? card
+                        : ui_theme::light() ? tile_tint::mix(ui_theme::card(), color, 32)
+                                            : settings_style::from_icon_card(card, color);
+  const uint32_t pressed = selected ? settings_style::from_icon_card(card, color, true) : tone_color::pressed_card(card);
+  const Tone tone = settings_style::tone(tile, color);
+  lv_obj_set_style_bg_color(view.box, lv_color_hex(tile), 0);
+  lv_obj_set_style_bg_color(view.box, lv_color_hex(pressed), LV_STATE_PRESSED);
+  if (view.disc) lv_obj_set_style_bg_color(view.disc, lv_color_hex(tone.disc), 0);
+  if (view.icon) lv_obj_set_style_text_color(view.icon, lv_color_hex(tone.icon), 0);
+}
+
+// A circle with an MDI icon in its middle.
+lv_obj_t* circle(lv_obj_t* parent, int x, int y, int diameter, const char* icon, uint32_t icon_color) {
+  lv_obj_t* obj = settings_parts::plain(parent);
+  lv_obj_set_pos(obj, x, y);
+  lv_obj_set_size(obj, diameter, diameter);
+  lv_obj_set_style_radius(obj, LV_RADIUS_CIRCLE, 0);
+  lv_obj_t* label = lv_label_create(obj);
+  lv_label_set_text(label, getMdiChar(icon).c_str());
+  if (FONT_MDI_ICONS) lv_obj_set_style_text_font(label, FONT_MDI_ICONS, 0);
+  lv_obj_set_style_text_color(label, lv_color_hex(icon_color), 0);
+  lv_obj_center(label);
+  return obj;
+}
+
+// A round bar button: no fill at rest, the button step while pressed.
+void make_round_button(lv_obj_t* obj, lv_event_cb_t on_click, void* user_data) {
+  lv_obj_add_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_bg_color(obj, lv_color_hex(colors().button), LV_STATE_PRESSED);
+  lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_STATE_PRESSED);
+  lv_obj_set_ext_click_area(obj, settings_style::tile_inset());
+  lv_obj_add_event_cb(obj, on_click, LV_EVENT_CLICKED, user_data);
+}
+
+void on_close_clicked(lv_event_t*) { settings_model::close_settings(); }
+
+void select_category(Category category);
+
+// A category tile or tab opens its page in the card.
+void on_category_clicked(lv_event_t* e) {
+  const uintptr_t raw = reinterpret_cast<uintptr_t>(lv_event_get_user_data(e));
+  if (raw >= kCategoryCount) return;
+  select_category(static_cast<Category>(raw));
+}
+
+// A category tile: circle, name and the grey line (mockup catTileBig).
+void build_category_tile(lv_obj_t* panel, uint8_t index, int x, int y, int w, int h) {
+  CategoryView& view = g_views[index];
+  const Category category = static_cast<Category>(index);
+  view.box = settings_parts::plain(panel);
+  lv_obj_add_flag(view.box, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_pos(view.box, x, y);
+  lv_obj_set_size(view.box, w, h);
+  lv_obj_set_style_bg_opa(view.box, LV_OPA_COVER, 0);
+  settings_style::apply_tile_radius(view.box);
+  lv_obj_add_event_cb(view.box, on_category_clicked, LV_EVENT_CLICKED,
+                      reinterpret_cast<void*>(static_cast<uintptr_t>(index)));
+  const int disc = settings_style::kCategoryDisc;
+  const int x0 = settings_style::kCategoryPad;
+  view.disc = circle(view.box, x0, (h - disc) / 2, disc, category_icon(category), ui_theme::text());
+  lv_obj_set_style_bg_opa(view.disc, LV_OPA_COVER, 0);
+  view.icon = lv_obj_get_child(view.disc, 0);
+  // Name and line in line boxes of 1.21 and 1.3 times their font size,
+  // centered together on the tile.
+  const int text_x = x0 + disc + settings_style::kCategoryTextGap;
+  const int text_w = w - text_x - x0;
+  const int box1 = (settings_style::kRowFontPx * 121 + 50) / 100;
+  const int box2 = (settings_style::kSmallFontPx * 13 + 5) / 10;
+  const int top = (h - box1 - box2 + 1) / 2;
+  view.title = lv_label_create(view.box);
+  lv_label_set_text(view.title, category_title(category));
+  lv_label_set_long_mode(view.title, LV_LABEL_LONG_DOT);
+  lv_obj_set_size(view.title, text_w, lv_font_get_line_height(settings_style::row_font()));
+  lv_obj_set_style_text_font(view.title, settings_style::row_font(), 0);
+  lv_obj_set_style_text_color(view.title, lv_color_hex(ui_theme::text()), 0);
+  lv_obj_set_pos(view.title, text_x,
+                 settings_parts::browser_label_y(settings_style::row_font(), settings_style::kRowFontPx, top, box1));
+  view.line = lv_label_create(view.box);
+  lv_label_set_text(view.line, "");
+  lv_label_set_long_mode(view.line, LV_LABEL_LONG_DOT);
+  // One line each, ending in dots (a fixed height; LVGL wraps otherwise).
+  lv_obj_set_size(view.line, text_w, lv_font_get_line_height(settings_style::small_font()));
+  lv_obj_set_style_text_font(view.line, settings_style::small_font(), 0);
+  lv_obj_set_pos(view.line, text_x,
+                 settings_parts::browser_label_y(settings_style::small_font(), settings_style::kSmallFontPx,
+                                                 top + box1, box2));
+}
+
+// ---------- Display page ----------
+// Screen: Brightness, Sleep, Rotation, Design; Sound (boards with a speaker,
+// #123): Volume, Microphone; Screensaver: Starts after, Brightness (mockup
+// pageDisplay). All sliders start at the same x; the
+// rotation offers the quarter turns where the panel supports them.
+
+void clear_display_refs() {
+  g_volume_value = nullptr;
+  g_brightness_value = nullptr;
+  g_sleep_value = nullptr;
+  g_saver_value = nullptr;
+  g_saver_brightness_value = nullptr;
+  g_rotation_segment = nullptr;
+}
+
+void set_percent_text(lv_obj_t* label, int percent) {
+  if (!label) return;
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%d %%", percent);
+  lv_label_set_text(label, buf);
+}
+
+void set_step_text(lv_obj_t* label, int index) {
+  if (!label) return;
+  char buf[24];
+  format_step(buf, sizeof(buf), index);
+  lv_label_set_text(label, buf);
+}
+
+void on_brightness(lv_obj_t*, int32_t value, bool final) {
+  set_percent_text(g_brightness_value, value);
+  settings_model::brightness_changed(value, final);
+  if (final) refresh_lines();
+}
+
+void on_sleep(lv_obj_t*, int32_t value, bool final) {
+  set_step_text(g_sleep_value, value);
+  settings_model::sleep_changed(value, final);
+  if (final) refresh_lines();
+}
+
+void on_saver(lv_obj_t*, int32_t value, bool final) {
+  set_step_text(g_saver_value, value);
+  settings_model::saver_changed(value, final);
+}
+
+void on_saver_brightness(lv_obj_t*, int32_t value, bool final) {
+  set_percent_text(g_saver_brightness_value, value);
+  settings_model::saver_brightness_changed(value, final);
+}
+
+void on_volume(lv_obj_t*, int32_t value, bool final) {
+  set_percent_text(g_volume_value, value);
+  settings_model::volume_changed(value, final);
+}
+
+void build_page();
+
+// The switch shows its new state after a rebuild of the page, which keeps its
+// scroll position.
+void rebuild_display_async(void*) {
+  if (!g_page || g_category != Category::Display) return;
+  const int32_t scroll = lv_obj_get_scroll_y(g_page);
+  build_page();
+  lv_obj_update_layout(g_page);
+  lv_obj_scroll_to_y(g_page, scroll, LV_ANIM_OFF);
+}
+
+void on_microphone(lv_event_t*) {
+  settings_model::microphone_selected(!settings_model::sound_values().mic_on);
+  // The page is rebuilt, the touched switch with it: after the event.
+  lv_async_call(rebuild_display_async, nullptr);
+}
+
+}  // namespace
+
+lv_obj_t* rotation_segment(lv_obj_t* row, uint32_t track) {
+  static const char* const kQuarterTurns[] = {"0\xC2\xB0", "90\xC2\xB0", "180\xC2\xB0", "270\xC2\xB0"};
+  static const char* const kFlip[] = {"0\xC2\xB0", "180\xC2\xB0"};
+  const auto on_rotation = [](lv_obj_t*, uint8_t index) { settings_model::rotation_selected(index); };
+  if (settings_model::quarter_turns()) {
+    return settings_parts::segment(row, kQuarterTurns, 4, settings_model::rotation_index(), track, on_rotation,
+                                   settings_style::kQuarterSegmentMinWidth, settings_style::kQuarterSegmentPad);
+  }
+  return settings_parts::segment(row, kFlip, 2, settings_model::rotation_index(), track, on_rotation);
+}
+
+namespace {
+
+// One slider length per panel: what a row leaves beside the longest slider
+// name (+30 % headroom), so every slider starts at the same x (mockup
+// applyProfile).
+int display_slider_width(int page_width) {
+  const i18n::Strings& s = settings_model::text();
+  int name = 0;
+  for (const char* text : {s.settings_brightness, s.settings_volume, s.settings_sleep, s.settings_starts_after}) {
+    const int width = settings_parts::text_width(settings_style::row_font(), text);
+    if (width > name) name = width;
+  }
+  name = name * 13 / 10;
+  const int room = page_width - settings_style::kRowPadLeft - settings_style::kRowPadRight -
+                   settings_parts::icon_width() - 3 * settings_style::kRowGap -
+                   settings_style::kValueWidth - name;
+  int width = room < settings_style::kSliderMaxWidth ? room : settings_style::kSliderMaxWidth;
+  if (width < settings_style::kSliderHeight * 3) width = settings_style::kSliderHeight * 3;
+  return width;
+}
+
+// A slider row: grey icon, name, slider in the page color on its control
+// track (the Light popup's brightness track), value.
+lv_obj_t* display_slider_row(lv_obj_t* group, const char* icon, const char* title, int width, int32_t min,
+                             int32_t max, int32_t value, settings_parts::SliderCallback on_change,
+                             lv_obj_t** value_label) {
+  const Colors palette = colors();
+  const Tone tone = settings_style::tone(palette.card, settings_style::kDisplayColor);
+  settings_parts::Row row = settings_parts::row(group, icon, title);
+  lv_obj_t* slider = settings_parts::slider(row.row, width, min, max, value, settings_style::kDisplayColor,
+                                            tone.control, palette.card, on_change);
+  *value_label = settings_parts::value_label(row.row, "");
+  return slider;
+}
+
+void build_display_page(lv_obj_t* page) {
+  const i18n::Strings& s = settings_model::text();
+  const settings_model::DisplayValues values = settings_model::display_values();
+  const Colors palette = colors();
+  const int width = display_slider_width(g_page_width);
+  const int never = settings_model::sleep_steps();
+
+  settings_parts::section(page, s.settings_screen, true);
+  lv_obj_t* screen = settings_parts::group(page, palette);
+  display_slider_row(screen, "brightness-6", s.settings_brightness, width, values.brightness_min,
+                     values.brightness_max, values.brightness, on_brightness, &g_brightness_value);
+  set_percent_text(g_brightness_value, values.brightness);
+  display_slider_row(screen, "power-sleep", s.settings_sleep, width, 0, never, values.sleep_index, on_sleep,
+                     &g_sleep_value);
+  set_step_text(g_sleep_value, values.sleep_index);
+  settings_parts::Row rotation = settings_parts::row(screen, "screen-rotation", s.settings_rotation);
+  // Controls sit one step above the group (the tile color).
+  g_rotation_segment = rotation_segment(rotation.row, palette.group);
+  // The look (user 2026-10-14): Dark, Light, Automatic like the Web Admin's
+  // Design, applied at once.
+  settings_parts::Row design = settings_parts::row(screen, "theme-light-dark", s.theme_label);
+  const char* const themes[] = {s.theme_dark, s.theme_light, s.theme_auto};
+  settings_parts::segment(design.row, themes, 3, settings_model::theme_choice(), palette.group,
+                          [](lv_obj_t*, uint8_t index) { settings_model::theme_selected(index); });
+
+  // Sound (#123), on the boards with a speaker: the volume with the usual
+  // slider, the microphone with the hotspot's switch.
+  const settings_model::SoundValues sound = settings_model::sound_values();
+  if (sound.speaker) {
+    settings_parts::section(page, s.settings_sound, false);
+    lv_obj_t* audio = settings_parts::group(page, palette);
+    display_slider_row(audio, "volume-high", s.settings_volume, width, 0, 100, sound.volume, on_volume,
+                       &g_volume_value);
+    set_percent_text(g_volume_value, sound.volume);
+    if (sound.microphone) {
+      settings_parts::Row mic = settings_parts::row(audio, "microphone", s.settings_microphone);
+      settings_parts::toggle(mic.row, sound.mic_on, settings_style::kDisplayColor, palette.group, true, on_microphone,
+                             nullptr);
+    }
+  }
+
+  settings_parts::section(page, s.settings_screensaver, false);
+  lv_obj_t* saver = settings_parts::group(page, palette);
+  display_slider_row(saver, "timer-outline", s.settings_starts_after, width, 0, never, values.saver_index, on_saver,
+                     &g_saver_value);
+  set_step_text(g_saver_value, values.saver_index);
+  display_slider_row(saver, "brightness-4", s.settings_brightness, width, values.saver_brightness_min,
+                     values.saver_brightness_max, values.saver_brightness, on_saver_brightness,
+                     &g_saver_brightness_value);
+  set_percent_text(g_saver_brightness_value, values.saver_brightness);
+}
+
+// ---------- Localization page ----------
+// Language, Time zone, Time format, Date format, Keyboard as dropdown rows
+// (mockup pageLocalization, no Preview group): the value on the right, or
+// under the label on narrow cards; a tap opens the option list.
+
+using settings_model::LocaleList;
+
+void clear_locale_refs() {
+  settings_parts::close_options();
+  for (LocaleRow& row : g_locale_rows) row = {};
+}
+
+}  // namespace
+
+const char* locale_title(LocaleList list) {
+  const i18n::Strings& s = settings_model::text();
+  switch (list) {
+    case LocaleList::Language:
+      return s.settings_language;
+    case LocaleList::TimeZone:
+      return s.settings_time_zone;
+    case LocaleList::TimeFormat:
+      return s.settings_time_format;
+    case LocaleList::DateFormat:
+      return s.settings_date_format;
+    case LocaleList::Keyboard:
+      return s.settings_keyboard;
+  }
+  return "";
+}
+
+const char* locale_icon(LocaleList list) {
+  switch (list) {
+    case LocaleList::Language:
+      return "translate";
+    case LocaleList::TimeZone:
+      return "earth";
+    case LocaleList::TimeFormat:
+      return "clock-outline";
+    case LocaleList::DateFormat:
+      return "calendar-blank-outline";
+    case LocaleList::Keyboard:
+      return "keyboard-outline";
+  }
+  return "translate";
+}
+
+const char* locale_value(LocaleList list) {
+  return settings_model::locale_option(list, settings_model::locale_selected(list));
+}
+
+namespace {
+
+const char* option_text(uint8_t tag, uint8_t index) {
+  return settings_model::locale_option(static_cast<LocaleList>(tag), index);
+}
+
+void open_locale_list(uint8_t index);
+
+void set_chevron(uint8_t index, bool up) {
+  if (index >= settings_model::kLocaleListCount || !g_locale_rows[index].chevron) return;
+  lv_label_set_text(g_locale_rows[index].chevron, getMdiChar(up ? "chevron-up" : "chevron-down").c_str());
+}
+
+// A tap beside the list closed it; one on another dropdown row opens that
+// row's list right away (mockup: the same tap switches lists).
+void on_options_closed(uint8_t tag, const lv_point_t* tapped) {
+  set_chevron(tag, false);
+  if (!tapped) return;
+  for (uint8_t i = 0; i < settings_model::kLocaleListCount; ++i) {
+    lv_obj_t* row = g_locale_rows[i].row;
+    if (i == tag || !row) continue;
+    lv_area_t area;
+    lv_obj_get_coords(row, &area);
+    if (tapped->x >= area.x1 && tapped->x <= area.x2 && tapped->y >= area.y1 && tapped->y <= area.y2) {
+      open_locale_list(i);
+      return;
+    }
+  }
+}
+
+void on_option_picked(uint8_t tag, uint8_t index) {
+  const LocaleList list = static_cast<LocaleList>(tag);
+  if (index == settings_model::locale_selected(list)) return;
+  // A new language rebuilds the whole screen in it (texts_changed).
+  settings_model::locale_selected_changed(list, index);
+  if (tag < settings_model::kLocaleListCount && g_locale_rows[tag].value) {
+    lv_label_set_text(g_locale_rows[tag].value, locale_value(list));
+  }
+  refresh_lines();
+}
+
+void open_locale_list(uint8_t index) {
+  if (index >= settings_model::kLocaleListCount || !g_locale_rows[index].row || !g_page) return;
+  const LocaleList list = static_cast<LocaleList>(index);
+  settings_parts::OptionList spec = {};
+  spec.host = g_panel;
+  spec.row = g_locale_rows[index].row;
+  lv_obj_update_layout(g_panel);
+  lv_obj_get_coords(g_page, &spec.bounds);
+  spec.tag = index;
+  spec.count = settings_model::locale_option_count(list);
+  spec.selected = settings_model::locale_selected(list);
+  spec.card = g_built_card;
+  spec.selected_color = settings_style::tone(g_built_card, settings_style::kLocalizationColor).disc;
+  spec.text_x = settings_style::kRowPadLeft + settings_parts::icon_width() + settings_style::kRowGap;
+  spec.handler = {option_text, on_option_picked, on_options_closed};
+  settings_parts::open_options(spec);
+  set_chevron(index, true);
+}
+
+void on_locale_row_clicked(lv_event_t* e) {
+  open_locale_list(static_cast<uint8_t>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e))));
+}
+
+void build_localization_page(lv_obj_t* page) {
+  const Colors palette = colors();
+  // Narrow cards put the value under the label, so long translations never
+  // meet it (mockup P.stack).
+  const bool stacked = g_card_width < settings_style::kStackedCardWidth;
+  const int value_width = (g_page_width - settings_style::kRowPadLeft - settings_style::kRowPadRight) / 2;
+  lv_obj_t* group = settings_parts::group(page, palette);
+  for (uint8_t i = 0; i < settings_model::kLocaleListCount; ++i) {
+    const LocaleList list = static_cast<LocaleList>(i);
+    LocaleRow& view = g_locale_rows[i];
+    settings_parts::Row row =
+        settings_parts::row(group, locale_icon(list), locale_title(list), stacked ? locale_value(list) : nullptr);
+    view.row = row.row;
+    view.value = stacked ? row.sub : settings_parts::trailing_text(row.row, locale_value(list), value_width);
+    view.chevron = settings_parts::trailing_icon(row.row, "chevron-down");
+    settings_parts::make_tap(row.row, palette.button, on_locale_row_clicked,
+                             reinterpret_cast<void*>(static_cast<uintptr_t>(i)));
+  }
+}
+
+// ---------- System page ----------
+// The HomeTiles head (logo, name and version, the device or the update's
+// state, the update button), Connection (Home Assistant and the panel's
+// address), Security (Pairing, Web Admin password), then Setup, Restart and
+// GitHub at the card's bottom (mockup pageSystem). Questions, the pairing
+// number and the GitHub QR code open dialogs (mockup dialog()).
+
+using settings_model::PairState;
+using settings_model::SystemValues;
+using settings_model::UpdateState;
+
+// The line under Home Assistant: the way to the Bridge (bridge_route()).
+lv_obj_t* g_route_label = nullptr;
+
+enum class SystemAction : uint8_t { Update, Pair, Unpair, Allow, RemovePassword, Setup, Restart, GitHub };
+enum class DialogAction : uint8_t { Close, Unpair, RemovePassword, Restart, CancelPairing, ConfirmPairing };
+
+void build_page();
+void system_tick();
+
+void clear_system_refs() {
+  g_pair_time = nullptr;
+  g_password_time = nullptr;
+  g_progress_fill = nullptr;
+  g_route_label = nullptr;
+  g_system_key = 0xFFFFFFFF;
+}
+
+// Inside a touch on the dialog it goes after the event.
+void close_dialog(bool from_event = false) {
+  lv_obj_t* root = g_dialog_root;
+  g_dialog_root = nullptr;
+  g_dialog = Dialog::None;
+  if (!root) return;
+  // Only the card's area is drawn again, not the screen.
+  settings_parts::conceal(root, lv_obj_get_child(root, 0));
+  if (from_event) {
+    lv_obj_delete_async(root);
+  } else {
+    lv_obj_delete(root);
+  }
+}
+
+bool address_known() {
+  char address[48];
+  return settings_model::panel_address(address, sizeof(address));
+}
+
+// What the page shows apart from the countdowns, the download bar and the
+// address text; a change rebuilds it.
+uint32_t system_key(const SystemValues& v) {
+  return static_cast<uint32_t>(v.update) | static_cast<uint32_t>(v.pairing) << 4 | (v.connected ? 1u : 0u) << 8 |
+         (v.password_on ? 1u : 0u) << 9 | (v.password_window ? 1u : 0u) << 10 |
+         (settings_model::pairing_note() ? 1u : 0u) << 11 | (address_known() ? 1u : 0u) << 12;
+}
+
+void set_countdown(lv_obj_t* label, int seconds) {
+  if (!label) return;
+  char buf[12] = "";
+  if (seconds > 0) snprintf(buf, sizeof(buf), "%d:%02d", seconds / 60, seconds % 60);
+  if (strcmp(lv_label_get_text(label), buf) != 0) lv_label_set_text(label, buf);
+}
+
+void set_progress(int percent) {
+  if (!g_progress_fill) return;
+  if (percent < 0) percent = 0;
+  if (percent > 100) percent = 100;
+  const int width = settings_style::kProgressWidth * percent / 100;
+  if (lv_obj_get_style_width(g_progress_fill, LV_PART_MAIN) != width) lv_obj_set_width(g_progress_fill, width);
+}
+
+void color_text(lv_obj_t* label, uint32_t color) {
+  if (!label) return;
+  lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
+  lv_obj_set_style_text_opa(label, LV_OPA_COVER, 0);
+}
+
+// A state on the right of a row in green with its icon ("Connected" with a
+// check; "Paired" and "On" with a shield, so security reads at a glance,
+// user 2026-10-06), and a chevron when a tap on the row asks to turn it off.
+void good_state(lv_obj_t* row, const char* text, const char* icon, bool chevron) {
+  color_text(settings_parts::trailing_text(row, text, g_page_width / 2), settings_style::good_color());
+  color_text(settings_parts::trailing_icon(row, icon), settings_style::good_color());
+  if (chevron) settings_parts::trailing_icon(row, "chevron-right");
+}
+
+// The grey countdown of a two-minute window on the right of a row.
+lv_obj_t* countdown(lv_obj_t* row, int seconds) {
+  lv_obj_t* label = settings_parts::trailing_text(row, "", 0);
+  lv_obj_set_width(label, LV_SIZE_CONTENT);
+  set_countdown(label, seconds);
+  return label;
+}
+
+void* action_data(SystemAction action) { return reinterpret_cast<void*>(static_cast<uintptr_t>(action)); }
+
+void on_system_action(lv_event_t* e);
+
+lv_obj_t* row_button(lv_obj_t* row, const char* text, const char* icon, settings_parts::ButtonKind kind,
+                     SystemAction action) {
+  return settings_parts::button(row, text, icon, kind, settings_style::kSystemColor, colors(),
+                                settings_style::kButtonHeight, false, on_system_action, action_data(action));
+}
+
+}  // namespace
+
+// Pair and Allow: a little taller than the other row buttons and one width,
+// the longest of the two in every language, so a language change never
+// resizes them (user 2026-10-06).
+int switch_on_width() {
+  int width = 0;
+  for (uint8_t i = 0; i < settings_model::language_count(); ++i) {
+    const i18n::Strings& s = settings_model::text_of(i);
+    for (const char* label : {s.settings_pair, s.settings_allow}) {
+      const int w = settings_parts::text_width(settings_style::small_font(), label);
+      if (w > width) width = w;
+    }
+  }
+  return width + 2 * settings_style::kButtonPad + settings_style::kSwitchOnExtra;
+}
+
+namespace {
+
+lv_obj_t* switch_on_button(lv_obj_t* row, const char* text, SystemAction action) {
+  lv_obj_t* b = settings_parts::button(row, text, nullptr, settings_parts::ButtonKind::Accent,
+                                       settings_style::kSystemColor, colors(), settings_style::kSwitchOnHeight, false,
+                                       on_system_action, action_data(action));
+  lv_obj_set_width(b, switch_on_width());
+  return b;
+}
+
+void refresh_async(void*) { system_tick(); }
+
+void show_setup();
+void setup_async(void*) { show_setup(); }
+
+void open_dialog(Dialog dialog);
+
+void on_system_action(lv_event_t* e) {
+  switch (static_cast<SystemAction>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)))) {
+    case SystemAction::Update:
+      settings_model::update_pressed();
+      break;
+    case SystemAction::Pair:
+      settings_model::pair();
+      break;
+    case SystemAction::Allow:
+      settings_model::allow_password();
+      break;
+    case SystemAction::Unpair:
+      open_dialog(Dialog::Unpair);
+      return;
+    case SystemAction::RemovePassword:
+      open_dialog(Dialog::RemovePassword);
+      return;
+    case SystemAction::Restart:
+      open_dialog(Dialog::Restart);
+      return;
+    case SystemAction::GitHub:
+      open_dialog(Dialog::GitHub);
+      return;
+    case SystemAction::Setup:
+      // The setup replaces the whole screen, the touched button with it.
+      settings_model::setup_start();
+      lv_async_call(setup_async, nullptr);
+      return;
+  }
+  // The page may be rebuilt, the touched button with it: after the event.
+  lv_async_call(refresh_async, nullptr);
+}
+
+void on_dialog_action(lv_event_t* e) {
+  const auto action = static_cast<DialogAction>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
+  // Confirm keeps the dialog: it turns into the wait for Home Assistant.
+  if (action != DialogAction::ConfirmPairing) close_dialog(true);
+  switch (action) {
+    case DialogAction::Close:
+      break;
+    case DialogAction::Unpair:
+      settings_model::unpair();
+      break;
+    case DialogAction::RemovePassword:
+      settings_model::remove_password();
+      break;
+    case DialogAction::Restart:
+      settings_model::restart();
+      break;
+    case DialogAction::CancelPairing:
+      settings_model::cancel_pairing();
+      break;
+    case DialogAction::ConfirmPairing:
+      settings_model::confirm_pairing();
+      break;
+  }
+  lv_async_call(refresh_async, nullptr);
+}
+
+// A tap beside a question closes it; the pairing number stays until Cancel.
+void on_outside(lv_event_t*) {
+  if (g_dialog == Dialog::Pairing) return;
+  close_dialog(true);
+}
+
+lv_obj_t* dialog_button(lv_obj_t* row, const char* text, const char* icon, settings_parts::ButtonKind kind,
+                        DialogAction action) {
+  lv_obj_t* b = settings_parts::button(row, text, icon, kind, settings_style::kSystemColor, colors(),
+                                       settings_style::kDialogButtonHeight, true, on_dialog_action,
+                                       reinterpret_cast<void*>(static_cast<uintptr_t>(action)));
+  lv_obj_set_flex_grow(b, 1);
+  return b;
+}
+
+void open_dialog(Dialog dialog) {
+  close_dialog();
+  settings_parts::close_options();
+  const i18n::Strings& s = settings_model::text();
+  using settings_parts::ButtonKind;
+  lv_obj_t* box = nullptr;
+  lv_obj_t* buttons = nullptr;
+  switch (dialog) {
+    case Dialog::None:
+      return;
+    case Dialog::Unpair:
+      box = settings_parts::dialog(g_panel, g_built_card, s.settings_unpair_question, on_outside);
+      settings_parts::dialog_text(box, s.settings_unpair_text);
+      buttons = settings_parts::dialog_buttons(box);
+      dialog_button(buttons, s.security_cancel, nullptr, ButtonKind::Normal, DialogAction::Close);
+      dialog_button(buttons, s.settings_unpair, nullptr, ButtonKind::Danger, DialogAction::Unpair);
+      break;
+    case Dialog::RemovePassword:
+      box = settings_parts::dialog(g_panel, g_built_card, s.security_password_question, on_outside);
+      settings_parts::dialog_text(box, s.security_password_question_hint);
+      buttons = settings_parts::dialog_buttons(box);
+      dialog_button(buttons, s.security_cancel, nullptr, ButtonKind::Normal, DialogAction::Close);
+      dialog_button(buttons, s.security_remove, nullptr, ButtonKind::Danger, DialogAction::RemovePassword);
+      break;
+    case Dialog::Restart:
+      box = settings_parts::dialog(g_panel, g_built_card, s.settings_restart_question, on_outside);
+      settings_parts::dialog_text(box, s.settings_restart_text);
+      buttons = settings_parts::dialog_buttons(box);
+      dialog_button(buttons, s.security_cancel, nullptr, ButtonKind::Normal, DialogAction::Close);
+      dialog_button(buttons, s.restart_button, nullptr, ButtonKind::Danger, DialogAction::Restart);
+      break;
+    case Dialog::GitHub: {
+      box = settings_parts::dialog(g_panel, g_built_card, settings_style::kGitHub, on_outside);
+      const char* url = settings_model::repo_url();
+      lv_obj_t* qr = settings_parts::qr_code(box, settings_style::kDialogQr, url);
+      if (qr) lv_obj_set_style_margin_top(qr, settings_style::kDialogGap, 0);
+      // The address without its scheme, as people type it.
+      const char* shown = strstr(url, "://") ? strstr(url, "://") + 3 : url;
+      lv_obj_t* link = settings_parts::dialog_text(box, shown);
+      lv_obj_set_style_text_color(link, lv_color_hex(ui_theme::text()), 0);
+      lv_obj_set_style_text_opa(link, LV_OPA_COVER, 0);
+      settings_parts::dialog_text(box, s.settings_github_text);
+      buttons = settings_parts::dialog_buttons(box);
+      dialog_button(buttons, s.security_close, nullptr, ButtonKind::Normal, DialogAction::Close);
+      break;
+    }
+    case Dialog::Pairing: {
+      box = settings_parts::dialog(g_panel, g_built_card, s.settings_pairing, on_outside);
+      char number[24];
+      if (g_dialog_pair != PairState::Asking && settings_model::pairing_number(number, sizeof(number))) {
+        lv_obj_t* code = lv_label_create(box);
+        lv_label_set_text(code, number);
+        lv_obj_set_style_text_font(code, popup_layout::font72(), 0);
+        lv_obj_set_style_text_color(code, lv_color_hex(ui_theme::text()), 0);
+        lv_obj_set_style_margin_top(code, settings_style::kDialogGap, 0);
+      }
+      char text[200];
+      if (g_dialog_pair == PairState::Compare) {
+        snprintf(text, sizeof(text), "%s. %s", s.pairing_compare, s.pairing_compare_hint);
+      } else {
+        snprintf(text, sizeof(text), "%s", g_dialog_pair == PairState::Asking ? s.pairing_asking : s.pairing_waiting);
+      }
+      settings_parts::dialog_text(box, text);
+      buttons = settings_parts::dialog_buttons(box);
+      dialog_button(buttons, s.security_cancel, nullptr, ButtonKind::Normal, DialogAction::CancelPairing);
+      if (g_dialog_pair != PairState::Asking) {
+        lv_obj_t* confirm =
+            dialog_button(buttons, s.security_confirm, "check", ButtonKind::Accent, DialogAction::ConfirmPairing);
+        settings_parts::button_set_enabled(confirm, g_dialog_pair == PairState::Compare);
+      }
+      break;
+    }
+  }
+  g_dialog = dialog;
+  g_dialog_root = box ? lv_obj_get_parent(box) : nullptr;
+  settings_parts::reveal(g_dialog_root, box);
+}
+
+// The number dialog follows the pairing attempt; a question whose state went
+// away closes.
+void sync_dialog(const SystemValues& v) {
+  const bool numbered =
+      v.pairing == PairState::Asking || v.pairing == PairState::Compare || v.pairing == PairState::Confirmed;
+  if (numbered) {
+    if (g_dialog != Dialog::Pairing || g_dialog_pair != v.pairing) {
+      g_dialog_pair = v.pairing;
+      open_dialog(Dialog::Pairing);
+    }
+    return;
+  }
+  if (g_dialog == Dialog::Pairing || (g_dialog == Dialog::Unpair && v.pairing != PairState::Paired) ||
+      (g_dialog == Dialog::RemovePassword && !v.password_on)) {
+    close_dialog();
+  }
+}
+
+void build_system_head(lv_obj_t* page, const SystemValues& v, const Colors& palette) {
+  const i18n::Strings& s = settings_model::text();
+  using settings_parts::ButtonKind;
+  // Wide cards: the name large with the version in the row font; narrow ones
+  // keep the row font with the version small (mockup pageSystem).
+  const bool wide = g_card_width >= settings_style::kWideHeadCard;
+  lv_obj_t* group = settings_parts::group(page, palette);
+  settings_parts::Row head = settings_parts::row(group, nullptr, "", "");
+  // At least a row high, the logo with a little air on narrow cards (mockup
+  // pageSystem with the popup head).
+  const int pad = wide ? 0 : 8;
+  const int height = settings_style::kHeroLogo + 2 * pad;
+  lv_obj_set_height(head.row, height > settings_style::kRowHeight ? height : settings_style::kRowHeight);
+
+  lv_obj_t* logo = lv_image_create(head.row);
+  lv_obj_remove_style_all(logo);
+  lv_image_set_src(logo, hometiles_logo_for_theme());
+  lv_image_set_antialias(logo, true);
+  lv_image_set_scale(logo, static_cast<uint32_t>(settings_style::kHeroLogo * 256 / hometiles_logo_dsc.header.w));
+  lv_obj_set_size(logo, settings_style::kHeroLogo, settings_style::kHeroLogo);
+  lv_obj_move_to_index(logo, 0);
+
+  // The product name and the version on one baseline.
+  lv_obj_delete(head.title);
+  head.title = nullptr;
+  lv_obj_t* line = settings_parts::plain(head.text);
+  lv_obj_move_to_index(line, 0);
+  lv_obj_set_size(line, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(line, LV_FLEX_FLOW_ROW);
+  lv_obj_add_flag(line, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+  const lv_font_t* name_font = wide ? settings_style::page_title_font() : settings_style::row_font();
+  const lv_font_t* version_font = wide ? settings_style::row_font() : settings_style::small_font();
+  lv_obj_t* name = lv_label_create(line);
+  lv_label_set_text(name, settings_style::kProductName);
+  lv_obj_set_style_text_font(name, name_font, 0);
+  lv_obj_set_style_text_color(name, lv_color_hex(ui_theme::text()), 0);
+  settings_parts::browser_line(name, wide ? settings_style::kTitleFontPx : settings_style::kRowFontPx);
+  lv_obj_t* version = lv_label_create(line);
+  lv_label_set_text(version, settings_model::firmware_version());
+  lv_obj_set_style_text_font(version, version_font, 0);
+  lv_obj_set_style_text_color(version, lv_color_hex(ui_theme::text()), 0);
+  lv_obj_set_style_text_opa(version, settings_style::kGreyOpa, 0);
+  // One space of the name's font (a lone space measures 0).
+  lv_obj_set_style_margin_left(
+      version, settings_parts::text_width(name_font, "H H") - settings_parts::text_width(name_font, "HH"), 0);
+  const int name_baseline = lv_obj_get_style_margin_top(name, LV_PART_MAIN) + name_font->line_height - name_font->base_line;
+  lv_obj_set_style_margin_top(version, name_baseline - (version_font->line_height - version_font->base_line), 0);
+
+  char buf[96];
+  const char* sub = settings_model::device_name();
+  uint32_t sub_color = 0;
+  // The button stays short (magnifier or download icon and the short update
+  // word, user 2026-10-07): the line beside it names the device or the found
+  // version.
+  const char* label = s.settings_update_short;
+  const char* icon = "magnify";
+  ButtonKind kind = ButtonKind::Normal;
+  bool has_button = true;
+  bool enabled = true;
+  const bool found = settings_model::latest_version()[0] != '\0';
+  switch (v.update) {
+    case UpdateState::Idle:
+      break;
+    case UpdateState::Checking:
+      sub = s.system_checking;
+      enabled = false;
+      break;
+    case UpdateState::Available:
+      snprintf(buf, sizeof(buf), s.system_update_available_fmt, settings_model::latest_version());
+      sub = buf;
+      sub_color = settings_style::warn_color();
+      icon = "download";
+      kind = ButtonKind::Accent;
+      break;
+    case UpdateState::UpToDate:
+      sub = s.system_up_to_date;
+      sub_color = settings_style::good_color();
+      break;
+    case UpdateState::CheckFailed:
+      sub = s.system_check_failed;
+      sub_color = settings_style::error_color();
+      break;
+    case UpdateState::Downloading:
+      sub = s.system_downloading;
+      has_button = false;
+      break;
+    case UpdateState::Installed:
+      sub = s.system_installed_restarting;
+      sub_color = settings_style::good_color();
+      has_button = false;
+      break;
+    case UpdateState::InstallFailed:
+      sub = s.system_install_failed;
+      sub_color = settings_style::error_color();
+      if (found) {
+        icon = "download";
+        kind = ButtonKind::Accent;
+      }
+      break;
+    case UpdateState::Restarting:
+      sub = s.system_restarting;
+      has_button = false;
+      break;
+  }
+  lv_label_set_text(head.sub, sub);
+  if (sub_color) color_text(head.sub, sub_color);
+  if (has_button) {
+    settings_parts::button_set_enabled(row_button(head.row, label, icon, kind, SystemAction::Update), enabled);
+  } else if (v.update == UpdateState::Downloading) {
+    lv_obj_t* track = settings_parts::plain(head.row);
+    lv_obj_set_size(track, settings_style::kProgressWidth, settings_style::kProgressHeight);
+    lv_obj_set_style_bg_color(track, lv_color_hex(palette.group), 0);
+    lv_obj_set_style_bg_opa(track, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(track, settings_style::kProgressHeight / 2, 0);
+    g_progress_fill = settings_parts::plain(track);
+    lv_obj_set_height(g_progress_fill, settings_style::kProgressHeight);
+    lv_obj_set_style_bg_color(g_progress_fill, lv_color_hex(settings_style::kSystemColor), 0);
+    lv_obj_set_style_bg_opa(g_progress_fill, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(g_progress_fill, settings_style::kProgressHeight / 2, 0);
+    set_progress(v.progress);
+  }
+}
+
+void build_system_page(lv_obj_t* page) {
+  const i18n::Strings& s = settings_model::text();
+  const SystemValues v = settings_model::system_values();
+  const Colors palette = colors();
+  using settings_parts::ButtonKind;
+  g_system_key = system_key(v);
+  build_system_head(page, v, palette);
+
+  // Connection: Home Assistant, with the way to it under it (direct link or
+  // MQTT). The panel's own address is on the WLAN page.
+  settings_parts::section(page, s.settings_connection, false);
+  lv_obj_t* connection = settings_parts::group(page, palette);
+  char route[96];
+  const bool has_route = settings_model::bridge_route(route, sizeof(route));
+  settings_parts::Row ha =
+      settings_parts::row(connection, "lan-connect", settings_style::kHomeAssistant, has_route ? route : nullptr);
+  g_route_label = ha.sub;
+  if (v.connected) {
+    good_state(ha.row, s.security_value_connected, "check", false);
+  } else {
+    settings_parts::trailing_text(ha.row, s.security_value_offline, g_page_width / 2);
+  }
+
+  // Security: Pairing and the Web Admin password.
+  settings_parts::section(page, s.security_btn, false);
+  lv_obj_t* security = settings_parts::group(page, palette);
+  switch (v.pairing) {
+    case PairState::Paired: {
+      settings_parts::Row r =
+          settings_parts::row(security, "link-variant", s.settings_pairing,
+                              settings_model::link_active() ? s.settings_states_encrypted : s.settings_commands_encrypted);
+      // Too long beside the paired state on the small panels: it scrolls back and
+      // forth like the media title instead of ending in dots.
+      ui_text_scroll::apply(r.sub);
+      good_state(r.row, s.settings_paired, "shield-check", true);
+      settings_parts::make_tap(r.row, palette.button, on_system_action,
+                               action_data(SystemAction::Unpair));
+      break;
+    }
+    case PairState::Discoverable: {
+      settings_parts::Row r = settings_parts::row(security, "link-variant", s.settings_pairing, s.pairing_discoverable);
+      color_text(r.sub, settings_style::good_color());
+      g_pair_time = countdown(r.row, v.pair_seconds);
+      break;
+    }
+    case PairState::Asking:
+    case PairState::Compare:
+    case PairState::Confirmed:
+      settings_parts::row(security, "link-variant", s.settings_pairing,
+                          v.pairing == PairState::Asking ? s.pairing_asking : s.pairing_waiting);
+      break;
+    default: {
+      // Not paired, or a failed attempt's result; Pair tries again.
+      const char* note = settings_model::pairing_note();
+      const char* line = s.settings_not_paired;
+      uint32_t color = note ? settings_style::warn_color() : 0;
+      switch (v.pairing) {
+        case PairState::NoAnswer:
+          line = s.pairing_no_answer;
+          color = settings_style::warn_color();
+          break;
+        case PairState::AlreadyPaired:
+          line = s.pairing_already_paired;
+          color = settings_style::warn_color();
+          break;
+        case PairState::Busy:
+          line = s.pairing_busy;
+          color = settings_style::warn_color();
+          break;
+        case PairState::Rejected:
+          line = s.pairing_rejected;
+          color = settings_style::error_color();
+          break;
+        case PairState::Failed:
+          line = s.pairing_failed;
+          color = settings_style::error_color();
+          break;
+        default:
+          if (note) line = note;
+          break;
+      }
+      settings_parts::Row r = settings_parts::row(security, "link-variant-off", s.settings_pairing, line);
+      if (color) color_text(r.sub, color);
+      switch_on_button(r.row, s.settings_pair, SystemAction::Pair);
+      break;
+    }
+  }
+  if (v.password_on) {
+    settings_parts::Row r =
+        settings_parts::row(security, "form-textbox-password", s.web_auth_section, s.settings_password_asks);
+    good_state(r.row, s.security_state_on, "shield-check", true);
+    settings_parts::make_tap(r.row, palette.button, on_system_action,
+                             action_data(SystemAction::RemovePassword));
+  } else if (v.password_window) {
+    settings_parts::Row r =
+        settings_parts::row(security, "form-textbox-password", s.web_auth_section, s.settings_set_password_now);
+    color_text(r.sub, settings_style::good_color());
+    g_password_time = countdown(r.row, v.password_seconds);
+  } else {
+    settings_parts::Row r =
+        settings_parts::row(security, "form-textbox-password", s.web_auth_section, s.settings_password_none);
+    switch_on_button(r.row, s.settings_allow, SystemAction::Allow);
+  }
+
+  // Setup, Restart and GitHub one grid gap under the groups like a further
+  // group (no heading; the free room stays at the bottom like on the other
+  // pages, user 2026-10-07). Their corners take the tile radius: at the
+  // maximum radius they are full pills (twice the radius high), with a small
+  // radius they keep a touch-friendly minimum height.
+  const int corner = ui_surface_style::radius(tile_radius::kMinimum);
+  const int button_height =
+      2 * corner > settings_style::kSystemButtonMin ? 2 * corner : settings_style::kSystemButtonMin;
+  lv_obj_t* actions = settings_parts::plain(page);
+  lv_obj_set_size(actions, LV_PCT(100), button_height);
+  lv_obj_set_style_pad_column(actions, settings_style::kButtonGap, 0);
+  lv_obj_set_flex_flow(actions, LV_FLEX_FLOW_ROW);
+  struct Action {
+    const char* text;
+    const char* icon;
+    SystemAction action;
+  };
+  const Action kActions[] = {{s.settings_setup, "rocket-launch-outline", SystemAction::Setup},
+                             {s.restart_button, "restart", SystemAction::Restart},
+                             {settings_style::kGitHub, "github", SystemAction::GitHub}};
+  for (const Action& a : kActions) {
+    lv_obj_t* b = settings_parts::button(actions, a.text, a.icon, ButtonKind::Normal, settings_style::kSystemColor,
+                                         palette, button_height, false, on_system_action, action_data(a.action));
+    lv_obj_set_flex_grow(b, 1);
+    // Surfaces on the page like the groups and tiles: the tile color and
+    // radius, no border (inside a popup); pressed one step up (user 2026-10-07).
+    lv_obj_set_style_bg_color(b, lv_color_hex(palette.card), 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(palette.group), LV_STATE_PRESSED);
+    settings_style::apply_tile_radius(b);
+  }
+
+  // The head gets its air (the logo scale(20) from the group's edges, on
+  // narrow cards half a logo, user 2026-10-07 "warum so eng", "gib ihm Platz
+  // in der Höhe") as far as the page has room below the buttons; on the
+  // smaller panels it takes only what is free, so nothing runs past the frame.
+  lv_obj_t* head_row = lv_obj_get_child(lv_obj_get_child(page, 0), 0);
+  const int head_height = lv_obj_get_style_height(head_row, LV_PART_MAIN);
+  const bool wide = g_card_width >= settings_style::kWideHeadCard;
+  const int wanted =
+      settings_style::kHeroLogo + 2 * (wide ? popup_layout::scale(20) : settings_style::kHeroLogo / 2);
+  if (wanted > head_height) {
+    lv_obj_update_layout(page);
+    lv_area_t page_area;
+    lv_area_t last;
+    lv_obj_get_coords(page, &page_area);
+    lv_obj_get_coords(actions, &last);
+    const int free = page_area.y2 - last.y2;
+    const int grow = wanted - head_height < free ? wanted - head_height : free;
+    if (grow > 0) lv_obj_set_height(head_row, head_height + grow);
+  }
+}
+
+void system_tick() {
+  if (g_category != Category::System || !g_page_built || !g_page) return;
+  const SystemValues v = settings_model::system_values();
+  if (system_key(v) != g_system_key) {
+    build_page();
+    refresh_lines();
+  } else {
+    set_countdown(g_pair_time, v.pair_seconds);
+    set_countdown(g_password_time, v.password_seconds);
+    set_progress(v.progress);
+    char route[96];
+    if (g_route_label && settings_model::bridge_route(route, sizeof(route)) &&
+        strcmp(lv_label_get_text(g_route_label), route) != 0) {
+      lv_label_set_text(g_route_label, route);
+    }
+  }
+  sync_dialog(v);
+}
+
+// ---------- WiFi page ----------
+// The connection and the hotspot in one group (with the hotspot on: its QR
+// code and details), then Networks with Search and the list that scrolls in
+// its own box down to the card's edge (mockup pageWifi). Panels that can use
+// Ethernet start with Connection WiFi | Ethernet; in Ethernet mode the page
+// shows the cable's status and the IP mode. Joining or adding a network
+// opens the entry inside the card: title, X, fields and the keyboard
+// (mockup sheet()).
+
+using settings_model::WifiValues;
+
+enum class WifiAction : uint8_t { Disconnect, Hotspot, Search, AddNetwork, Restart };
+
+// What the page was built for; a finished scan or a new state rebuilds it.
+uint32_t g_wifi_key = 0xFFFFFFFF;
+// The rebuild after a state change keeps the scan that is running.
+bool g_wifi_quiet_rebuild = false;
+
+void* wifi_data(WifiAction action) { return reinterpret_cast<void*>(static_cast<uintptr_t>(action)); }
+
+uint32_t wifi_key(const WifiValues& v) {
+  uint32_t key = 2166136261u;
+  const auto mix = [&key](uint32_t value) { key = (key ^ value) * 16777619u; };
+  mix(v.ethernet_selected | v.ethernet_active << 1 | v.access_point << 2 | v.hotspot_switching << 3 |
+      v.connected << 4 | v.scanning << 5 | v.connecting << 6 | v.static_ip << 7 | v.ip_mode_offered << 8 |
+      v.restart_needed << 9 | static_cast<uint32_t>(v.bars) << 10 | address_known() << 14);
+  for (uint8_t i = 0; i < settings_model::wifi_network_count(); ++i) {
+    const settings_model::WifiNetwork& network = settings_model::wifi_network(i);
+    for (const char* c = network.ssid; *c; ++c) mix(static_cast<uint8_t>(*c));
+    mix(network.bars | network.locked << 4);
+  }
+  return key;
+}
+
+void refresh_wifi_async(void*);
+
+// The signal icon: bars 1..4, with a lock when the network needs a
+// password; the outline while the strength is unknown.
+void signal_icon(char* buf, size_t len, uint8_t bars, bool locked) {
+  if (bars == 0) {
+    snprintf(buf, len, "%s", locked ? "wifi-strength-lock-outline" : "wifi-strength-outline");
+  } else {
+    snprintf(buf, len, "wifi-strength-%u%s", bars, locked ? "-lock" : "");
+  }
+}
+
+void open_entry(bool manual, const char* ssid);
+
+void on_wifi_action(lv_event_t* e) {
+  const WifiValues v = settings_model::wifi_values();
+  switch (static_cast<WifiAction>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)))) {
+    case WifiAction::Disconnect:
+      settings_model::wifi_disconnect();
+      break;
+    case WifiAction::Hotspot:
+      settings_model::hotspot_selected(!v.access_point);
+      // Off again: search once the WiFi is back.
+      if (v.access_point) settings_model::wifi_scan();
+      break;
+    case WifiAction::Search:
+      settings_model::wifi_scan();
+      break;
+    case WifiAction::AddNetwork:
+      open_entry(true, nullptr);
+      return;
+    case WifiAction::Restart:
+      open_dialog(Dialog::Restart);
+      return;
+  }
+  lv_async_call(refresh_wifi_async, nullptr);
+}
+
+void on_network_clicked(lv_event_t* e) {
+  const uint8_t index = static_cast<uint8_t>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
+  if (index >= settings_model::wifi_network_count()) return;
+  const settings_model::WifiNetwork network = settings_model::wifi_network(index);
+  if (network.locked) {
+    open_entry(false, network.ssid);
+    return;
+  }
+  // An open network connects right away.
+  settings_model::wifi_connect(network.ssid, "");
+  lv_async_call(refresh_wifi_async, nullptr);
+}
+
+void on_network_mode(lv_obj_t*, uint8_t index) {
+  settings_model::network_mode_selected(index == 1);
+  lv_async_call(refresh_wifi_async, nullptr);
+}
+
+void on_ip_mode(lv_obj_t* segment, uint8_t index) {
+  settings_model::ip_mode_selected(index == 1);
+  // Without static values the choice stays Automatic.
+  if (index == 1 && !settings_model::wifi_values().static_ip) settings_parts::segment_select(segment, 0);
+  lv_async_call(refresh_wifi_async, nullptr);
+}
+
+// "Connected" in green and the address after it.
+void connected_sub(settings_parts::Row& row) {
+  char address[48];
+  char rest[64] = "";
+  if (settings_model::panel_address(address, sizeof(address))) snprintf(rest, sizeof(rest), " \xC2\xB7 %s", address);
+  settings_parts::two_tone_sub(row, settings_model::text().wifi_connected, settings_style::good_color(), rest);
+}
+
+lv_obj_t* wifi_button(lv_obj_t* row, const char* text, WifiAction action) {
+  return settings_parts::button(row, text, nullptr, settings_parts::ButtonKind::Normal, settings_style::kWifiColor,
+                                colors(), settings_style::kButtonHeight, false, on_wifi_action, wifi_data(action));
+}
+
+// Ethernet panels: WiFi | Ethernet (applies after a restart, as before), and
+// Restart while a network or IP mode waits for it.
+void build_network_mode(lv_obj_t* page, const WifiValues& v, const Colors& palette) {
+  const i18n::Strings& s = settings_model::text();
+  lv_obj_t* group = settings_parts::group(page, palette);
+  settings_parts::Row mode = settings_parts::row(group, "lan", s.settings_connection);
+  const char* const options[] = {s.wifi_label, s.settings_ethernet};
+  settings_parts::segment(mode.row, options, 2, v.ethernet_selected ? 1 : 0, palette.group, on_network_mode);
+  if (v.restart_needed) {
+    settings_parts::Row restart = settings_parts::row(group, "restart", s.settings_restart_to_switch);
+    wifi_button(restart.row, s.restart_button, WifiAction::Restart);
+  }
+}
+
+// Automatic (DHCP) | Static; the static values come from Web Admin.
+void ip_mode_row(lv_obj_t* group, const WifiValues& v, const Colors& palette) {
+  const i18n::Strings& s = settings_model::text();
+  settings_parts::Row row = settings_parts::row(group, "ip-network-outline", s.settings_ip_address);
+  const char* const options[] = {s.settings_automatic, s.settings_static};
+  settings_parts::segment(row.row, options, 2, v.static_ip ? 1 : 0, palette.group, on_ip_mode);
+}
+
+void build_ethernet(lv_obj_t* page, const WifiValues& v, const Colors& palette) {
+  const i18n::Strings& s = settings_model::text();
+  lv_obj_t* group = settings_parts::group(page, palette);
+  settings_parts::Row cable =
+      settings_parts::row(group, "ethernet", s.settings_ethernet, v.connected ? "" : s.settings_not_connected);
+  if (v.connected) {
+    connected_sub(cable);
+    lv_obj_t* check = settings_parts::trailing_icon(cable.row, "check");
+    lv_obj_set_style_text_color(check, lv_color_hex(settings_style::good_color()), 0);
+    lv_obj_set_style_text_opa(check, LV_OPA_COVER, 0);
+  }
+  ip_mode_row(group, v, palette);
+  char address[48];
+  if (v.static_ip && settings_model::static_address(address, sizeof(address))) {
+    settings_parts::section(page, s.settings_static_address, false);
+    lv_obj_t* fixed = settings_parts::group(page, palette);
+    settings_parts::row(fixed, "pencil-outline", address, s.settings_set_in_web_admin);
+  }
+}
+
+// The hotspot's QR code (joins its network) beside its name, password and
+// address.
+void hotspot_row(lv_obj_t* group) {
+  const i18n::Strings& s = settings_model::text();
+  char ssid[40];
+  char password[72];
+  char address[48] = "";
+  settings_model::hotspot_details(ssid, sizeof(ssid), password, sizeof(password));
+  settings_model::panel_address(address, sizeof(address));
+  settings_parts::Row row = settings_parts::row(group, nullptr, "", nullptr);
+  lv_obj_set_height(row.row, settings_style::kHotspotQr + 2 * settings_style::kHotspotQrPad);
+  char join[128];
+  snprintf(join, sizeof(join), "WIFI:T:WPA;S:%s;P:%s;;", ssid, password);
+  lv_obj_t* qr = settings_parts::qr_code(row.row, settings_style::kHotspotQr, join);
+  if (qr) lv_obj_move_to_index(qr, 0);
+  lv_obj_delete(row.title);
+  row.title = nullptr;
+  const char* const labels[] = {s.settings_network, s.wifi_password_label, s.settings_address};
+  const char* const values[] = {ssid, password, address};
+  int column = 0;
+  for (const char* label : labels) {
+    const int width = settings_parts::text_width(settings_style::small_font(), label);
+    if (width > column) column = width;
+  }
+  lv_obj_set_style_pad_row(row.text, settings_style::pick(12, 6), 0);
+  for (int i = 0; i < 3; ++i) {
+    lv_obj_t* line = settings_parts::plain(row.text);
+    lv_obj_set_size(line, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(line, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(line, settings_style::pick(24, 12), 0);
+    lv_obj_t* name = lv_label_create(line);
+    lv_label_set_text(name, labels[i]);
+    lv_obj_set_width(name, column);
+    lv_obj_set_style_text_font(name, settings_style::small_font(), 0);
+    lv_obj_set_style_text_color(name, lv_color_hex(ui_theme::text()), 0);
+    lv_obj_set_style_text_opa(name, settings_style::kGreyOpa, 0);
+    lv_obj_t* value = lv_label_create(line);
+    lv_label_set_text(value, values[i]);
+    lv_label_set_long_mode(value, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(value, 1);
+    lv_obj_set_flex_grow(value, 1);
+    lv_obj_set_style_text_font(value, settings_style::small_font(), 0);
+    lv_obj_set_style_text_color(value, lv_color_hex(ui_theme::text()), 0);
+  }
+}
+
+}  // namespace
+
+// Networks and Search (the icon stays while searching, so nothing moves).
+lv_obj_t* networks_heading(lv_obj_t* parent, bool scanning, bool first, lv_event_cb_t on_search, void* user_data) {
+  const i18n::Strings& s = settings_model::text();
+  lv_obj_t* heading = settings_parts::plain(parent);
+  lv_obj_set_size(heading, LV_PCT(100), LV_SIZE_CONTENT);
+  if (settings_parts::is_surface_page(parent)) {
+    // Settings: the first line of the network list's group.
+    settings_parts::mark_heading(heading);
+    lv_obj_set_style_margin_top(heading, settings_style::kHeadingInsideTop, 0);
+  } else {
+    lv_obj_set_style_margin_top(heading, first ? 0 : settings_style::kSectionTop, 0);
+    lv_obj_set_style_margin_bottom(heading, settings_style::kSectionBottom, 0);
+    lv_obj_set_style_pad_left(heading, settings_style::kSectionLeft, 0);
+    lv_obj_set_style_pad_right(heading, settings_style::kHeadingRight, 0);
+  }
+  // As high as a browser's line of the icon (1.21 em).
+  lv_obj_set_style_min_height(
+      heading, static_cast<int>(lroundf(settings_parts::browser_line_height(settings_style::kIconPx))), 0);
+  lv_obj_set_flex_flow(heading, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(heading, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_t* title = lv_label_create(heading);
+  lv_label_set_text(title, s.settings_networks);
+  lv_obj_set_style_text_font(title, settings_style::small_font(), 0);
+  lv_obj_set_style_text_color(title, lv_color_hex(ui_theme::text()), 0);
+  lv_obj_set_style_text_opa(title, settings_style::kGreyOpa, 0);
+  lv_obj_t* search = settings_parts::plain(heading);
+  lv_obj_set_size(search, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(search, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(search, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(search, 6, 0);
+  lv_obj_t* icon = lv_label_create(search);
+  lv_label_set_text(icon, getMdiChar("refresh").c_str());
+  if (FONT_MDI_ICONS) lv_obj_set_style_text_font(icon, FONT_MDI_ICONS, 0);
+  lv_obj_t* text = lv_label_create(search);
+  lv_label_set_text(text, scanning ? s.settings_searching : s.settings_search);
+  lv_obj_set_style_text_font(text, settings_style::small_font(), 0);
+  for (lv_obj_t* label : {icon, text}) {
+    lv_obj_set_style_text_color(label, lv_color_hex(ui_theme::text()), 0);
+    lv_obj_set_style_text_opa(label, scanning ? settings_style::kGreyOpa : LV_OPA_COVER, 0);
+  }
+  if (!scanning) {
+    lv_obj_add_flag(search, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(search, settings_style::kSectionTop / 2);
+    lv_obj_add_event_cb(search, on_search, LV_EVENT_CLICKED, user_data);
+  }
+  return heading;
+}
+
+namespace {
+
+void build_wifi_page(lv_obj_t* page) {
+  const i18n::Strings& s = settings_model::text();
+  const WifiValues v = settings_model::wifi_values();
+  const Colors palette = colors();
+  g_wifi_key = wifi_key(v);
+  if (v.ethernet_panel) build_network_mode(page, v, palette);
+  if (v.ethernet_active) {
+    build_ethernet(page, v, palette);
+    return;
+  }
+
+  lv_obj_t* group = settings_parts::group(page, palette);
+  if (!v.access_point && v.connected) {
+    char name[40];
+    char icon[32];
+    settings_model::network_name(name, sizeof(name));
+    signal_icon(icon, sizeof(icon), v.bars, false);
+    settings_parts::Row status = settings_parts::row(group, icon, name, "");
+    connected_sub(status);
+    wifi_button(status.row, s.wifi_disconnect_btn, WifiAction::Disconnect);
+  } else if (!v.access_point) {
+    settings_parts::row(group, "wifi-off", s.settings_not_connected,
+                        v.connecting ? s.settings_connecting : s.settings_choose_network);
+  }
+  // The hotspot right under the status, so only a long list scrolls.
+  settings_parts::Row hotspot = settings_parts::row(group, "access-point", s.settings_hotspot,
+                                                    v.access_point ? s.settings_hotspot_on_sub
+                                                                   : s.settings_hotspot_off_sub);
+  settings_parts::toggle(hotspot.row, v.access_point, settings_style::kWifiColor, palette.group, !v.hotspot_switching,
+                         on_wifi_action, wifi_data(WifiAction::Hotspot));
+  if (v.access_point) hotspot_row(group);
+  // The way back to DHCP while a static address is in use (as before).
+  if (v.ip_mode_offered) ip_mode_row(group, v, palette);
+  if (!v.ethernet_panel && v.restart_needed) {
+    settings_parts::Row restart = settings_parts::row(group, "restart", s.settings_restart_to_switch);
+    wifi_button(restart.row, s.restart_button, WifiAction::Restart);
+  }
+  if (v.access_point) return;
+
+  networks_heading(page, v.scanning, false, on_wifi_action, wifi_data(WifiAction::Search));
+  lv_obj_t* list = settings_parts::group(page, palette);
+  for (uint8_t i = 0; i < settings_model::wifi_network_count(); ++i) {
+    const settings_model::WifiNetwork& network = settings_model::wifi_network(i);
+    char icon[32];
+    signal_icon(icon, sizeof(icon), network.bars, network.locked);
+    settings_parts::Row row = settings_parts::row(list, icon, network.ssid);
+    settings_parts::trailing_icon(row.row, "chevron-right");
+    settings_parts::make_tap(row.row, palette.button, on_network_clicked,
+                             reinterpret_cast<void*>(static_cast<uintptr_t>(i)));
+  }
+  settings_parts::Row add = settings_parts::row(list, "plus", s.settings_add_network);
+  settings_parts::trailing_icon(add.row, "chevron-right");
+  settings_parts::make_tap(add.row, palette.button, on_wifi_action, wifi_data(WifiAction::AddNetwork));
+
+  // The list keeps its height up to the page's edge; its networks scroll in
+  // themselves below the Networks heading, which stays (mockup: sticky).
+  lv_obj_update_layout(page);
+  lv_area_t page_area;
+  lv_area_t list_area;
+  lv_obj_get_coords(page, &page_area);
+  lv_obj_get_coords(list, &list_area);
+  const int room = page_area.y2 - list_area.y1 + 1;
+  if (lv_area_get_height(&list_area) > room && room > settings_style::kRowHeight) {
+    lv_obj_set_height(list, room);
+    lv_obj_t* rows = settings_parts::plain(list);
+    lv_obj_set_width(rows, LV_PCT(100));
+    lv_obj_set_flex_grow(rows, 1);
+    lv_obj_set_flex_flow(rows, LV_FLEX_FLOW_COLUMN);
+    // A pressed row rounds its corners like the group where it meets it.
+    settings_style::apply_tile_radius(rows);
+    while (lv_obj_get_child_count(list) > 2) lv_obj_set_parent(lv_obj_get_child(list, 1), rows);
+    lv_obj_add_flag(rows, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(rows, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(rows, LV_SCROLLBAR_MODE_OFF);
+  }
+}
+
+// ---------- WiFi entry ----------
+// The entry takes the card's place (the categories or tabs stay;
+// settings_entry.cpp).
+
+void show_page_content(bool shown) {
+  if (!g_page) return;
+  if (shown) {
+    lv_obj_remove_flag(g_page, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(g_page, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
+// The X closed it: the page again, with a fresh search.
+void on_entry_closed() {
+  show_page_content(true);
+  settings_model::wifi_scan();
+  lv_async_call(refresh_wifi_async, nullptr);
+}
+
+void open_entry(bool manual, const char* ssid) {
+  if (!g_card) return;
+  show_page_content(false);
+  settings_entry::open({g_card, g_built_card, nullptr, on_entry_closed}, manual, ssid);
+}
+
+void close_entry() {
+  if (!settings_entry::is_open()) return;
+  settings_entry::close();
+  show_page_content(true);
+}
+
+void on_page_timer(lv_timer_t*);
+
+void wifi_tick() {
+  if (g_category != Category::Wifi || !g_page_built || !g_page) return;
+  const WifiValues v = settings_model::wifi_values();
+  if (settings_entry::is_open()) {
+    // Connected: the page with the new network.
+    if (settings_entry::tick(v)) {
+      show_page_content(true);
+      g_wifi_quiet_rebuild = true;
+      build_page();
+      g_wifi_quiet_rebuild = false;
+      refresh_lines();
+    }
+    return;
+  }
+  if (wifi_key(v) != g_wifi_key) {
+    g_wifi_quiet_rebuild = true;
+    build_page();
+    g_wifi_quiet_rebuild = false;
+    refresh_lines();
+  }
+}
+
+void refresh_wifi_async(void*) { wifi_tick(); }
+
+void on_page_timer(lv_timer_t*) {
+  if (g_category == Category::System) system_tick();
+  if (g_category == Category::Wifi) wifi_tick();
+}
+
+void stop_page_timer() {
+  if (!g_page_timer) return;
+  lv_timer_delete(g_page_timer);
+  g_page_timer = nullptr;
+}
+
+// ---------- Frame ----------
+
+// The open page in the card. System and WiFi follow their state with a
+// timer while they show.
+void build_page() {
+  if (!g_page) return;
+  clear_display_refs();
+  clear_locale_refs();
+  clear_system_refs();
+  if (g_category != Category::System) close_dialog();
+  if (g_category != Category::Wifi) close_entry();
+  const bool polled = g_category == Category::System || g_category == Category::Wifi;
+  if (!polled) stop_page_timer();
+  lv_obj_clean(g_page);
+  if (g_category == Category::Display) build_display_page(g_page);
+  if (g_category == Category::Localization) build_localization_page(g_page);
+  if (g_category == Category::System) build_system_page(g_page);
+  if (g_category == Category::Wifi) {
+    // Opening the page searches; its own rebuilds do not.
+    if (!g_wifi_quiet_rebuild) settings_model::wifi_scan();
+    build_wifi_page(g_page);
+  }
+  if (polled && !g_page_timer) g_page_timer = lv_timer_create(on_page_timer, 500, nullptr);
+  g_page_built = true;
+}
+
+void clear_refs() {
+  for (CategoryView& view : g_views) view = {};
+  g_bar_title = nullptr;
+  g_close = nullptr;
+  close_dialog();
+  close_entry();
+  g_card = nullptr;
+  g_page = nullptr;
+  g_page_built = false;
+  clear_display_refs();
+  clear_locale_refs();
+  clear_system_refs();
+}
+
+// The head's title: the popup header font, a smaller one when it would not
+// fit beside the tabs (never cut, mockup popHead).
+void set_head_title(const char* text) {
+  if (!g_bar_title) return;
+  const int width = lv_obj_get_style_width(g_bar_title, LV_PART_MAIN);
+  // 14 and 12 exist only on the 480x480 panels (ui_fonts.h); the others stop
+  // at 16.
+  const lv_font_t* const fonts[] = {popup_layout::headerTitleFont(), settings_style::small_font(),
+#if defined(DEVICE_LAYOUT_480X480)
+                                    &ui_font_14, &ui_font_12,
+#else
+                                    &ui_font_16,
+#endif
+  };
+  const lv_font_t* font = fonts[sizeof(fonts) / sizeof(fonts[0]) - 1];
+  for (const lv_font_t* candidate : fonts) {
+    if (settings_parts::text_width(candidate, text) <= width) {
+      font = candidate;
+      break;
+    }
+  }
+  lv_label_set_text(g_bar_title, text);
+  lv_obj_set_style_text_font(g_bar_title, font, 0);
+  lv_obj_set_height(g_bar_title, lv_font_get_line_height(font));
+  lv_obj_set_y(g_bar_title, settings_style::head_center_y() - lv_font_get_line_height(font) / 2 - settings_style::kGrid.pad_top);
+}
+
+// Portrait: a category as the 1x1 Home tile (the folder tile: the circle
+// centred above, the name centred below, mockup catTile1), the block centred
+// on the tile; `font` is one font for all four names.
+void build_category_square(lv_obj_t* panel, uint8_t index, int x, int y, int w, int h, const lv_font_t* font) {
+  CategoryView& view = g_views[index];
+  const Category category = static_cast<Category>(index);
+  view.box = settings_parts::plain(panel);
+  lv_obj_add_flag(view.box, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_pos(view.box, x, y);
+  lv_obj_set_size(view.box, w, h);
+  lv_obj_set_style_bg_opa(view.box, LV_OPA_COVER, 0);
+  settings_style::apply_tile_radius(view.box);
+  lv_obj_add_event_cb(view.box, on_category_clicked, LV_EVENT_CLICKED,
+                      reinterpret_cast<void*>(static_cast<uintptr_t>(index)));
+  const int inset = settings_style::tile_inset();
+  const int disc = settings_style::half_tile_disc();
+  const int line = lv_font_get_line_height(font);
+  const int space = 2 * inset;
+  const int top = (h - disc - space - line) / 2;
+  view.disc = circle(view.box, (w - disc) / 2, top, disc, category_icon(category), ui_theme::text());
+  lv_obj_set_style_bg_opa(view.disc, LV_OPA_COVER, 0);
+  view.icon = lv_obj_get_child(view.disc, 0);
+  view.title = lv_label_create(view.box);
+  lv_label_set_text(view.title, category_title(category));
+  lv_label_set_long_mode(view.title, LV_LABEL_LONG_CLIP);
+  lv_obj_set_size(view.title, w - 4 * inset, line);
+  lv_obj_set_style_text_align(view.title, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_style_text_font(view.title, font, 0);
+  lv_obj_set_style_text_color(view.title, lv_color_hex(ui_theme::text()), 0);
+  lv_obj_set_pos(view.title, 2 * inset, top + disc + space);
+}
+
+// Head, categories and the page area, in the colors of the moment (mockup
+// head=popup/row, headings in the groups): Settings is a popup card at full
+// size. The head is the popup head (settings_style head_*); below it, one
+// grid gap inside the frame on every side, landscape panels show the four
+// categories as tiles in the first two grid columns (sharing the height
+// evenly, the Settings exception) with the page beside them, square panels
+// put them as round tabs into the head beside the X, portrait panels as one
+// row of 1x1 tiles above the page. No card behind the page: its groups are
+// the surfaces, like tiles, one grid gap apart.
+void build_frame() {
+  lv_obj_t* panel = g_panel;
+  if (!panel) return;
+  clear_refs();
+  lv_obj_clean(panel);
+  g_built_card = settings_model::card_color() & 0xFFFFFF;
+  g_built_glow = ui_surface_style::icon_glow_percent();
+  g_built_text = &settings_model::text();
+  const Colors palette = colors();
+  const i18n::Strings& s = settings_model::text();
+
+  // Screen coordinates minus the panel's padding (the grid margins).
+  const int px = settings_style::kGrid.pad_left;
+  const int py = settings_style::kGrid.pad_top;
+  const int d = popup_layout::kHeaderIconDiscSize;
+  const int close = popup_layout::kCloseButtonSize;
+  const int cy = settings_style::head_center_y();
+  const int disc_x = settings_style::head_disc_x();
+  const int close_left = settings_style::inner_right() - close;
+
+  // The gear circle, the same head on every panel.
+  lv_obj_t* gear = circle(panel, disc_x - px, cy - d / 2 - py, d, "cog", ui_theme::text());
+  lv_obj_set_style_bg_color(
+      gear,
+      lv_color_hex(settings_style::tone(ui_theme::light() ? ui_theme::screen() : palette.card, settings_style::kGearColor).disc),
+      0);
+  lv_obj_set_style_bg_opa(gear, LV_OPA_COVER, 0);
+
+  // The X like the popups' (white veil while pressed), its pressed shape
+  // settings_style::kClosePressed with the tile radius; the touch area keeps
+  // the X's size.
+  const int pressed = settings_style::kClosePressed;
+  g_close = settings_parts::plain(panel);
+  lv_obj_set_pos(g_close, close_left + (close - pressed) / 2 - px, cy - pressed / 2 - py);
+  lv_obj_set_size(g_close, pressed, pressed);
+  ui_surface_style::apply_radius(g_close, settings_style::kClosePressedBaseline);
+  lv_obj_add_flag(g_close, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_bg_color(g_close, lv_color_hex(ui_theme::icon()), LV_STATE_PRESSED);
+  lv_obj_set_style_bg_opa(g_close, LV_OPA_20, LV_STATE_PRESSED);
+  lv_obj_set_ext_click_area(g_close, popup_layout::kCloseButtonClickArea + (close - pressed) / 2);
+  lv_obj_t* glyph = lv_label_create(g_close);
+  lv_label_set_text(glyph, getMdiChar("window-close").c_str());
+  if (FONT_MDI_ICONS) lv_obj_set_style_text_font(glyph, FONT_MDI_ICONS, 0);
+  lv_obj_set_style_text_color(glyph, lv_color_hex(ui_theme::text()), 0);
+  lv_obj_center(glyph);
+  lv_obj_add_event_cb(g_close, on_close_clicked, LV_EVENT_CLICKED, nullptr);
+
+  int title_end = close_left;
+  if (layout() == Layout::Tabs) {
+    // The four tabs in the circle's size right beside the X, always in the
+    // same place (moving tabs confused, user 2026-10-07); the open page's tab
+    // sits in its circle. A fifth of a circle between them.
+    const int gap = (d + 2) / 5;
+    const int left = close_left - gap - kCategoryCount * d - (kCategoryCount - 1) * gap;
+    for (uint8_t i = 0; i < kCategoryCount; ++i) {
+      CategoryView& view = g_views[i];
+      view.box = circle(panel, left + i * (d + gap) - px, cy - d / 2 - py, d, category_icon(static_cast<Category>(i)),
+                        0xFFFFFF);
+      view.icon = lv_obj_get_child(view.box, 0);
+      make_round_button(view.box, on_category_clicked, reinterpret_cast<void*>(static_cast<uintptr_t>(i)));
+    }
+    title_end = left - gap;
+  }
+  const int title_x = disc_x + d + popup_layout::kHeaderIconDiscGap;
+  g_bar_title = lv_label_create(panel);
+  lv_label_set_long_mode(g_bar_title, LV_LABEL_LONG_DOT);
+  lv_obj_set_width(g_bar_title, title_end - title_x);
+  lv_obj_set_x(g_bar_title, title_x - px);
+  lv_obj_set_style_text_color(g_bar_title, lv_color_hex(ui_theme::text()), 0);
+  set_head_title(s.tile_type_settings);
+
+  // The body: one grid gap inside the frame, from one gap below the X.
+  const int body_x = settings_style::inner_left();
+  const int body_y = settings_style::body_top();
+  const int body_w = settings_style::inner_right() - body_x;
+  const int body_h = settings_style::inner_bottom() - body_y;
+  int card_x = body_x;
+  int card_y = body_y;
+  int card_w = body_w;
+  int card_h = body_h;
+  if (layout() == Layout::Split) {
+    const int column = settings_style::grid_w(0, 2);
+    const float tile_h = (body_h - (kCategoryCount - 1) * GRID_GAP) / static_cast<float>(kCategoryCount);
+    for (uint8_t i = 0; i < kCategoryCount; ++i) {
+      build_category_tile(panel, i, body_x - px, static_cast<int>(lroundf(body_y + i * (tile_h + GRID_GAP))) - py,
+                          column, static_cast<int>(lroundf(tile_h)));
+    }
+    card_x = body_x + column + GRID_GAP;
+    card_w = body_w - column - GRID_GAP;
+  } else if (layout() == Layout::Portrait) {
+    // One row of four, nine tenths of a grid row high (user 2026-10-07: 1x1
+    // tiles in one row, not so tall; 2026-10-12: a little taller than three
+    // quarters, it looks nicer); the width shared evenly.
+    const int tile_h = static_cast<int>(lroundf(0.9f * (settings_style::kGrid.cell_h + GRID_GAP) - GRID_GAP));
+    const float tile_w = (body_w - (kCategoryCount - 1) * GRID_GAP) / static_cast<float>(kCategoryCount);
+    // One font for all four names: the largest that fits every one.
+    const int room = static_cast<int>(tile_w) - 4 * settings_style::tile_inset();
+    const lv_font_t* const fonts[] = {settings_style::small_font(),
+#if defined(DEVICE_LAYOUT_480X480)
+                                      &ui_font_12,
+#else
+                                      &ui_font_16,
+#endif
+    };
+    const lv_font_t* font = fonts[sizeof(fonts) / sizeof(fonts[0]) - 1];
+    for (const lv_font_t* candidate : fonts) {
+      bool fits = true;
+      for (uint8_t i = 0; i < kCategoryCount; ++i) {
+        if (settings_parts::text_width(candidate, category_title(static_cast<Category>(i))) > room) fits = false;
+      }
+      if (fits) {
+        font = candidate;
+        break;
+      }
+    }
+    for (uint8_t i = 0; i < kCategoryCount; ++i) {
+      const int x = static_cast<int>(lroundf(body_x + i * (tile_w + GRID_GAP)));
+      const int right = static_cast<int>(lroundf(body_x + i * (tile_w + GRID_GAP) + tile_w));
+      build_category_square(panel, i, x - px, body_y - py, right - x, tile_h, font);
+    }
+    card_y = body_y + tile_h + GRID_GAP;
+    card_h = body_h - tile_h - GRID_GAP;
+  }
+  // The page area: no card of its own, its groups are the surfaces.
+  g_card = settings_parts::plain(panel);
+  lv_obj_set_pos(g_card, card_x - px, card_y - py);
+  lv_obj_set_size(g_card, card_w, card_h);
+  g_page = settings_parts::plain(g_card);
+  settings_parts::mark_surface_page(g_page);
+  g_card_width = card_w;
+  g_page_width = card_w;
+  lv_obj_set_size(g_page, card_w, card_h);
+  lv_obj_set_flex_flow(g_page, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(g_page, GRID_GAP, 0);
+  // A page taller than its area scrolls up and down (user 2026-10-14: the
+  // S3's Display page with Design cut the screensaver's brightness off); an
+  // open option list closes, it would stay where its row was.
+  // Clickable too: LVGL scrolls what a touch lands on (or its parents), and
+  // the rows are no input; a finger on a row's name moved nothing (S3 b450).
+  lv_obj_add_flag(g_page, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+  lv_obj_set_scroll_dir(g_page, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(g_page, LV_SCROLLBAR_MODE_OFF);
+  lv_obj_add_event_cb(g_page, [](lv_event_t*) { settings_parts::close_options(); }, LV_EVENT_SCROLL_BEGIN, nullptr);
+
+  for (uint8_t i = 0; i < kCategoryCount; ++i) style_category(i);
+  refresh_lines();
+}
+
+void select_category(Category category) {
+  if (category == g_category && g_page_built) return;
+  g_category = category;
+  for (uint8_t i = 0; i < kCategoryCount; ++i) style_category(i);
+  // Another page starts at its top (its own rebuilds keep the place).
+  if (g_page) lv_obj_scroll_to_y(g_page, 0, LV_ANIM_OFF);
+  build_page();
+}
+
+// The first-start setup takes the whole panel: the frame goes while it runs
+// and is built again when Settings shows without it.
+void show_setup() {
+  if (!g_panel || settings_model::setup_step() < 0) return;
+  if (g_lines_timer) {
+    lv_timer_delete(g_lines_timer);
+    g_lines_timer = nullptr;
+  }
+  stop_page_timer();
+  settings_parts::close_options();
+  if (!setup_screen::shown()) {
+    clear_refs();
+    lv_obj_clean(g_panel);
+    g_built_text = nullptr;
+  }
+  setup_screen::show(g_panel);
+}
+
+}  // namespace
+
+void build(lv_obj_t* panel) {
+  g_panel = panel;
+  build_frame();
+}
+
+void prepare_show() {
+  if (!g_panel) return;
+  if (settings_model::setup_step() >= 0) {
+    show_setup();
+    return;
+  }
+  if (setup_screen::shown()) {
+    // The setup ended: the frame comes back.
+    setup_screen::hide();
+    g_built_text = nullptr;
+  }
+  if ((settings_model::card_color() & 0xFFFFFF) != g_built_card ||
+      ui_surface_style::icon_glow_percent() != g_built_glow || &settings_model::text() != g_built_text) {
+    build_frame();
+  }
+  refresh_lines();
+  build_page();
+  if (!g_lines_timer) g_lines_timer = lv_timer_create(on_lines_timer, 5000, nullptr);
+}
+
+void did_hide() {
+  if (g_lines_timer) {
+    lv_timer_delete(g_lines_timer);
+    g_lines_timer = nullptr;
+  }
+  close_dialog();
+  close_entry();
+  stop_page_timer();
+  clear_display_refs();
+  clear_locale_refs();
+  clear_system_refs();
+  if (g_page) lv_obj_clean(g_page);
+  g_page_built = false;
+  setup_screen::hide();
+}
+
+namespace {
+
+void refresh_line(uint8_t index) {
+  if (index >= kCategoryCount) return;
+  const CategoryView& view = g_views[index];
+  const Category category = static_cast<Category>(index);
+  // The selected category's labels draw on its filled card (style_category).
+  const ui_theme::SurfaceScope surface(category_surface(index));
+  if (view.icon) {
+    const auto icon = getMdiChar(category_icon(category));
+    if (strcmp(lv_label_get_text(view.icon), icon.c_str()) != 0) lv_label_set_text(view.icon, icon.c_str());
+  }
+  if (!view.line) return;
+  char buf[96];
+  bool warn = false;
+  category_line(category, buf, sizeof(buf), &warn);
+  if (strcmp(lv_label_get_text(view.line), buf) != 0) lv_label_set_text(view.line, buf);
+  // Only a change touches the styles: every set redraws the line, and the
+  // hotspot loop reports the network on each pass (the clock flickered).
+  const lv_color_t color = warn ? lv_color_hex(settings_style::warn_color()) : lv_color_hex(ui_theme::text());
+  // On the selected (filled) category the line is white like its title (user
+  // 2026-10-11: "100 % · Standby nie" on the selected Display tab).
+  const bool selected = index == static_cast<uint8_t>(g_category);
+  const lv_opa_t opa = warn || selected ? LV_OPA_COVER : settings_style::kGreyOpa;
+  if (!lv_color_eq(lv_obj_get_style_text_color(view.line, LV_PART_MAIN), color)) {
+    lv_obj_set_style_text_color(view.line, color, 0);
+  }
+  if (lv_obj_get_style_text_opa(view.line, LV_PART_MAIN) != opa) lv_obj_set_style_text_opa(view.line, opa, 0);
+}
+
+}  // namespace
+
+void refresh_lines() {
+  for (uint8_t i = 0; i < kCategoryCount; ++i) refresh_line(i);
+}
+
+void sync_rotation() {
+  settings_parts::segment_select(g_rotation_segment, settings_model::rotation_index());
+  setup_screen::sync_rotation();
+}
+
+void texts_changed() {
+  g_built_text = nullptr;
+  if (g_panel && !lv_obj_has_flag(g_panel, LV_OBJ_FLAG_HIDDEN)) prepare_show();
+}
+
+void show_category(uint8_t index) {
+  if (index < kCategoryCount && !setup_screen::shown()) select_category(static_cast<Category>(index));
+}
+
+void system_changed() {
+  system_tick();
+  setup_screen::refresh();
+}
+
+void setup_changed() {
+  if (g_panel && !lv_obj_has_flag(g_panel, LV_OBJ_FLAG_HIDDEN)) prepare_show();
+}
+
+bool overlay_open() {
+  return settings_parts::options_open() || g_dialog != Dialog::None || settings_entry::is_open() ||
+         settings_model::setup_step() >= 0;
+}
+
+void close_overlays() {
+  settings_parts::close_options();
+  close_dialog();
+  close_entry();
+  setup_screen::close_overlays();
+}
+
+}  // namespace settings_screen

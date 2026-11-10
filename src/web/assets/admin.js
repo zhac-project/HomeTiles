@@ -10,6 +10,76 @@ function t(key) {
     return out;
   }
   let APP_LOCALE = document.documentElement.lang || 'en';
+
+  // Issue #73: the panel builds this page in its own language, so a language
+  // change made on the display shows only after a reload. A small poll
+  // notices it and reloads once nothing is being edited here.
+  const DEVICE_LANGUAGE_POLL_MS = 15000;
+
+  function adminEditsPending() {
+    if (typeof layoutWindowOpen === 'function' && layoutWindowOpen()) return true;
+    const active = document.activeElement;
+    if (active?.matches?.('input, textarea, select')) return true;
+    if (dragSource || resizeState || fileManagerUploadBusy || hardwareIoDirty) return true;
+    const busy = map => Object.values(map || {}).some(Boolean);
+    return busy(autoSaveTimers) || busy(saveInFlightByTile) || busy(queuedSaveByTile);
+  }
+
+  // The page's Web Admin password state (the header badge), null without it.
+  function pageWebAuth() {
+    const badge = document.getElementById('web_auth_badge');
+    return badge ? badge.classList.contains('is-on') : null;
+  }
+
+  async function checkDeviceLanguage() {
+    if (document.hidden) return;
+    try {
+      const response = await fetch('api/language', {cache: 'no-store'});
+      // A password set on the panel: this page now needs the login.
+      if (response.status === 401 && pageWebAuth() === false && !adminEditsPending()) location.reload();
+      if (!response.ok) return;
+      const data = await response.json();
+      applyPanelClockFormats(Number(data?.time_format), Number(data?.date_format));
+      if (typeof applyPanelThemeFromDevice === 'function') applyPanelThemeFromDevice(data?.theme, data?.theme_shown);
+      const device = String(data?.language || '').toLowerCase();
+      const page = String(document.documentElement.lang || APP_LOCALE).toLowerCase();
+      // The language or the password changed on the panel (user 2026-10-15:
+      // a password removed there showed only after a reload).
+      const auth = data?.web_auth === undefined ? null : Number(data.web_auth) === 1;
+      const authChanged = auth !== null && pageWebAuth() !== null && auth !== pageWebAuth();
+      if (((device && device !== page) || authChanged) && !adminEditsPending()) location.reload();
+    } catch (error) {
+      // Offline or signed out: the next poll tries again.
+    }
+  }
+
+  // A time or date format changed on the panel or in Settings: the head's
+  // time and every clock preview on "Auto" follow without a reload.
+  function applyPanelClockFormats(time, date) {
+    const timeChanged = [1, 2].includes(time) && typeof PANEL_TIME_FORMAT === 'number' && time !== PANEL_TIME_FORMAT;
+    const dateChanged = [1, 2, 3].includes(date) && typeof PANEL_DATE_FORMAT === 'number' && date !== PANEL_DATE_FORMAT;
+    if (!timeChanged && !dateChanged) return;
+    if (timeChanged) PANEL_TIME_FORMAT = time;
+    if (dateChanged) PANEL_DATE_FORMAT = date;
+    if (typeof refreshHeadBarTime === 'function') refreshHeadBarTime();
+    if (typeof tileDataLoadedTabs !== 'undefined' && typeof renderTileFromData === 'function') {
+      tileDataLoadedTabs.forEach(tab => {
+        getTilesData(tab).forEach((tile, index) => {
+          if (tile && String(tile.type) === '9') renderTileFromData(tab, index, tile, sensorMetaCache);
+        });
+      });
+    }
+    if (typeof screensaverLoaded !== 'undefined' && screensaverLoaded && typeof renderScreensaverEditor === 'function') {
+      renderScreensaverEditor();
+    }
+  }
+
+  function watchDeviceLanguage() {
+    window.setInterval(checkDeviceLanguage, DEVICE_LANGUAGE_POLL_MS);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) checkDeviceLanguage();
+    });
+  }
   function formatLocalizedNumber(value, decimals = 0, trimTrailingZeros = false) {
     const numeric = Number(String(value ?? '').trim().replace(',', '.'));
     if (!Number.isFinite(numeric)) return '--';
@@ -57,208 +127,319 @@ function t(key) {
     }
   }
 
-// Icon discs are a root class: every preview grid, including cached and lazily
-// inserted folders, follows it without re-rendering a tile.
-let iconDiscsSaveSequence = 0;
-function iconDiscsEnabled() {
-  return !document.documentElement.classList.contains('icon-discs-off');
-}
-function applyIconDiscsPreview(enabled) {
-  document.documentElement.classList.toggle('icon-discs-off', !enabled);
-  document.querySelectorAll('.global-icon-disc-toggle').forEach(input => {
-    input.checked = !!enabled;
-  });
-}
-async function saveIconDiscs(enabled) {
-  const wanted = !!enabled;
-  const sequence = ++iconDiscsSaveSequence;
-  applyIconDiscsPreview(wanted);
+// The head bar's time and the pages' overview on its dots (Global tab
+// "Kopfleiste", every grid page's copy kept in step), saved at once.
+async function saveHeadSwitch(part, enabled) {
+  const show = value => {
+    document.querySelectorAll('.head-bar-' + part).forEach(box => { box.checked = value; });
+    if (part === 'clock') {
+      document.querySelectorAll('.head-bar-preview .head-time').forEach(time => time.classList.toggle('is-off', !value));
+    }
+  };
+  show(!!enabled);
   try {
-    const response = await fetch('api/display/icon-discs', {
+    const response = await fetch('api/display/head', {
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: 'enabled=' + (wanted ? '1' : '0')
+      body: 'part=' + encodeURIComponent(part) + '&enabled=' + (enabled ? '1' : '0')
     });
     if (!response.ok) throw new Error('HTTP ' + response.status);
   } catch (error) {
-    if (sequence !== iconDiscsSaveSequence) return;
-    applyIconDiscsPreview(!wanted);
+    show(!enabled);
     showNotification(t('networkErrorSave'), false);
   }
 }
 
-// Glow strength of colored icon discs: previews read the root variable
-// --icon-glow-pct (applyIconDiscTint); the device rebuilds its tiles after
-// the save. Range and step mirror icon_glow.h.
-let iconGlowConfirmed = null;
-let iconGlowSaveSequence = 0;
+// The gear in Home's head with a bar layout (a Settings tile option): saved
+// at once, the preview's head follows.
+async function saveHeadGear(enabled) {
+  const show = value => {
+    document.querySelectorAll('.settings-head-gear').forEach(box => { box.checked = value; });
+    document.querySelectorAll('.head-bar-preview .head-gear').forEach(gear => gear.classList.toggle('is-off', !value));
+  };
+  show(!!enabled);
+  try {
+    const response = await fetch('api/display/head-gear', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: 'enabled=' + (enabled ? '1' : '0')
+    });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+  } catch (error) {
+    show(!enabled);
+    showNotification(t('networkErrorSave'), false);
+  }
+}
+
+// Home's own title and icon in its head (the head bar tab, user 2026-10-13):
+// Auto is "Home" in the panel's language and the house, stored empty. Every
+// grid page's copy and Home's head previews follow; the title is saved after
+// a short pause, an icon at once.
+let homeHeadSaveTimer = 0;
+function homeHeadState(tab) {
+  const autoTitle = document.getElementById(tab + '_head_tile_title_auto')?.dataset.autoTitle || '';
+  const typed = String(document.getElementById(tab + '_head_tile_title')?.value || '').replace(/\s+/g, ' ').trim();
+  const title = typed === autoTitle ? '' : typed;
+  const icon = normalizeMdiIconName(String(document.getElementById(tab + '_head_tile_icon')?.value || ''));
+  return {title, icon, shownTitle: title || autoTitle, shownIcon: icon || 'home'};
+}
+function showHomeHead(state, tab) {
+  document.querySelectorAll('textarea.home-head-title').forEach(field => {
+    if (field.id !== tab + '_head_tile_title' && field.value !== state.shownTitle) field.value = state.shownTitle;
+  });
+  document.querySelectorAll('input.home-head-icon').forEach(field => {
+    if (field.value !== state.icon) field.value = state.icon;
+  });
+  document.querySelectorAll('.head-bar-preview.home-head').forEach(head => {
+    const title = head.querySelector('.head-title');
+    if (title) title.textContent = state.shownTitle;
+    const icon = head.querySelector('.head-disc > i');
+    if (icon) icon.className = 'mdi mdi-' + state.shownIcon;
+  });
+}
+async function saveHomeHead(state) {
+  try {
+    const response = await fetch('api/display/home-head', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: 'title=' + encodeURIComponent(state.title) + '&icon=' + encodeURIComponent(state.icon)
+    });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+  } catch (error) {
+    showNotification(t('networkErrorSave'), false);
+  }
+}
+document.addEventListener('input', event => {
+  const field = event.target;
+  const title = field?.classList?.contains('home-head-title');
+  if (!title && !field?.classList?.contains('home-head-icon')) return;
+  // One line: a pasted line break becomes a space.
+  if (title && field.value.includes('\n')) field.value = field.value.replace(/\s*\n\s*/g, ' ');
+  const tab = field.id.replace(/_head_tile_(title|icon)$/, '');
+  const state = homeHeadState(tab);
+  showHomeHead(state, tab);
+  clearTimeout(homeHeadSaveTimer);
+  homeHeadSaveTimer = setTimeout(() => saveHomeHead(state), title ? 600 : 0);
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Enter' && event.target?.classList?.contains('home-head-title')) event.preventDefault();
+});
+// An emptied title shows Auto's name again when the field is left.
+document.addEventListener('change', event => {
+  const field = event.target;
+  if (!field?.classList?.contains('home-head-title')) return;
+  const shown = homeHeadState(field.id.replace(/_head_tile_title$/, '')).shownTitle;
+  if (field.value !== shown) field.value = shown;
+});
+
+// A layout (grid_layout.h) is read at boot: the layout window restarts the
+// panel after choosing one.
+function restartPanelForLayout() {
+  const restartForm = document.getElementById('admin_restart_form');
+  // form.submit() cannot carry the CSRF header a password-protected panel
+  // requires (hardware/editor.js restartHardwareIoNow).
+  if (restartForm && !window.HomeTilesAuth?.csrfToken()) {
+    window.setTimeout(() => restartForm.submit(), 100);
+    return;
+  }
+  fetch('restart', {method: 'POST'}).catch(() => {}).finally(() => {
+    window.setTimeout(() => window.location.assign('./'), 300);
+  });
+}
+// The head bar preview's time (web_admin_html.cpp), from the browser clock
+// in the panel's 12/24-hour format.
+function refreshHeadBarTime() {
+  const now = new Date();
+  document.querySelectorAll('.head-bar-preview .head-time').forEach(el => {
+    let hour = now.getHours();
+    // The panel's format (PANEL_TIME_FORMAT follows a change, localization.js).
+    const hour12 = typeof PANEL_TIME_FORMAT === 'number' ? PANEL_TIME_FORMAT === 2 : el.dataset.hour12 === '1';
+    if (hour12) hour = hour % 12 || 12;
+    const text = String(hour).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+    // Fixed-width digits like the panel's head (tabular_digits).
+    if (typeof setClockDigits === 'function') setClockDigits(el, text);
+    else el.textContent = text;
+  });
+}
+// The layout window shows the head with any layout.
+if (typeof window !== 'undefined' && window.setInterval) {
+  window.setInterval(refreshHeadBarTime, 30000);
+}
+
+// The fixed Circle strength (icon_glow::kDefault, user 2026-10-11: no circle
+// settings): previews read the root variable --icon-glow-pct.
 function currentIconGlow() {
   const raw = String(getComputedStyle(document.documentElement).getPropertyValue('--icon-glow-pct')).trim();
   const value = Number(raw);
   return raw !== '' && Number.isFinite(value) ? value : 25;
 }
-function previewIconGlowLive(value) {
-  const number = Math.round(Number(value) / 5) * 5;
-  const percent = Math.min(100, Math.max(0, Number.isFinite(number) ? number : 25));
-  if (iconGlowConfirmed === null) iconGlowConfirmed = currentIconGlow();
-  document.documentElement.style.setProperty('--icon-glow-pct', String(percent));
-  document.querySelectorAll('.global-icon-glow').forEach(input => { input.value = String(percent); });
-  document.querySelectorAll('.global-icon-glow-value').forEach(output => { output.textContent = percent + ' %'; });
+// The theme (ui_theme.h): the panel switches while running; every grid's
+// field shows the saved choice.
+let themeSaveSequence = 0;
+let themeChosen = null;
+let themeSaveBusy = 0;
+// The preview follows the theme at once: the roles (--pv-*) switch with
+// html[data-panel-theme], and what the script computes from them (circles,
+// tints, readable icons, bars, the head circle) is computed again.
+function applyPanelThemePreview(theme) {
+  document.documentElement.dataset.panelTheme = theme === '1' ? 'light' : 'dark';
+  const glow = currentIconGlow();
+  const parse = hex => /^#[0-9a-f]{6}$/i.test(hex) ? [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16)) : null;
+  const card = parse(panelVar('--tile-card', '')) || [26, 26, 26];
+  // The neutral circle for tiles the script does not tint (web_admin_styles).
+  const disc = toneFill(card, [255, 255, 255], false, glow, false);
+  document.documentElement.style.setProperty('--icon-disc-bg',
+    'rgba(' + disc.discColor.join(',') + ',' + (disc.discOpa / 255).toFixed(3) + ')');
+  // The head's circle: the gear's circle over the screen (light) or the tile
+  // color (dark), like home_bar.cpp.
+  const headBase = panelLight() ? (panelRole('screen') || card) : card;
+  document.documentElement.style.setProperty('--head-disc-color',
+    toneHex(toneFill(headBase, [0x9E, 0x9E, 0x9E], false, glow, false).disc));
+  tileDataLoadedTabs.forEach(tab => {
+    getTilesData(tab).forEach((tile, index) => { if (tile) renderTileFromData(tab, index, tile, sensorMetaCache); });
+  });
+  // The parked Settings tile keeps its card color from its last render: draw
+  // it again in the new theme (settings/access.js).
+  const parked = document.getElementById('settingsHiddenTile');
+  if (parked && typeof renderSettingsHiddenSlot === 'function') renderSettingsHiddenSlot(parked.dataset.hidden === '1');
   document.querySelectorAll('.tile').forEach(tile => applyIconDiscTint(tile));
-  return percent;
+  if (typeof currentTileTab === 'string' && currentTileTab) updateTilePreview(currentTileTab);
 }
-async function saveIconGlow(value) {
-  const percent = previewIconGlowLive(value);
-  const sequence = ++iconGlowSaveSequence;
+// Automatic ('2', theme_schedule.h) shows what the panel picked for the time
+// of day: the answer's "effective" theme.
+function shownPanelTheme() {
+  return document.documentElement.dataset.panelTheme === 'light' ? '1' : '0';
+}
+// The design's segmented choice in every Global tab (web_admin_html.cpp).
+function showThemeChoice(theme, scope = document) {
+  scope.querySelectorAll('.global-theme [data-theme]').forEach(button => {
+    const active = button.dataset.theme === theme;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+}
+async function saveTheme(value) {
+  const theme = ['0', '1', '2'].includes(String(value)) ? String(value) : '0';
+  const previous = themeChosen !== null ? themeChosen
+    : (document.querySelector('.global-theme [data-theme].active')?.dataset.theme || shownPanelTheme());
+  const previousShown = shownPanelTheme();
+  themeChosen = theme;
+  showThemeChoice(theme);
+  if (theme !== '2') applyPanelThemePreview(theme);
+  const sequence = ++themeSaveSequence;
+  ++themeSaveBusy;
   try {
-    const response = await fetch('api/display/icon-glow', {
+    const response = await fetch('api/display/theme', {
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: 'percent=' + percent
+      body: 'theme=' + theme
     });
     if (!response.ok) throw new Error('HTTP ' + response.status);
-    if (sequence === iconGlowSaveSequence) iconGlowConfirmed = percent;
+    const answer = await response.json().catch(() => null);
+    if (sequence !== themeSaveSequence) return;
+    const shown = String(answer?.effective ?? (theme === '2' ? previousShown : theme));
+    if (shown !== shownPanelTheme()) applyPanelThemePreview(shown === '1' ? '1' : '0');
   } catch (error) {
-    if (sequence !== iconGlowSaveSequence) return;
-    const confirmed = iconGlowConfirmed;
-    iconGlowConfirmed = null;
-    if (confirmed !== null) previewIconGlowLive(confirmed);
+    if (sequence !== themeSaveSequence) return;
+    themeChosen = previous;
+    showThemeChoice(previous);
+    if (previousShown !== shownPanelTheme()) applyPanelThemePreview(previousShown);
     showNotification(t('networkErrorSave'), false);
+  } finally {
+    --themeSaveBusy;
   }
+}
+// A design chosen on the panel (Settings > Display, the setup) or Automatic
+// turning at dusk (user 2026-10-14: the page kept the old one): the poll
+// (localization.js) brings the stored choice and the shown look, the fields
+// and the previews follow. Not while this page saves one itself.
+function applyPanelThemeFromDevice(stored, shown) {
+  const theme = String(stored);
+  if (themeSaveBusy || !['0', '1', '2'].includes(theme)) return;
+  if (document.querySelector('.global-theme [data-theme].active')?.dataset.theme !== theme) {
+    themeChosen = theme;
+    showThemeChoice(theme);
+  }
+  const look = String(shown) === '1' ? '1' : '0';
+  if (look !== shownPanelTheme()) applyPanelThemePreview(look);
+}
+function syncGlobalDisplayControls(tabEl) {
+  if (themeChosen !== null) showThemeChoice(themeChosen, tabEl);
+  if (gestureActions) showGestureActions(gestureActions, tabEl);
 }
 
-// The global default tile color paints every tile without its own color
-// through --tile-default-bg; reset and new tiles take it as their default.
-let defaultTileColorConfirmed = null;
-let defaultTileColorSaveSequence = 0;
-function currentDefaultTileColor() {
-  const value = getComputedStyle(document.documentElement)
-    .getPropertyValue('--tile-default-bg').trim();
-  return /^#[0-9a-f]{6}$/i.test(value) ? value.toUpperCase() : '#2A2A2A';
-}
-function previewDefaultTileColor(value) {
-  const color = String(value || '').trim().toUpperCase();
-  if (!/^#[0-9A-F]{6}$/.test(color)) return;
-  if (defaultTileColorConfirmed === null) {
-    defaultTileColorConfirmed = currentDefaultTileColor();
-  }
-  document.documentElement.style.setProperty('--tile-default-bg', color);
-  Object.values(typeof TILE_TYPE_REGISTRY === 'object' ? TILE_TYPE_REGISTRY : {})
-    .forEach(meta => { if (meta && meta.sharedBg) meta.defaultBg = color; });
-  document.querySelectorAll('.global-tile-color').forEach(input => { input.value = color; });
-  // Open editors of tiles without their own color show the new default.
-  document.querySelectorAll('input[type="color"][id$="_tile_color"]').forEach(input => {
-    if (input.dataset.bgColorDefault !== '1') return;
-    const tab = input.id.slice(0, -'_tile_color'.length);
-    const type = document.getElementById(tab + '_tile_type')?.value || '0';
-    if (getTileTypeMeta(type).sharedBg) input.value = color;
+// The gesture menu (swipe_gestures.h, user 2026-10-11): one action per edge
+// (0 off, 1 Settings, 2 Home, 3 Back, 4 screensaver; edges 0 left, 1 right,
+// 2 top, 3 bottom). An action chosen on a second edge swaps the two edges.
+// Every folder's Global tab shows the same menu.
+let gestureActions = null;
+// The stored actions: each select's data-action (the select's value already
+// shows a new choice when its change event runs).
+function readGestureActions(scope) {
+  const actions = [0, 0, 0, 0];
+  scope.querySelectorAll('.gesture-edge').forEach(select => {
+    actions[Number(select.dataset.edge)] = Number(select.dataset.action) || 0;
   });
-  return color;
+  return actions;
 }
-async function saveDefaultTileColor(value) {
-  const color = previewDefaultTileColor(value);
-  if (!color) return;
-  const sequence = ++defaultTileColorSaveSequence;
+function showGestureActions(actions, scope = document) {
+  scope.querySelectorAll('.gesture-edge').forEach(select => {
+    const action = String(actions[Number(select.dataset.edge)] || 0);
+    select.value = action;
+    select.dataset.action = action;
+  });
+}
+// While a save runs the selects show the wanted actions; data-action keeps
+// the stored ones until the panel answers.
+function scopeGestureSelects(actions) {
+  document.querySelectorAll('.gesture-edge').forEach(select => {
+    select.value = String(actions[Number(select.dataset.edge)] || 0);
+  });
+}
+// The menu as the panel keeps it (after a Settings access change, which may
+// turn the Settings swipe on for a hidden tile).
+async function refreshGestureMenu() {
   try {
-    const response = await fetch('api/display/tile-color', {
+    const response = await fetch('api/display/gestures', {cache: 'no-store'});
+    if (!response.ok) return;
+    const result = await response.json();
+    if (!result?.success || !Array.isArray(result.actions)) return;
+    gestureActions = result.actions.map(Number);
+    showGestureActions(gestureActions);
+  } catch (error) {
+    // Offline: the menu keeps what it shows.
+  }
+}
+async function saveGestureEdge(select) {
+  const edge = Number(select.dataset.edge);
+  const before = gestureActions || readGestureActions(select.closest('.gesture-settings') || document);
+  // The select shows the new action already: the edge's former action is
+  // the one in `before`.
+  const action = Number(select.value) || 0;
+  const wanted = before.slice();
+  const other = action ? wanted.findIndex((value, index) => value === action && index !== edge) : -1;
+  if (other >= 0) wanted[other] = before[edge];
+  wanted[edge] = action;
+  scopeGestureSelects(wanted);
+  try {
+    const response = await fetch('api/display/gestures', {
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: new URLSearchParams({color}).toString()
+      body: new URLSearchParams({left: wanted[0], right: wanted[1], top: wanted[2], bottom: wanted[3]}).toString()
     });
     if (!response.ok) throw new Error('HTTP ' + response.status);
     const result = await response.json();
-    if (!result.success || String(result.color).toUpperCase() !== color) {
-      throw new Error('invalid response');
+    if (!result?.success || !Array.isArray(result.actions)) throw new Error('invalid response');
+    gestureActions = result.actions.map(Number);
+    showGestureActions(gestureActions);
+    if (typeof noteSettingsSwipeSaved === 'function') {
+      noteSettingsSwipeSaved(gestureActions.includes(1), Number(result.settings_edge));
     }
-    if (sequence === defaultTileColorSaveSequence) defaultTileColorConfirmed = color;
   } catch (error) {
-    if (sequence !== defaultTileColorSaveSequence) return;
-    previewDefaultTileColor(defaultTileColorConfirmed || color);
+    gestureActions = before;
+    showGestureActions(before);
     showNotification(t('networkErrorSave'), false);
   }
-}
-function syncGlobalDisplayControls(tabEl) {
-  tabEl.querySelectorAll('.global-icon-disc-toggle').forEach(input => {
-    input.checked = iconDiscsEnabled();
-  });
-  const color = currentDefaultTileColor();
-  tabEl.querySelectorAll('.global-tile-color').forEach(input => { input.value = color; });
-  const glow = currentIconGlow();
-  tabEl.querySelectorAll('.global-icon-glow').forEach(input => { input.value = String(glow); });
-  tabEl.querySelectorAll('.global-icon-glow-value').forEach(output => { output.textContent = glow + ' %'; });
-}
-
-// The shared root variables also reach cached and lazily inserted folder grids.
-let tileRadiusConfirmed = null;
-let tileRadiusWanted = null;
-let tileRadiusSaving = false;
-let tileRadiusRevision = 0;
-let tileRadiusPreviewTimer = null;
-let tileRadiusLiveWanted = null;
-function previewTileRadiusLive(value) {
-  const radius = previewTileRadius(value);
-  tileRadiusLiveWanted = radius;
-  if (tileRadiusPreviewTimer === null) tileRadiusPreviewTimer = setTimeout(() => {
-    tileRadiusPreviewTimer = null;
-    queueTileRadius(tileRadiusLiveWanted, false);
-  }, 80);
-}
-function previewTileRadius(value) {
-  const input = document.querySelector('.global-tile-radius');
-  if (!input) return;
-  const radius = Math.max(Number(input.min), Math.min(Number(input.max), Math.round(Number(value))));
-  if (!Number.isFinite(radius)) return;
-  const root = document.documentElement;
-  if (tileRadiusConfirmed === null) {
-    tileRadiusConfirmed = Number(getComputedStyle(root).getPropertyValue('--tile-radius-device'));
-  }
-  const scale = Number(getComputedStyle(root).getPropertyValue('--radius-preview-scale'));
-  root.style.setProperty('--tile-radius', Math.max(1, Math.round(radius * scale)) + 'px');
-  root.style.setProperty('--tile-radius-device', String(radius));
-  document.querySelectorAll('.global-tile-radius').forEach(control => { control.value = radius; });
-  document.querySelectorAll('.global-tile-radius-value').forEach(output => { output.textContent = radius; });
-  tileRadiusRevision++;
-  return radius;
-}
-function saveTileRadius(value) {
-  clearTimeout(tileRadiusPreviewTimer);
-  tileRadiusPreviewTimer = null;
-  return queueTileRadius(value, true);
-}
-async function queueTileRadius(value, persist) {
-  const radius = previewTileRadius(value);
-  if (radius === undefined) return;
-  tileRadiusWanted = { radius, persist };
-  if (tileRadiusSaving) return;
-  tileRadiusSaving = true;
-  try {
-    while (tileRadiusWanted !== null) {
-      const wanted = tileRadiusWanted;
-      const revision = tileRadiusRevision;
-      tileRadiusWanted = null;
-      try {
-        const response = await fetch('api/display/tile-radius', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({ radius: String(wanted.radius), preview: wanted.persist ? '0' : '1' }).toString()
-        });
-        if (!response.ok) throw new Error('save failed');
-        const result = await response.json();
-        if (!result.success || result.radius !== wanted.radius) throw new Error('invalid response');
-        if (wanted.persist) tileRadiusConfirmed = wanted.radius;
-      } catch (error) {
-        if (tileRadiusWanted === null && revision === tileRadiusRevision) {
-          previewTileRadius(tileRadiusConfirmed);
-          showNotification(t('networkErrorSave'), false);
-        }
-      }
-    }
-  } finally { tileRadiusSaving = false; }
-}
-function syncTileRadiusControls(tabEl) {
-  const value = getComputedStyle(document.documentElement).getPropertyValue('--tile-radius-device').trim();
-  tabEl.querySelectorAll('.global-tile-radius').forEach(control => { control.value = value; });
-  tabEl.querySelectorAll('.global-tile-radius-value').forEach(output => { output.textContent = value; });
 }
   let tabSwitchSequence = 0;
 
@@ -278,13 +459,21 @@ function syncTileRadiusControls(tabEl) {
       button.removeAttribute('aria-current');
     });
     const active = buttons.find(button => button.dataset.tabTarget === tabName);
-    if (!active) return;
-    active.classList.add('active');
-    active.setAttribute('aria-current', 'page');
+    if (active) {
+      active.classList.add('active');
+      active.setAttribute('aria-current', 'page');
+    }
   }
 
+
   async function switchTab(tabName) {
+    // I/O became a Settings page; a remembered or linked I/O tab opens it.
+    if (tabName === 'tab-hardware') {
+      tabName = 'tab-network';
+      showSettingsPage('io');
+    }
     const sequence = ++tabSwitchSequence;
+    const picks = tileSelectionSeq;
     let target = document.getElementById(tabName);
     if (!target) {
       const folderId = folderIdFromAdminTabName(tabName);
@@ -344,11 +533,17 @@ function syncTileRadiusControls(tabEl) {
       }
       if (tileTab === 'screensaver') {
         initScreensaverEditor();
-      } else {
-        const rememberedIndex = getRememberedTileIndex(tileTab);
-        selectTile(rememberedIndex === null ? getTopLeftConfiguredTileIndex(tileTab) : rememberedIndex, tileTab);
+      } else if (tileSelectionSeq === picks || currentTileTab !== tileTab) {
+        // The tab's own pick first (user 2026-10-22: an empty cell or a
+        // page field came back as the top left tile).
+        if (!restoreTabSelection(tileTab)) {
+          const rememberedIndex = getRememberedTileIndex(tileTab);
+          selectTile(rememberedIndex === null ? getTopLeftConfiguredTileIndex(tileTab) : rememberedIndex, tileTab);
+        }
         window.requestAnimationFrame(restoreCurrentTileSelectionUi);
       }
+      // Else something was picked here while its grid loaded (user
+      // 2026-10-22: the pick jumped to the top left tile): it stays.
       // Let the browser paint the selected tab before cached/live values are
       // reconciled. This also keeps a cache hit from extending click latency.
       window.requestAnimationFrame(() => window.setTimeout(() => {
@@ -357,48 +552,18 @@ function syncTileRadiusControls(tabEl) {
         }
       }, 0));
     }
-    if (tabName === 'tab-network') {
-      window.setTimeout(() => {
-        if (typeof loadFileManager === 'function' && !fileManagerLoaded) loadFileManager();
-      }, 0);
-    }
-    if (tabName === 'tab-hardware') {
-      window.setTimeout(initHardwareIo, 0);
-    }
+    if (tabName === 'tab-network') runSettingsPageWork();
   }
 
-  // Caps the tile settings panel at exactly the space below header and tabs so
-  // that it scrolls internally instead of stretching the page.
+  // The Tile settings panel takes the height of the tile editor row, which
+  // fills the card on wide windows (admin.css); narrow windows stack it below
+  // the grid. Only an inline cap from an earlier layout is cleared here.
   function updateTileSettingsMaxHeight() {
-    document.querySelectorAll('.tile-settings').forEach(panel => {
-      panel.style.maxHeight = '';
-      if (window.innerWidth <= 1180) return;
-      const tab = panel.closest('.tab-content');
-      if (!tab || !tab.classList.contains('active')) return;
-      const top = panel.getBoundingClientRect().top + window.scrollY;
-      // Only card padding and wrapper spacing sit below the panel. Read those
-      // from the styles instead of measuring scrollHeight: on large windows
-      // scrollHeight is at least the viewport height and would cap the panel
-      // far too small.
-      let below = 24;
-      const card = panel.closest('.card');
-      if (card) {
-        const ccs = getComputedStyle(card);
-        below = (parseFloat(ccs.paddingBottom) || 0) + (parseFloat(ccs.borderBottomWidth) || 0);
-        const wrapper = card.parentElement;
-        if (wrapper) {
-          const wcs = getComputedStyle(wrapper);
-          below += (parseFloat(wcs.paddingBottom) || 0) + (parseFloat(wcs.marginBottom) || 0);
-        }
-      }
-      const h = window.innerHeight - top - below;
-      if (h > 240) panel.style.maxHeight = h + 'px';
-    });
+    document.querySelectorAll('.tile-settings').forEach(panel => { panel.style.maxHeight = ''; });
   }
-  // Resize fires many times per second while a window is dragged, and both
-  // handlers below are expensive: one forces a layout and reads computed styles
-  // per panel, the other re-renders the whole screensaver editor. Coalescing to
-  // one call per frame keeps that work off every single event.
+  // Resize fires many times per second while a window is dragged, and the
+  // screensaver handler below re-renders the whole screensaver editor.
+  // Coalescing to one call per frame keeps that work off every single event.
   function perFrame(callback) {
     let frame = 0;
     return () => {
@@ -420,13 +585,13 @@ function syncTileRadiusControls(tabEl) {
     document.querySelectorAll('.tile-clock-time').forEach(el => {
       if (el.dataset.autoClock === '1' || el.textContent.trim() === '--:--') {
         el.dataset.autoClock = '1';
-        el.textContent = getClockPreviewTime(0);
+        setClockDigits(el, getClockPreviewTime(0));
       }
     });
     document.querySelectorAll('.tile-clock-date').forEach(el => {
       if (el.dataset.autoClock === '1' || el.textContent.trim() === '--.--.----') {
         el.dataset.autoClock = '1';
-        el.textContent = getClockPreviewDate(0);
+        setClockDigits(el, getClockPreviewDate(0));
       }
     });
     if (typeof fitCompactClockPreview === 'function') {
@@ -435,8 +600,8 @@ function syncTileRadiusControls(tabEl) {
     if (screensaverDraft) {
       const time = document.getElementById('screensaverClockTime');
       const date = document.getElementById('screensaverClockDate');
-      if (time) time.textContent = getClockPreviewTime(screensaverDraft.time_format);
-      if (date) date.textContent = getScreensaverClockPreviewDate(screensaverDraft);
+      if (time) setClockDigits(time, getClockPreviewTime(screensaverDraft.time_format));
+      if (date) setClockDigits(date, getScreensaverClockPreviewDate(screensaverDraft));
     }
   }
 
@@ -467,6 +632,84 @@ function syncTileRadiusControls(tabEl) {
     const useEthernet = mode.value === 'ethernet';
     wifi.classList.toggle('is-hidden', useEthernet);
   }
+  // Settings tab: a list of pages like the panel's Settings (WLAN,
+  // Lokalisierung, System, then I/O, camera, files and diagnostics). One page
+  // shows at a time; the footer under the list and the page carries that
+  // page's buttons. Each page scrolls by itself, with its scrollbar in the
+  // card's free right margin, so nothing moves when a row folds out.
+  let activeSettingsPage = '';
+
+  function settingsTabActive() {
+    return !!document.getElementById('tab-network')?.classList.contains('active');
+  }
+
+  // The pages always reserve their scrollbar's width and give it back with a
+  // negative margin (admin.css --settings-scrollbar), so the cards end where
+  // the tab bar ends. Browsers draw the scrollbar in different widths.
+  function updateSettingsScrollbarWidth() {
+    const tab = document.getElementById('tab-network');
+    const page = document.querySelector('.settings-page:not([hidden])');
+    if (!tab || !page || !page.offsetWidth) return;
+    tab.style.setProperty('--settings-scrollbar', (page.offsetWidth - page.clientWidth) + 'px');
+  }
+
+  // Work a page needs only while it is on screen: the file list reads the
+  // microSD card, the I/O editor its assignments.
+  function runSettingsPageWork() {
+    if (!settingsTabActive()) return;
+    updateSettingsScrollbarWidth();
+    if (activeSettingsPage === 'files' && typeof loadFileManager === 'function' && !fileManagerLoaded) {
+      window.setTimeout(loadFileManager, 0);
+    }
+    if (activeSettingsPage === 'io') window.setTimeout(initHardwareIo, 0);
+  }
+
+  function showSettingsPage(page) {
+    const pages = Array.from(document.querySelectorAll('.settings-page'));
+    if (!pages.length) return;
+    if (!pages.some(section => section.dataset.settingsPage === page)) {
+      page = pages[0].dataset.settingsPage;
+    }
+    activeSettingsPage = page;
+    document.querySelectorAll('.settings-nav-item').forEach(item => {
+      const on = item.dataset.settingsPage === page;
+      item.classList.toggle('active', on);
+      if (on) item.setAttribute('aria-current', 'page');
+      else item.removeAttribute('aria-current');
+    });
+    pages.forEach(section => { section.hidden = section.dataset.settingsPage !== page; });
+    let footer = false;
+    document.querySelectorAll('.settings-foot-set').forEach(set => {
+      set.hidden = set.dataset.settingsFoot !== page;
+      footer = footer || !set.hidden;
+    });
+    const foot = document.getElementById('settingsFoot');
+    if (foot) foot.hidden = !footer;
+    try { localStorage.setItem('activeSettingsPage', page); } catch (e) {}
+    runSettingsPageWork();
+  }
+
+  // Opens a Settings page, optionally with one of its rows folded out (the
+  // password badge and the entity picker's password hint).
+  function openSettingsPage(page, foldId) {
+    switchTab('tab-network');
+    showSettingsPage(page);
+    const fold = foldId ? document.getElementById(foldId) : null;
+    if (!fold) return;
+    fold.open = true;
+    // switchTab shows Settings right away (no tile data to wait for).
+    fold.scrollIntoView({block: 'nearest', behavior: 'smooth'});
+  }
+
+  function initSettingsPages() {
+    document.querySelectorAll('.settings-nav-item').forEach(item => {
+      item.addEventListener('click', () => showSettingsPage(item.dataset.settingsPage));
+    });
+    let page = '';
+    try { page = localStorage.getItem('activeSettingsPage') || ''; } catch (e) {}
+    showSettingsPage(page);
+    window.addEventListener('resize', perFrame(updateSettingsScrollbarWidth));
+  }
 
   const SETTINGS_ACCESS_PREFIX = 'folder0_';
   const HIDDEN_SETTINGS_TILE_INDEX = -2;
@@ -494,7 +737,10 @@ function syncTileRadiusControls(tabEl) {
 
   let settingsAccessSaveQueue = Promise.resolve();
   let settingsAccessCommittedState = null;
-  let settingsTileTransferInFlight = false;
+  // Settings moves between grid and parking slot still being saved, and the
+  // number of the latest one (hideSettingsTileFromGrid).
+  let settingsTileTransfersInFlight = 0;
+  let settingsTileTransferSeq = 0;
 
   function readSettingsAccessState() {
     const pinToggle = settingsAccessElement('settings_pin_enabled');
@@ -510,6 +756,23 @@ function syncTileRadiusControls(tabEl) {
       revealEdge:
         String(settingsAccessElement('settings_reveal_edge')?.value || '0')
     };
+  }
+
+  // The gesture menu saved the Settings swipe (display-borders.js
+  // saveGestureEdge): the hidden fields and the committed state carry it, so
+  // a later access save keeps it.
+  function noteSettingsSwipeSaved(enabled, edge) {
+    const swipe = settingsAccessElement('settings_swipe_enabled');
+    const reveal = settingsAccessElement('settings_reveal_edge');
+    if (swipe) swipe.checked = !!enabled;
+    if (reveal && Number.isInteger(edge) && edge >= 0 && edge <= 3) reveal.value = String(edge);
+    if (settingsAccessCommittedState) {
+      settingsAccessCommittedState = {
+        ...settingsAccessCommittedState,
+        swipeEnabled: settingsAccessCommittedState.tileHidden || !!enabled,
+        revealEdge: reveal ? reveal.value : settingsAccessCommittedState.revealEdge
+      };
+    }
   }
 
   function settingsAccessStatesEqual(a, b) {
@@ -574,8 +837,10 @@ function syncTileRadiusControls(tabEl) {
       bg_color: isDefault ? 0 : makeTileBgValue(hexToRgb(color)),
       col: String(Math.max(1, editorCoordinates ? rawCol : (rawCol + 1))),
       row: String(Math.max(1, editorCoordinates ? rawRow : (rawRow + 1))),
-      span_w: String(source?.span_w ?? hiddenTile?.dataset.spanW ?? 1),
-      span_h: String(source?.span_h ?? hiddenTile?.dataset.spanH ?? 1)
+      // Parked it is one cell and comes back as one (user 2026-10-22), like
+      // a page's folder.
+      span_w: '1',
+      span_h: '1'
     };
   }
 
@@ -600,6 +865,7 @@ function syncTileRadiusControls(tabEl) {
     tile.dataset.spanW = String(snapshot.span_w || 1);
     tile.dataset.spanH = String(snapshot.span_h || 1);
     tile.innerHTML = '';
+    tile.style.removeProperty('--tile-border-tint');
     if (!hidden) {
       tile.style.background = 'transparent';
       const icon = document.createElement('i');
@@ -611,10 +877,17 @@ function syncTileRadiusControls(tabEl) {
       ? tileBackgroundCss(getTileTypeMeta('7'), true,
           getTileTypeMeta('7').defaultBg || '#2A2A2A')
       : snapshot.color;
-    const iconName = normalizeMdiIconName(snapshot.icon);
+    // Its frame line from its card like every tile's (grid-preview.js): it
+    // showed the bright fallback line in its field (user 2026-10-14).
+    if (typeof applyFrameLine === 'function') applyFrameLine(tile);
+    // The Settings PIN shows its lock here too (previewTileLocked); without
+    // an icon the lock is the icon.
+    const locked = typeof previewTileLocked === 'function' && previewTileLocked('7', tile);
+    const iconName = normalizeMdiIconName(snapshot.icon) || (locked ? 'lock' : '');
     if (iconName) {
       const icon = document.createElement('i');
       icon.className = 'mdi mdi-' + iconName + ' tile-icon';
+      if (locked && iconName !== 'lock') icon.innerHTML = PREVIEW_LOCK_MARK;
       tile.appendChild(icon);
     }
     if (snapshot.title) {
@@ -627,6 +900,63 @@ function syncTileRadiusControls(tabEl) {
         currentTileTab === 'folder0') {
       tile.classList.add('active');
     }
+  }
+
+  // The Settings tile shows a lock while the Settings PIN is on
+  // (previewTileLocked): redraw it, in the grid or parked, once the PIN is
+  // set or cleared.
+  function refreshSettingsTileLock() {
+    // The head's gear shows the lock too (home_bar.cpp).
+    const locked = typeof previewTileLocked === 'function' && previewTileLocked('7');
+    document.querySelectorAll('.head-bar-preview .head-gear > i').forEach(icon => {
+      icon.querySelector('.tile-icon-lock')?.remove();
+      if (locked) icon.insertAdjacentHTML('beforeend', PREVIEW_LOCK_MARK);
+    });
+    const editing = currentTileTab === 'folder0' &&
+      (currentTileIndex === HIDDEN_SETTINGS_TILE_INDEX ||
+       document.getElementById('folder0-tile-' + currentTileIndex)?.dataset.type === '7');
+    if (editing && typeof updateTilePreview === 'function') {
+      updateTilePreview('folder0');
+    } else if (document.getElementById('settingsHiddenTile')?.dataset.hidden === '1') {
+      renderSettingsHiddenSlot(true);
+    } else {
+      const tiles = getTilesData('folder0');
+      const index = tiles.findIndex(item => Number(item?.type || 0) === 7);
+      if (index >= 0) renderTileFromData('folder0', index, tiles[index], sensorMetaCache);
+    }
+  }
+
+  // Shows a Settings move between the grid and the parking slot at once,
+  // before the device has saved it (user 2026-10-02: the tile jumped back,
+  // its teal selection lagged and it took long to move). The grid data, the
+  // selection and the editor follow at once, so the tile can be moved again
+  // right away; the reload after the save (reconcileSettingsTileUi) draws the
+  // stored state, and a failed save draws it back. Restoring takes the first
+  // empty index like TileConfig::ensureSettingsTile.
+  // Returns the slot it showed the tile in, -1 when parked or not shown.
+  function previewSettingsTileTransfer(hidden, snapshot, target = null) {
+    const tiles = getTilesData('folder0');
+    const isSettings = tile => Number(tile?.type || 0) === 7;
+    const index = hidden
+      ? tiles.findIndex(isSettings)
+      : (tiles.some(isSettings) || !target ? -1 : tiles.findIndex(tile => !Number(tile?.type || 0)));
+    if (index < 0) return -1;
+    tiles[index] = hidden ? {type: 0} : {
+      type: 7,
+      title: snapshot.title,
+      icon_name: snapshot.icon,
+      bg_color: snapshot.bg_color,
+      col: target.col,
+      row: target.row,
+      span_w: snapshot.span_w,
+      span_h: snapshot.span_h
+    };
+    renderTileFromData('folder0', index, tiles[index], sensorMetaCache);
+    layoutTiles('folder0', tiles);
+    renderSettingsHiddenSlot(hidden, snapshot);
+    if (hidden) selectHiddenSettingsTile();
+    else selectTile(index, 'folder0');
+    return hidden ? -1 : index;
   }
 
   function currentGridSettingsSnapshot() {
@@ -701,15 +1031,11 @@ function syncTileRadiusControls(tabEl) {
     }
     if (tileSnapshot) {
       const snapshot = normalizeHiddenSettingsSnapshot(tileSnapshot);
-      const layout = normalizeSnapshotLayout(
-        snapshot, HIDDEN_SETTINGS_TILE_INDEX, 'folder0');
       body.set('settings_tile_snapshot_present', '1');
       body.set('settings_tile_title', snapshot.title);
       body.set('settings_tile_icon', snapshot.icon);
-      body.set('settings_tile_col', String(layout.col));
-      body.set('settings_tile_row', String(layout.row));
-      body.set('settings_tile_span_w', String(layout.span_w));
-      body.set('settings_tile_span_h', String(layout.span_h));
+      // Its look only: parked it is one cell with no place kept, the panel
+      // puts it where it is dropped or on a free cell (user 2026-10-22).
       if (snapshot.bg_color_default === '1') {
         body.set('settings_tile_bg_color_default', '1');
       } else {
@@ -718,6 +1044,7 @@ function syncTileRadiusControls(tabEl) {
       }
     }
 
+    const lockedBefore = pinToggle.dataset.pinConfigured === '1';
     if (pinApply && hasNewPin) pinApply.disabled = true;
     try {
       const response = await fetch('mqtt', {
@@ -753,12 +1080,16 @@ function syncTileRadiusControls(tabEl) {
         setSettingsPinStatus(false);
       }
       toggleSettingsAccessFields();
+      if ((pinToggle.dataset.pinConfigured === '1') !== lockedBefore) refreshSettingsTileLock();
       const savedState = {
         ...requested,
         pinEnabled: persistPinEnabled,
         pinConfigured: persistPinEnabled
       };
       settingsAccessCommittedState = savedState;
+      // A hidden tile keeps its swipe: the gesture menu shows what the panel
+      // keeps.
+      if (typeof refreshGestureMenu === 'function') refreshGestureMenu();
       if (reconcileAfterSave &&
           (visibilityChanged || visibilityMismatch)) {
         await reconcileSettingsTileUi(requested.tileHidden, snapshotHint);
@@ -766,7 +1097,8 @@ function syncTileRadiusControls(tabEl) {
                  requested.tileHidden) {
         renderSettingsHiddenSlot(true, tileSnapshot);
       }
-      return true;
+      // The device's answer (truthy): a Settings move reads settings_tile_index.
+      return result;
     } catch (error) {
       if (!hasNewPin &&
           settingsAccessStatesEqual(readSettingsAccessState(), requested)) {
@@ -848,7 +1180,8 @@ function syncTileRadiusControls(tabEl) {
         form.elements.namedItem('language')?.value || '').toLowerCase();
       const currentLanguage = String(
         document.documentElement.lang || APP_LOCALE || '').toLowerCase();
-      const submitButton =
+      // Several pages carry a Save for this form; the pressed one shows the result.
+      const submitButton = event.submitter ||
         document.querySelector('button[form="admin_settings_form"][type="submit"]');
       const originalLabel = submitButton ? submitButton.textContent : '';
       if (submitButton) submitButton.disabled = true;
@@ -880,6 +1213,74 @@ function syncTileRadiusControls(tabEl) {
       } finally {
         if (submitButton) submitButton.disabled = false;
       }
+    });
+  }
+  // Optional Web Admin password section (Settings tab). The password never
+  // leaves the browser: auth.js derives a PBKDF2-HMAC-SHA256 key and the
+  // panel stores only salt, iteration count and key.
+  function initWebAdminPasswordSettings() {
+    const section = document.getElementById('web_auth_section');
+    const auth = window.HomeTilesAuth;
+    if (!section || !auth) return;
+    const input = document.getElementById('web_auth_password');
+    const repeat = document.getElementById('web_auth_password_repeat');
+    const setButton = document.getElementById('web_auth_set');
+    const removeButton = document.getElementById('web_auth_remove');
+    const logoutButton = document.getElementById('web_auth_logout');
+    const busy = value => {
+      [setButton, removeButton, logoutButton].forEach(button => {
+        if (button) button.disabled = value;
+      });
+    };
+
+    setButton?.addEventListener('click', async () => {
+      const password = String(input?.value || '');
+      if (password.length < 8) {
+        showNotification(t('webAuthTooShort'), false);
+        input?.focus();
+        return;
+      }
+      if (password !== String(repeat?.value || '')) {
+        showNotification(t('webAuthMismatch'), false);
+        repeat?.focus();
+        return;
+      }
+      busy(true);
+      try {
+        if (!await auth.setPassword(password)) throw new Error('set');
+        // Setting a password ends every session, including this one. Sign in
+        // again right away so the page stays usable.
+        const login = await auth.login(password);
+        if (input) input.value = '';
+        if (repeat) repeat.value = '';
+        showNotification(t('webAuthSaved'), true);
+        window.setTimeout(() => window.location.reload(), login.ok ? 400 : 1200);
+      } catch (error) {
+        // The first password needs a tap on the display first.
+        showNotification(t(auth.passwordError?.() === 'panel_tap_required' ? 'webAuthPanelTap' : 'webAuthChangeFailed'), false);
+      } finally {
+        busy(false);
+      }
+    });
+
+    removeButton?.addEventListener('click', async () => {
+      if (!window.confirm(t('webAuthRemoveConfirm'))) return;
+      busy(true);
+      try {
+        if (!await auth.removePassword()) throw new Error('remove');
+        showNotification(t('webAuthRemoved'), true);
+        window.setTimeout(() => window.location.reload(), 400);
+      } catch (error) {
+        showNotification(t('webAuthChangeFailed'), false);
+      } finally {
+        busy(false);
+      }
+    });
+
+    logoutButton?.addEventListener('click', async () => {
+      busy(true);
+      await auth.logout();
+      window.location.replace('./');
     });
   }
 
@@ -1406,8 +1807,9 @@ function syncTileRadiusControls(tabEl) {
         badge.textContent = message || fileManagerText('Pr\u00fcfe...', 'Checking...');
       }
     }
+    // The internal storage of a test build only lists, downloads and deletes.
     document.querySelectorAll('.file-manager-requires-sd').forEach(el => {
-      el.disabled = available !== true;
+      el.disabled = available !== true || fileManagerState.fs === 'internal';
     });
     updateFileManagerSelectionBar();
   }
@@ -1495,7 +1897,9 @@ function syncTileRadiusControls(tabEl) {
       primaryBtn.textContent = selected && !selected.dir ? fileManagerText('Download', 'Download') : fileManagerText('\u00d6ffnen', 'Open');
       primaryBtn.title = primaryBtn.textContent;
     }
-    if (renameBtn) renameBtn.disabled = !hasSelection || isParent || !hasStorage;
+    if (renameBtn) {
+      renameBtn.disabled = !hasSelection || isParent || !hasStorage || fileManagerState.fs === 'internal';
+    }
     if (deleteBtn) deleteBtn.disabled = !hasSelection || isParent || !hasStorage;
     updateFileManagerRowSelection();
   }
@@ -1662,8 +2066,16 @@ function syncTileRadiusControls(tabEl) {
     updateFileManagerRowSelection();
   }
 
+  // Test builds: the storage switch, microSD or the panel's own storage.
+  function selectFileManagerStorage(fs) {
+    fileManagerState.fs = fs === 'internal' ? 'internal' : 'sd';
+    document.querySelectorAll('.file-manager-storage-switch button').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.fs === fileManagerState.fs);
+    });
+    loadFileManager('/');
+  }
+
   async function loadFileManager(path = null) {
-    fileManagerState.fs = 'sd';
     if (path !== null) fileManagerState.path = normalizeFileManagerClientPath(path);
     if (!fileManagerState.path) fileManagerState.path = '/';
     clearFileManagerSelection();
@@ -1681,20 +2093,31 @@ function syncTileRadiusControls(tabEl) {
         loadError.status = res.status;
         throw loadError;
       }
-      fileManagerState.fs = 'sd';
       fileManagerState.path = data.path || fileManagerState.path;
-      setFileManagerStorageState(true);
+      if (fileManagerState.fs === 'internal') {
+        setFileManagerStorageState(true,
+          formatFileManagerSize({ size: data.used }) + ' / ' + formatFileManagerSize({ size: data.total }));
+      } else {
+        setFileManagerStorageState(true);
+      }
       renderFileManagerEntries(data.entries || []);
       const count = Array.isArray(data.entries) ? data.entries.length : 0;
       setFileManagerStatus(fileManagerText('Bereit. Eintr\u00e4ge: ', 'Ready. Entries: ') + count, true);
       fileManagerLoaded = true;
     } catch (err) {
       const rawMessage = err?.message || fileManagerText('Dateimanager-Fehler.', 'File manager error.');
-      const sdMissing = err?.status === 503 || /microsd/i.test(rawMessage);
+      const sdMissing = fileManagerState.fs === 'sd' &&
+        (err?.status === 503 || /microsd/i.test(rawMessage));
       const message = sdMissing
         ? fileManagerText('Keine microSD erkannt.', 'No microSD detected.')
         : rawMessage;
-      setFileManagerStorageState(sdMissing ? false : true, sdMissing ? null : fileManagerText('microSD erkannt', 'microSD detected'));
+      if (fileManagerState.fs === 'internal') {
+        // The badge names the storage (the switch's own label) in red.
+        const label = document.querySelector('.file-manager-storage-switch [data-fs="internal"]');
+        setFileManagerStorageState(false, label ? label.textContent : null);
+      } else {
+        setFileManagerStorageState(sdMissing ? false : true, sdMissing ? null : fileManagerText('microSD erkannt', 'microSD detected'));
+      }
       renderFileManagerEntries([], message);
       setFileManagerStatus(message, false);
       if (!sdMissing) showNotification(message, false);
@@ -2160,6 +2583,110 @@ function syncTileRadiusControls(tabEl) {
   }
 
   // Tile Editor State
+
+  // The System page's Icons card: "Update" lets the panel download its icon
+  // file now; the file row uploads one chosen by hand. Both restart the panel,
+  // the page reloads once it answers again.
+
+  function updateIconFileName(inputEl) {
+    const nameEl = document.getElementById('icon_file_name');
+    if (!nameEl) return;
+    const file = inputEl && inputEl.files && inputEl.files.length ? inputEl.files[0] : null;
+    nameEl.textContent = file ? file.name : t('otaNoFileSelected');
+  }
+
+  function setIconFileUi(message, phase = 'idle', tone = '', percent = null) {
+    const statusEl = document.getElementById('icon_status');
+    const progressEl = document.getElementById('icon_progress');
+    const progressBarEl = document.getElementById('icon_progress_bar');
+    if (statusEl) {
+      statusEl.textContent = message || '';
+      statusEl.classList.remove('error', 'success');
+      if (tone === 'error' || tone === 'success') statusEl.classList.add(tone);
+    }
+    if (progressEl) {
+      progressEl.classList.toggle('is-hidden', phase === 'idle');
+      progressEl.classList.toggle('active', phase === 'busy' && percent === null);
+    }
+    if (progressBarEl) {
+      progressBarEl.style.width = percent !== null ? Math.max(0, Math.min(100, percent)) + '%'
+        : (phase === 'done' ? '100%' : '0%');
+    }
+  }
+
+  function setIconFileControlsDisabled(disabled) {
+    ['icon_download_btn', 'icon_choose_btn', 'icon_upload_btn', 'icon_file'].forEach(id => {
+      const element = document.getElementById(id);
+      if (element) element.disabled = disabled;
+    });
+  }
+
+  // The panel restarts after either way; reload once it answers again.
+  function waitForIconFileRestart() {
+    const startedAt = Date.now();
+    const tryReload = () => {
+      fetch(window.location.pathname + '?icon_ping=' + Date.now(), { cache: 'no-store', credentials: 'same-origin' })
+        .then(res => {
+          if (!res.ok) throw new Error('offline');
+          window.location.reload();
+        })
+        .catch(() => {
+          if (Date.now() - startedAt < 180000) window.setTimeout(tryReload, 1500);
+        });
+    };
+    window.setTimeout(tryReload, 4000);
+  }
+
+  async function downloadIconFile() {
+    setIconFileControlsDisabled(true);
+    setIconFileUi(t('otaGithubDownloading'), 'busy');
+    try {
+      const res = await fetch('api/icons/download', { method: 'POST', cache: 'no-store', credentials: 'same-origin' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) throw new Error(data.error || t('otaFailed'));
+      setIconFileUi(t('otaGithubDownloading') + ' ' + t('otaReconnecting'), 'busy');
+      waitForIconFileRestart();
+    } catch (err) {
+      setIconFileUi(err?.message || t('otaFailed'), 'idle', 'error');
+      setIconFileControlsDisabled(false);
+    }
+  }
+
+  function uploadIconFile() {
+    const input = document.getElementById('icon_file');
+    const file = input && input.files && input.files.length ? input.files[0] : null;
+    if (!file) {
+      setIconFileUi(t('otaNoFileSelected'), 'idle', 'error');
+      return;
+    }
+    setIconFileControlsDisabled(true);
+    setIconFileUi(t('otaUploading') + ' 0%', 'busy', '', 0);
+    const fail = message => {
+      setIconFileUi(message || t('otaFailed'), 'idle', 'error');
+      setIconFileControlsDisabled(false);
+    };
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', 'api/icons/upload', true);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.upload.onprogress = event => {
+      if (!event.lengthComputable) return;
+      const percent = Math.max(1, Math.min(100, Math.round((event.loaded / event.total) * 100)));
+      setIconFileUi(t('otaUploading') + ' ' + percent + '%', 'busy', '', percent);
+    };
+    xhr.upload.onload = () => setIconFileUi(t('otaInstalling'), 'busy');
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText || '{}'); } catch (e) {}
+      if (xhr.status < 200 || xhr.status >= 300 || !data.success) {
+        fail(data.error);
+        return;
+      }
+      setIconFileUi(t('otaSuccess') + ' ' + t('otaReconnecting'), 'done', 'success', 100);
+      waitForIconFileRestart();
+    };
+    xhr.onerror = () => fail();
+    xhr.send(file);
+  }
   const tileTabs = [];
   const folderByTab = {};
   const tabByFolder = {};
@@ -2186,11 +2713,21 @@ function syncTileRadiusControls(tabEl) {
   const SELECTED_TILE_STORAGE_KEY = 'selectedAdminTile';
   let selectedTileByTab = {};
 
+  // The entity a Scene tile runs (sceneTarget on the panel): its stored
+  // scene, script or button id, or the entity of a Bridge alias.
+  function sceneEntityOf(value, sceneEntities = sensorMetaCache.sceneEntities) {
+    if (!value) return '';
+    if (/^(scene|script|button|input_button)\./.test(value)) return value;
+    return sceneEntities?.[value] || '';
+  }
+
   function normalizeSensorMetaPayload(payload) {
     if (!payload || typeof payload !== 'object') {
       return { values: {}, units: {}, icons: {}, names: {}, sceneEntities: {}, loaded: false };
     }
     const hasMeta = Object.prototype.hasOwnProperty.call(payload, 'editable_values') ||
+                    Object.prototype.hasOwnProperty.call(payload, 'device_values') ||
+                    Object.prototype.hasOwnProperty.call(payload, 'calendar_values') ||
                     Object.prototype.hasOwnProperty.call(payload, 'values') ||
                     Object.prototype.hasOwnProperty.call(payload, 'units') ||
                     Object.prototype.hasOwnProperty.call(payload, 'icons') ||
@@ -2198,7 +2735,9 @@ function syncTileRadiusControls(tabEl) {
                     Object.prototype.hasOwnProperty.call(payload, 'binary_sensor_values') ||
                     Object.prototype.hasOwnProperty.call(payload, 'energy_values') ||
                     Object.prototype.hasOwnProperty.call(payload, 'energy_units') ||
-                    Object.prototype.hasOwnProperty.call(payload, 'climate_values');
+                    Object.prototype.hasOwnProperty.call(payload, 'climate_values') ||
+                    Object.prototype.hasOwnProperty.call(payload, 'weather_values') ||
+                    Object.prototype.hasOwnProperty.call(payload, 'media_values');
     if (!hasMeta) {
       return { values: payload || {}, units: {}, icons: {}, names: {}, sceneEntities: {}, loaded: true };
     }
@@ -2211,8 +2750,18 @@ function syncTileRadiusControls(tabEl) {
         payload.climate_values || {}
       ),
       editableValues: payload.editable_values || payload.editableValues || {},
+      // Lock, Alarm panel and Fan detail states (types/device).
+      deviceValues: payload.device_values || payload.deviceValues || {},
+      // Calendar events (types/calendar).
+      calendarValues: payload.calendar_values || payload.calendarValues || {},
+      // Weather and media tile states, the payloads their tiles draw.
+      weatherValues: payload.weather_values || payload.weatherValues || {},
+      mediaValues: payload.media_values || payload.mediaValues || {},
+      // "From cover": the color each shown media card sampled from its cover.
+      mediaCoverColors: payload.media_cover_colors || payload.mediaCoverColors || {},
       units: Object.assign({}, payload.units || {}, payload.energy_units || {}),
-      icons: payload.icons || {},
+      // Energy sources the configuration gives no icon: the device's by category.
+      icons: Object.assign({}, payload.energy_icons || {}, payload.icons || {}),
       names: payload.names || {},
       // Scene alias -> entity, so scene tiles resolve the entity icon like the
       // device. A grid refresh normalizes the already normalized cache again,
@@ -2332,6 +2881,78 @@ function syncTileRadiusControls(tabEl) {
     return '<span class="tile-title-lines">' + normalizeTileTitle(value).split('\n')
       .map(line => '<span class="tile-title-line">' + escapeHtml(line) + '</span>').join('') + '</span>';
   }
+  // Preview text sits on its LVGL baseline. LVGL draws the baseline base_line
+  // above the bottom of a label's line box; the browser puts it where the
+  // font's rounded ascent and descent and the half-leading put it, which
+  // depends on the size and the display scale (Chrome snaps it to whole
+  // device pixels, so one shift from the server was up to a pixel off; user
+  // 2026-10-02). The page measures the browser baseline per size and zoom and
+  // moves each text by the difference to the LVGL baseline (--lb*, --*-base).
+  const previewBaselineCache = new Map();
+  let previewBaselineProbe = null;
+
+  function previewCssBaseline(fontPx, linePx) {
+    const key = fontPx.toFixed(3) + '/' + linePx.toFixed(3) + '@' + (window.devicePixelRatio || 1);
+    if (previewBaselineCache.has(key)) return previewBaselineCache.get(key);
+    if (!previewBaselineProbe) {
+      previewBaselineProbe = document.createElement('div');
+      previewBaselineProbe.setAttribute('aria-hidden', 'true');
+      previewBaselineProbe.style.cssText =
+        'position:absolute;left:-9999px;top:0;visibility:hidden;white-space:nowrap;font-weight:400;';
+      const mark = document.createElement('span');
+      mark.style.cssText = 'display:inline-block;width:0;height:0;vertical-align:baseline;';
+      previewBaselineProbe.append('0', mark);
+    }
+    if (!previewBaselineProbe.isConnected) document.body.appendChild(previewBaselineProbe);
+    previewBaselineProbe.style.fontSize = fontPx + 'px';
+    previewBaselineProbe.style.lineHeight = linePx + 'px';
+    const value = previewBaselineProbe.lastChild.getBoundingClientRect().top -
+      previewBaselineProbe.getBoundingClientRect().top;
+    previewBaselineCache.set(key, value);
+    return value;
+  }
+
+  // The shift that moves the browser baseline of a line box onto the LVGL
+  // baseline lvglBasePx below its top.
+  function previewBaselineShift(fontPx, linePx, lvglBasePx) {
+    return lvglBasePx - previewCssBaseline(fontPx, linePx);
+  }
+
+  // Sets every emitted shift (--ldyNN for Clock and Text lines, the
+  // half-height title and value) from the measured browser baselines.
+  function calibratePreviewBaselines() {
+    const root = document.documentElement;
+    const style = getComputedStyle(root);
+    const px = name => parseFloat(style.getPropertyValue(name));
+    const set = (shiftName, fontPx, linePx, basePx) => {
+      if (!(fontPx > 0) || !(linePx > 0) || !Number.isFinite(basePx)) return;
+      root.style.setProperty(shiftName, previewBaselineShift(fontPx, linePx, basePx).toFixed(3) + 'px');
+    };
+    for (const size of [16, 20, 24, 28, 32, 40, 48, 56, 64, 72, 80, 96]) {
+      set('--ldy' + size, px('--fs' + size), px('--lh' + size), px('--lb' + size));
+    }
+    for (const [shift, font, line, base] of [
+      ['--compact-title-dy', '--compact-title-font', '--compact-title-line', '--compact-title-base'],
+      ['--compact-value-dy', '--compact-value-font', '--compact-value-line', '--compact-value-base'],
+      ['--compact-value-dy-24', '--compact-value-font-24', '--compact-value-line-step-24', '--compact-value-base-24'],
+      ['--compact-value-dy-28', '--compact-value-font-28', '--compact-value-line-step-28', '--compact-value-base-28'],
+    ]) set(shift, px(font), px(line), px(base));
+  }
+
+  function bindPreviewBaselines() {
+    const calibrate = () => {
+      calibratePreviewBaselines();
+      // The screensaver clock places its lines in script.
+      if (typeof screensaverDraft !== 'undefined' && screensaverDraft &&
+          typeof renderScreensaverEditor === 'function') {
+        renderScreensaverEditor();
+      }
+    };
+    calibrate();
+    if (document.fonts?.ready) document.fonts.ready.then(calibrate);
+    // Browser zoom changes the device pixel ratio and with it the rounding.
+    window.addEventListener('resize', perFrame(calibrate));
+  }
 
   function getTileTypeMeta(typeValue) {
     const key = String(typeValue ?? '0');
@@ -2402,120 +3023,1374 @@ function syncTileRadiusControls(tabEl) {
     if (typeof fn === 'function') return fn(...args);
   }
 
-  function rebuildEntitySelect(id, entries) {
-    const el = document.getElementById(id);
-    if (!el || !Array.isArray(entries)) return;
-    const keep = el.value || el.dataset.configuredValue || '';
-    const placeholder = el.options.length ? el.options[0].cloneNode(true) : null;
-    el.innerHTML = '';
-    if (placeholder) el.appendChild(placeholder);
-    for (const entry of entries) {
-      if (!entry || entry.v === undefined) continue;
-      const opt = document.createElement('option');
-      opt.value = entry.v;
-      opt.textContent = entry.t || entry.v;
-      el.appendChild(opt);
-    }
-    el.value = keep;
-    if (keep && el.value !== keep) {
-      // The stored entity is missing from the current bridge list, for example
-      // while the bridge is offline. Keep the selection instead of clearing it
-      // on the next autosave.
-      const opt = document.createElement('option');
-      opt.value = keep;
-      opt.textContent = keep;
-      el.appendChild(opt);
-      el.value = keep;
-    }
-    if (keep) el.dataset.configuredValue = keep;
-  }
-
   // One firmware request serves every editor. The short cache avoids repeated
   // large JSON responses while switching quickly between tiles.
   function refreshEntityOptionLists(tab) {
     return fetchEntityOptions()
-      .then(data => {
-        rebuildEntitySelect(tab + '_sensor_entity', data.sensors);
-        rebuildEntitySelect(tab + '_binary_sensor_entity', data.binary_sensors);
-        rebuildEntitySelect(tab + '_number_entity', data.numbers);
-        rebuildEntitySelect(tab + '_select_entity', data.selects);
-        rebuildEntitySelect(tab + '_datetime_entity', data.datetimes);
-
-        rebuildEntitySelect(tab + '_energy_entity', data.energy);
-        rebuildEntitySelect(tab + '_weather_entity', data.weathers);
-        rebuildEntitySelect(tab + '_switch_entity', data.switches);
-        rebuildEntitySelect(tab + '_media_entity', data.media);
-        rebuildEntitySelect(tab + '_climate_entity', data.climates);
-        rebuildEntitySelect(tab + '_cover_entity', data.covers);
-        rebuildEntitySelect(tab + '_camera_entity', data.cameras);
-        rebuildEntitySelect(tab + '_scene_alias', data.scenes);
-        if (typeof iconColorSourceEntries === 'function') {
-          rebuildEntitySelect(tab + '_tile_icon_source', iconColorSourceEntries(data));
-        }
-      })
+      .then(() => refreshEntityPickers(tab))
       .catch(() => {});
   }
+  // Shared entity picker of every tile field that names a Home Assistant
+  // entity, like Home Assistant's own picker: icon, name, area and device, and
+  // type, with a search. The server renders `<input type="hidden"
+  // data-entity-picker="<list>">` (appendEntityPickerField); the value stays
+  // in that input, so loading, saving, drafts, copy and import keep using the
+  // field id as before. The choices are the Bridge's released entities from
+  // /api/entity_options (fetchEntityOptions); a panel paired with a Bridge
+  // that searches asks it as well (/api/entity_search, entity_search.h): with
+  // a Web Admin password every Home Assistant entity of the list, otherwise
+  // the released ones with their area and device.
 
-  // Per-tile icon disc options are common to every type with an icon, so
-  // they travel with the type fields through drafts, copy/paste and saves.
-  function tileTypeHasIcon(typeValue) {
-    return !['0', '16'].includes(String(typeValue ?? '0'));
+  // Home Assistant domains in the order of ENTITY_KIND_LABELS
+  // (LocaleProfile::entity_kind_labels).
+  const ENTITY_KIND_DOMAINS = [
+    ['sensor'], ['binary_sensor'], ['light'], ['switch', 'input_boolean'], ['fan'], ['cover'],
+    ['climate'], ['media_player'], ['weather'], ['camera'], ['lock'], ['alarm_control_panel'],
+    ['number', 'input_number'], ['select', 'input_select'],
+    ['datetime', 'date', 'time', 'input_datetime'], ['scene'], ['script'], ['button', 'input_button'],
+    ['automation'], ['humidifier'], ['siren'], ['remote'], ['calendar'], ['vacuum']
+  ];
+  // Lists the Bridge searches (entity_search.py LIST_DOMAINS).
+  const ENTITY_REMOTE_LISTS = new Set(['sensors', 'binary_sensors', 'numbers', 'selects', 'datetimes',
+    'weathers', 'switches', 'media', 'climates', 'covers', 'cameras', 'images', 'locks', 'alarm_panels', 'fans',
+    'energy', 'scenes', 'calendars', 'vacuums']);
+  const ENTITY_REMOTE_DELAY_MS = 250;
+  const ENTITY_REMOTE_POLL_MS = 120;
+  const ENTITY_REMOTE_TIMEOUT_MS = 5000;
+  const ENTITY_PICKER_FALLBACK_ICON = 'shape-outline';
+  const entityPickerNativeValue = typeof HTMLInputElement === 'function'
+    ? Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value') : null;
+  // What the Bridge told about entities (name, icon, area ▸ device), by id.
+  const entityRemoteInfo = new Map();
+  const entityRemoteAsked = new Set();
+  // The Bridge's first page of each list, so a list opens with it at once.
+  const entityRemoteFirstPages = new Map();
+  const entityRemoteFetching = new Set();
+  let entityRemoteQueue = Promise.resolve();
+  let entityRemoteSupported = true;  // false once the panel has no Bridge search
+  let entityRemoteGeneration = 0;
+  let entityRemoteTimer = 0;
+  let entityPickerPopover = null;
+  // {input, local, entries, query, active, state, remote, full, more}
+  let entityPickerOpen = null;
+  // Entities chosen in this browser, per list: {entity: [times, last ms]}.
+  // Recent shows the most used and newest of them (#79).
+  const ENTITY_RECENT_KEY = 'hometiles.entityPickerRecent';
+  const ENTITY_RECENT_KEEP = 40;
+  const ENTITY_RECENT_SHOWN = 10;
+  const ENTITY_RECENT_HALF_LIFE_MS = 14 * 24 * 3600 * 1000;
+  // The switch under the search, like Automatic / No icon of the icon picker:
+  // [tab, icon, label key].
+  const ENTITY_PICKER_TABS = [
+    ['recent', 'history', 'entityPickerRecent'],
+    ['favorites', 'star-outline', 'entityPickerFavorites'],
+    ['all', 'format-list-bulleted', 'entityPickerAll']
+  ];
+
+  function entityKindLabel(entityId) {
+    const domain = String(entityId || '').split('.')[0];
+    const index = ENTITY_KIND_DOMAINS.findIndex(domains => domains.includes(domain));
+    return index >= 0 && typeof ENTITY_KIND_LABELS !== 'undefined' ? ENTITY_KIND_LABELS[index] || '' : '';
   }
-  // Glow only matters where the icon can take a color: from its entity
-  // (switch/light, climate, cover, binary sensor), from the color bar or
-  // state colors (sensor family, energy) or from a fixed icon color (scene,
-  // folder, back, camera). Other icons are always white.
-  function tileTypeHasColoredIcon(typeValue) {
-    return ['1', '2', '4', '5', '8', '12', '14', '15', '17', '18', '19', '20', '21', '22', '23']
-      .includes(String(typeValue ?? '0'));
+
+  function entityPickerContext(area, device) {
+    return area && device ? area + ' ▸ ' + device : String(area || device || '');
   }
-  // Stored disc mode: 0 follows the global option, 2 hides the disc on this
-  // tile. A legacy stored 1 ("on") loads as checked.
-  function iconDiscModeFromCheckbox(box) {
-    return box?.checked === false ? '2' : '0';
+
+  // The entries of one list key, as {value, name, icon, entity}.
+  function entityPickerEntries(data, list) {
+    const raw = list === 'icon_sources' && typeof iconColorSourceEntries === 'function'
+      ? iconColorSourceEntries(data) : (data && data[list]);
+    const seen = new Set();
+    const entries = [];
+    for (const entry of Array.isArray(raw) ? raw : []) {
+      const value = String(entry?.v ?? '');
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      entries.push({
+        value,
+        name: String(entry.t || '') || titleFromEntity(value) || value,
+        icon: normalizeMdiIconName(entry.i || ''),
+        entity: String(entry.e || value)
+      });
+    }
+    return entries.sort((a, b) =>
+      a.name.localeCompare(b.name, APP_LOCALE, { sensitivity: 'base' }) || a.value.localeCompare(b.value));
   }
-  // Like the per-tile Tile borders option, only Back, Clock and Text can hide
-  // their own icon disc; every other tile follows the global option.
-  function tileTypeHasDiscToggle(typeValue) {
-    return ['8', '9', '10'].includes(String(typeValue ?? '0'));
+
+  // Like Home Assistant, the list leaves out the device name in front of an
+  // entity's name; the device stands in the line below. The tile title keeps
+  // the whole name.
+  function entityPickerShortName(name, device) {
+    const prefix = String(device || '').trim() + ' ';
+    if (prefix.length < 2 || name.length <= prefix.length ||
+        name.slice(0, prefix.length).toLowerCase() !== prefix.toLowerCase()) {
+      return name;
+    }
+    return name.slice(prefix.length).trim() || name;
   }
-  function collectIconDiscFields(tab, typeValue) {
-    const box = document.getElementById(tab + '_tile_icon_disc');
-    if (!box || !tileTypeHasIcon(typeValue)) return {};
-    const glow = document.getElementById(tab + '_tile_icon_glow');
+
+  function entityPickerFromRemote(item) {
+    const value = String(item?.v || '');
+    const name = String(item.t || '') || titleFromEntity(value) || value;
+    const entry = {
+      value,
+      name,
+      label: entityPickerShortName(name, item.d),
+      icon: normalizeMdiIconName(item.i || ''),
+      entity: value,
+      context: entityPickerContext(item.a, item.d),
+      remote: true
+    };
+    if (value) entityRemoteInfo.set(value, entry);
+    return entry;
+  }
+
+  // What the field shows for its value, also when the value is no longer in
+  // the released list (it is kept, never cleared).
+  function entityPickerEntryFor(input, value) {
+    if (!value) return null;
+    const list = input?.dataset?.entityPicker || '';
+    if (ENTITY_REMOTE_LISTS.has(list) && entityRemoteInfo.has(value)) return entityRemoteInfo.get(value);
+    const known = entityOptionsCache ? entityPickerEntries(entityOptionsCache, list).find(entry => entry.value === value) : null;
+    if (known) return known;
+    const entity = list === 'scenes' ? (sceneEntityOf(value) || value) : value;
     return {
-      icon_disc: tileTypeHasDiscToggle(typeValue) ? iconDiscModeFromCheckbox(box) : '0',
-      icon_glow: tileTypeHasColoredIcon(typeValue) && glow?.checked === false ? '0' : '1',
+      value,
+      name: sensorMetaCache.names?.[entity] || titleFromEntity(value) || value,
+      icon: normalizeMdiIconName(sensorMetaCache.icons?.[entity] || ''),
+      entity
     };
   }
-  function loadIconDiscFields(tab, data) {
-    const box = document.getElementById(tab + '_tile_icon_disc');
-    if (box) box.checked = String(data?.icon_disc) !== '2';
-    const glow = document.getElementById(tab + '_tile_icon_glow');
-    if (glow) glow.checked = !['0', 'false'].includes(String(data?.icon_glow));
-    syncIconDiscFields(tab);
+
+  // The chosen entity's name for an automatic tile title ('' without one).
+  function entityPickerName(input) {
+    const entry = entityPickerEntryFor(input, input?.value || '');
+    return entry ? entry.name : '';
   }
-  function resetIconDiscFields(tab) {
-    const box = document.getElementById(tab + '_tile_icon_disc');
-    if (box) box.checked = true;
-    const glow = document.getElementById(tab + '_tile_icon_glow');
-    if (glow) glow.checked = true;
+
+  function entityPickerRowHtml(entry, query) {
+    const mark = text => {
+      const plain = String(text || '');
+      const words = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
+      const lower = plain.toLowerCase();
+      const word = words.find(candidate => lower.includes(candidate));
+      if (!word) return escapeHtml(plain);
+      const at = lower.indexOf(word);
+      return escapeHtml(plain.slice(0, at)) + '<mark>' + escapeHtml(plain.slice(at, at + word.length)) + '</mark>' +
+        escapeHtml(plain.slice(at + word.length));
+    };
+    return '<span class="entity-picker-icon"><i class="mdi mdi-' +
+      escapeHtml(entry.icon || ENTITY_PICKER_FALLBACK_ICON) + '"></i></span>' +
+      '<span class="entity-picker-text"><span class="entity-picker-name">' + mark(entry.label || entry.name) + '</span>' +
+      '<span class="entity-picker-context">' + mark(entry.context || entry.entity) + '</span></span>';
   }
+
+  function entityPickerControl(input) {
+    const next = input?.nextElementSibling;
+    return next && next.classList.contains('entity-picker') ? next : null;
+  }
+
+  // Draws the closed field of one input from its current value. An optional
+  // entity names what an empty field means (data-entity-empty, e.g. the
+  // Weather tile's own value without a sensor).
+  function renderEntityPicker(input) {
+    const control = entityPickerControl(input);
+    if (!control) return;
+    const field = control.querySelector('.entity-picker-field');
+    const clear = control.querySelector('.entity-picker-clear');
+    const entry = entityPickerEntryFor(input, input.value);
+    if (field) {
+      field.innerHTML = (entry ? entityPickerRowHtml(entry, '')
+        : '<span class="entity-picker-placeholder">' +
+          escapeHtml(input.dataset.entityEmpty || t('entityPickerChoose')) + '</span>') +
+        '<i class="mdi mdi-chevron-down entity-picker-chevron"></i>';
+    }
+    if (clear) clear.hidden = !entry;
+    if (entry && !entry.remote && input.closest?.('.tile-entity-slot')) entityPickerLookup(input);
+  }
+
+  // Adds the visible field after a hidden entity input (once per element) and
+  // keeps it in step with every later `input.value = ...`.
+  function attachEntityPicker(input) {
+    if (!input || !input.id) return;
+    let control = entityPickerControl(input);
+    if (!control) {
+      control = document.createElement('div');
+      control.className = 'entity-picker';
+      input.insertAdjacentElement('afterend', control);
+    }
+    // Clicks are delegated, so markup restored from the session cache or
+    // moved under Type keeps working and is only redrawn.
+    if (!control.querySelector('.entity-picker-field')) {
+      control.innerHTML = '<button type="button" class="entity-picker-field" id="' + escapeHtml(input.id) +
+        '_picker" aria-haspopup="listbox" aria-expanded="false"></button>' +
+        '<button type="button" class="entity-picker-clear" aria-label="' + escapeHtml(t('entityPickerClear')) +
+        '" title="' + escapeHtml(t('entityPickerClear')) + '" hidden><i class="mdi mdi-close"></i></button>';
+    }
+    if (entityPickerNativeValue && !Object.prototype.hasOwnProperty.call(input, 'value')) {
+      Object.defineProperty(input, 'value', {
+        configurable: true,
+        get() { return entityPickerNativeValue.get.call(this); },
+        set(value) {
+          entityPickerNativeValue.set.call(this, value);
+          renderEntityPicker(this);
+        }
+      });
+    }
+    renderEntityPicker(input);
+  }
+
+  function setupEntityPickers(root) {
+    (root || document).querySelectorAll?.('input[data-entity-picker]').forEach(attachEntityPicker);
+  }
+
+  // Redraws the fields of one tile tab (or all) once fresh names arrived.
+  function refreshEntityPickers(tab) {
+    const selector = tab ? 'input[data-entity-picker][id^="' + tab + '_"]' : 'input[data-entity-picker]';
+    document.querySelectorAll(selector).forEach(renderEntityPicker);
+    if (typeof refreshTileIconButtons === 'function') refreshTileIconButtons(tab);
+    if (entityPickerOpen && entityPickerOpen.state !== 'ready') loadEntityPickerEntries();
+  }
+
+  // ---- Bridge search ----
+
+  // One search through the panel, from match `offset` on; null without a
+  // Bridge that searches or when a newer search replaced it (the panel keeps
+  // the newest only).
+  async function entityRemoteSearch(list, query, generation, offset) {
+    const params = new URLSearchParams({ q: query, list });
+    if (offset) params.set('o', String(offset));
+    const begin = await fetch('api/entity_search', { method: 'POST', body: params });
+    if (!begin.ok) throw new Error('Entity search HTTP ' + begin.status);
+    const started = await begin.json();
+    if (!started.bridge) {
+      entityRemoteSupported = false;
+      return null;
+    }
+    // A list this Bridge does not search yet (energy below search level 3):
+    // the panel's own list stays, the other lists keep searching.
+    if (started.list === false) return null;
+    const deadline = Date.now() + ENTITY_REMOTE_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, ENTITY_REMOTE_POLL_MS));
+      if (generation !== entityRemoteGeneration) return null;
+      const poll = await fetch('api/entity_search?id=' + encodeURIComponent(started.id));
+      if (!poll.ok) throw new Error('Entity search HTTP ' + poll.status);
+      const answer = await poll.json();
+      if (answer.ready) return answer;
+    }
+    throw new Error('Entity search timeout');
+  }
+
+  // Merges one page of the Bridge's answer into the open list.
+  function entityPickerApplyRemote(open, answer, append) {
+    const entries = append ? open.entries : [];
+    const seen = new Set(entries.map(entry => entry.value));
+    const page = (Array.isArray(answer.r) ? answer.r : []).map(entityPickerFromRemote);
+    const fresh = page.filter(entry => entry.value && !seen.has(entry.value) && seen.add(entry.value));
+    open.offset = (append ? open.offset : 0) + page.length;
+    open.full = !!answer.full;
+    // A Bridge without pages repeats its first one, which ends the list.
+    open.more = !!answer.more && fresh.length > 0;
+    // Panel entities the Bridge does not search (display, local relays)
+    // follow the last page.
+    const own = open.more ? [] :
+      open.local.filter(entry => !seen.has(entry.value) && entityPickerMatchesQuery(entry, open.query));
+    open.entries = entries.concat(fresh, own);
+    open.remote = 'ready';
+  }
+
+  function entityPickerRemoteSearch(open) {
+    const list = open.input.dataset.entityPicker;
+    if (!entityRemoteSupported || !ENTITY_REMOTE_LISTS.has(list)) return;
+    const generation = ++entityRemoteGeneration;
+    // A list opened from the remembered first page keeps its place when the
+    // fresh one arrives.
+    const shown = open.remote === 'ready';
+    open.remote = 'loading';
+    open.paging = false;
+    entityRemoteSearch(list, open.query, generation, 0)
+      .then(answer => {
+        if (entityPickerOpen !== open || generation !== entityRemoteGeneration) return;
+        if (!answer) {
+          open.remote = null;
+        } else {
+          if (!open.query) entityRemoteFirstPages.set(list, answer);
+          entityPickerApplyRemote(open, answer, false);
+          if (!open.query && !shown) {
+            open.active = entityPickerRowOf(open.input.value);
+          }
+          renderEntityPicker(open.input);
+        }
+        renderEntityPickerList(shown);
+      })
+      .catch(() => {
+        if (entityPickerOpen !== open || generation !== entityRemoteGeneration) return;
+        // A remembered page stays; without one the panel's own list shows.
+        open.remote = open.entries.length ? 'ready' : null;
+        renderEntityPickerList(shown);
+      });
+  }
+
+  // The next page of the Bridge's matches once the list nears its end.
+  function entityPickerRemoteMore(open) {
+    if (!open || open.remote !== 'ready' || !open.more || open.paging) return;
+    open.paging = true;
+    const generation = entityRemoteGeneration;
+    entityRemoteSearch(open.input.dataset.entityPicker, open.query, generation, open.offset)
+      .then(answer => {
+        if (entityPickerOpen !== open || generation !== entityRemoteGeneration) return;
+        open.paging = false;
+        if (answer) entityPickerApplyRemote(open, answer, true);
+        else open.more = false;
+        renderEntityPickerList(true);
+      })
+      .catch(() => {
+        if (entityPickerOpen !== open || generation !== entityRemoteGeneration) return;
+        open.paging = false;
+        open.more = false;
+        renderEntityPickerList(true);
+      });
+  }
+
+  function entityPickerNearEnd(list) {
+    if (list.scrollHeight - list.scrollTop - list.clientHeight < 120) entityPickerRemoteMore(entityPickerOpen);
+  }
+
+  // Requests ahead of an opening run one after another, since the panel
+  // keeps only its newest search; an open list's own search cancels them.
+  function entityRemoteInBackground(job) {
+    entityRemoteQueue = entityRemoteQueue.then(job).catch(() => {});
+  }
+
+  // Closed fields of these Bridge entities show their area and device.
+  function entityPickerShowRemote(items) {
+    const values = new Set(items.map(item => entityPickerFromRemote(item).value));
+    document.querySelectorAll('input[data-entity-picker]').forEach(input => {
+      if (values.has(input.value)) renderEntityPicker(input);
+    });
+    if (typeof refreshTileIconButtons === 'function') refreshTileIconButtons();
+  }
+
+  // The shown tile's entity field: the first page of its list arrives ahead
+  // of the opening, then area and device of its own entity.
+  function entityPickerWarm(input) {
+    const list = input?.dataset?.entityPicker || '';
+    if (!entityRemoteSupported || !ENTITY_REMOTE_LISTS.has(list)) return;
+    if (!entityRemoteFirstPages.has(list) && !entityRemoteFetching.has(list)) {
+      entityRemoteFetching.add(list);
+      entityRemoteInBackground(async () => {
+        try {
+          if (entityPickerOpen) return;
+          const answer = await entityRemoteSearch(list, '', ++entityRemoteGeneration, 0);
+          if (!answer) return;
+          entityRemoteFirstPages.set(list, answer);
+          entityPickerShowRemote(Array.isArray(answer.r) ? answer.r : []);
+        } finally {
+          entityRemoteFetching.delete(list);
+        }
+      });
+    }
+    entityPickerLookup(input);
+  }
+
+  // A closed field learns area and device of its entity from the Bridge,
+  // once per entity; the first page often has it already.
+  function entityPickerLookup(input) {
+    const list = input?.dataset?.entityPicker || '';
+    const value = input?.value || '';
+    if (!value || !entityRemoteSupported || !ENTITY_REMOTE_LISTS.has(list) || entityRemoteAsked.has(value)) {
+      return;
+    }
+    entityRemoteAsked.add(value);
+    entityRemoteInBackground(async () => {
+      if (entityRemoteInfo.has(value)) return;
+      if (entityPickerOpen) {
+        entityRemoteAsked.delete(value);
+        return;
+      }
+      const answer = await entityRemoteSearch(list, value, ++entityRemoteGeneration, 0);
+      const item = answer && (answer.r || []).find(entry => entry.v === value);
+      if (item) entityPickerShowRemote([item]);
+    });
+  }
+
+  // ---- Tile adoption and placement ----
+
+  // The tile tab of a tile's own entity field (it sits in the entity slot
+  // under Type); '' for other entity fields such as the icon color source.
+  function entityPickerTileTab(input) {
+    const slot = input?.closest?.('.tile-entity-slot');
+    return slot ? slot.id.replace(/_tile_entity_slot$/, '') : '';
+  }
+
+  // A tile takes the name, icon and icon color of every entity chosen for it
+  // from the list, also the one it already has; they stay editable until an
+  // entity is chosen again.
+  function adoptEntityPickerEntry(tab, entry) {
+    const title = document.getElementById(tab + '_tile_title');
+    if (title) title.value = normalizeTileTitle(entry.name);
+    // An empty icon is the entity's own icon, also its state icons.
+    const icon = document.getElementById(tab + '_tile_icon');
+    if (icon) icon.value = '';
+    if (typeof setIconColorInput === 'function') setIconColorInput(tab, '');
+  }
+
+  function chooseEntityPickerValue(input, value, entry) {
+    if (!input) return;
+    const tab = entry ? entityPickerTileTab(input) : '';
+    if (input.value === value && !tab) return;
+    input.value = value;
+    if (tab) adoptEntityPickerEntry(tab, entry);
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  // The entity of the shown tile type sits right under Type, outside the
+  // scrolling settings body, so it never needs scrolling to; it returns to
+  // the start of its own type fields when another type is shown.
+  function placeTileEntityField(tab) {
+    const slot = document.getElementById(tab + '_tile_entity_slot');
+    if (!slot) return;
+    const parts = input => [
+      document.querySelector('label[for="' + input.id + '_picker"]'), input, entityPickerControl(input)
+    ].filter(Boolean);
+    for (const input of slot.querySelectorAll('input[data-entity-picker]')) {
+      document.getElementById(input.dataset.entityHome || '')?.prepend(...parts(input));
+    }
+    const fields = document.querySelector('#' + tab + 'Settings .type-fields.show');
+    const input = fields?.querySelector(':scope > input[data-entity-picker]');
+    if (!input) return;
+    input.dataset.entityHome = fields.id;
+    slot.append(...parts(input));
+    entityPickerWarm(input);
+  }
+
+  // ---- Recently chosen ----
+
+  function entityRecentRead() {
+    try {
+      const data = JSON.parse(window.localStorage.getItem(ENTITY_RECENT_KEY) || '{}');
+      return data && typeof data === 'object' ? data : {};
+    } catch (error) {
+      return {};
+    }
+  }
+
+  function entityRecentNote(list, value) {
+    if (!list || !value) return;
+    const data = entityRecentRead();
+    const items = data[list] && typeof data[list] === 'object' ? data[list] : {};
+    const previous = Array.isArray(items[value]) ? items[value] : [0, 0];
+    items[value] = [Number(previous[0]) + 1 || 1, Date.now()];
+    data[list] = Object.fromEntries(Object.entries(items)
+      .filter(([, item]) => Array.isArray(item))
+      .sort((a, b) => Number(b[1][1]) - Number(a[1][1]))
+      .slice(0, ENTITY_RECENT_KEEP));
+    try {
+      window.localStorage.setItem(ENTITY_RECENT_KEY, JSON.stringify(data));
+    } catch (error) {
+      // Without storage the list simply shows no recent group.
+    }
+  }
+
+  // The list's chosen entities: chosen often and lately first.
+  function entityRecentValues(list) {
+    const items = entityRecentRead()[list];
+    if (!items || typeof items !== 'object') return [];
+    const now = Date.now();
+    const score = item => (Number(item[0]) || 0) *
+      Math.pow(0.5, Math.max(0, now - (Number(item[1]) || 0)) / ENTITY_RECENT_HALF_LIFE_MS);
+    return Object.entries(items)
+      .filter(([, item]) => Array.isArray(item))
+      .sort((a, b) => score(b[1]) - score(a[1]) || Number(b[1][1]) - Number(a[1][1]))
+      .map(([value]) => value);
+  }
+
+  // ---- Open list ----
+
+  function entityPickerMatchesQuery(entry, query) {
+    const words = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
+    const text = (entry.name + ' ' + entry.value + ' ' + entry.entity + ' ' + (entry.context || '')).toLowerCase();
+    return words.every(word => text.includes(word));
+  }
+
+  // The Bridge's answer is already filtered; while a new one is on its way
+  // the previous one filters here, and the panel's own list without a Bridge.
+  function entityPickerMatches() {
+    const open = entityPickerOpen;
+    if (open.remote === 'ready') return open.entries;
+    if (open.remote === 'loading' && open.entries.length) {
+      return open.entries.filter(entry => entityPickerMatchesQuery(entry, open.query));
+    }
+    return open.local.filter(entry => entityPickerMatchesQuery(entry, open.query));
+  }
+
+  // The open list sorted by the switch (#79): Recent (the entities chosen in
+  // this browser often and lately) or Favorites (the panel's own entities,
+  // released for it in the Bridge, and the ones its tiles use) on top, then
+  // a line and every other entity the Bridge finds; All without a group on
+  // top. A search filters both parts. rows.split: the rows above the line.
+  function entityPickerView() {
+    const open = entityPickerOpen;
+    const matches = entityPickerMatches();
+    if (open.tab === 'all') return Object.assign(matches.slice(), { split: 0 });
+    // The Bridge's row has area and device; the panel's own row only the name.
+    const richer = entry => entityRemoteInfo.get(entry.value) || entry;
+    const own = new Map(open.local.map(entry => [entry.value, entry]));
+    const group = open.tab === 'recent'
+      ? entityRecentValues(open.input.dataset.entityPicker)
+        .map(value => entityRemoteInfo.get(value) || open.entries.find(entry => entry.value === value) ||
+          (own.has(value) ? richer(own.get(value)) : null))
+        .filter(Boolean).slice(0, ENTITY_RECENT_SHOWN)
+      : open.local.map(richer);
+    const top = group.filter(entry => entityPickerMatchesQuery(entry, open.query));
+    const above = new Set(top.map(entry => entry.value));
+    // Below the line the Bridge's list follows once it is there.
+    const rest = entityPickerBelowWaits() ? [] : matches.filter(entry => !above.has(entry.value));
+    return Object.assign(top.concat(rest), { split: top.length });
+  }
+
+  // The Bridge's list is on its way and nothing of it is there yet.
+  function entityPickerBelowWaits() {
+    const open = entityPickerOpen;
+    return open.remote === 'loading' && !open.entries.length;
+  }
+
+  // The row of `value` in the open list, 0 without it.
+  function entityPickerRowOf(value) {
+    return Math.max(0, entityPickerView().findIndex(entry => entry.value === value));
+  }
+
+  function renderEntityPickerTabs() {
+    const tabs = entityPickerPopover?.querySelector('.entity-picker-tabs');
+    const open = entityPickerOpen;
+    if (!tabs || !open) return;
+    tabs.innerHTML = ENTITY_PICKER_TABS.map(([tab, icon, label]) =>
+      '<button type="button" class="icon-picker-choice entity-picker-tab' + (open.tab === tab ? ' selected' : '') +
+      '" role="tab" aria-selected="' + (open.tab === tab ? 'true' : 'false') + '" data-tab="' + tab + '">' +
+      '<span class="entity-picker-icon"><i class="mdi mdi-' + icon + '"></i></span>' +
+      '<span class="entity-picker-text"><span class="entity-picker-name">' + escapeHtml(t(label)) +
+      '</span></span></button>').join('');
+  }
+
+  function renderEntityPickerList(keepScroll) {
+    const open = entityPickerOpen;
+    const list = entityPickerPopover?.querySelector('.entity-picker-list');
+    const foot = entityPickerPopover?.querySelector('.entity-picker-foot');
+    if (!open || !list) return;
+    renderEntityPickerTabs();
+    // All waits for the Bridge; Recent and Favorites show their rows at once.
+    const all = open.tab === 'all';
+    // Without a Web Admin password the Bridge finds only released entities.
+    if (foot) foot.hidden = !(open.remote === 'ready' && !open.full);
+    // Nothing of the Bridge's list is there yet: the list waits at full size
+    // instead of showing the panel's short list first and then growing.
+    const waiting = all && entityPickerBelowWaits();
+    entityPickerPopover.classList.toggle('waiting', waiting);
+    if (waiting || (open.state === 'loading' && (!all || open.remote !== 'ready'))) {
+      list.innerHTML = '<div class="entity-picker-loading">' + '<div></div>'.repeat(6) + '</div>';
+      return;
+    }
+    if (open.state === 'failed' && (!all || open.remote !== 'ready')) {
+      list.innerHTML = '<div class="entity-picker-state"><i class="mdi mdi-lan-disconnect"></i>' +
+        escapeHtml(t('entityPickerLoadFailed')) +
+        '<button type="button" class="btn entity-picker-retry">' + escapeHtml(t('entityPickerRetry')) + '</button></div>';
+      return;
+    }
+    const rows = entityPickerView();
+    open.active = Math.max(0, Math.min(open.active, rows.length - 1));
+    const loadingBelow = entityPickerBelowWaits();
+    if (!rows.length && loadingBelow) {
+      list.innerHTML = '<div class="entity-picker-loading">' + '<div></div>'.repeat(6) + '</div>';
+      return;
+    }
+    if (!rows.length) {
+      list.innerHTML = '<div class="entity-picker-state">' + escapeHtml(open.query
+        ? tf('entityPickerNoMatch', { query: open.query }) : t('entityPickerNone')) + '</div>';
+      return;
+    }
+    const current = open.input.value;
+    const line = '<div class="entity-picker-divider" role="separator"></div>';
+    list.innerHTML = rows.map((entry, index) => {
+      const kind = entityKindLabel(entry.entity);
+      return (index && index === rows.split ? line : '') +
+        '<div class="entity-picker-item' + (index === open.active ? ' active' : '') +
+        (entry.value === current ? ' selected' : '') + '" role="option" aria-selected="' +
+        (entry.value === current ? 'true' : 'false') + '" data-index="' + index + '">' +
+        entityPickerRowHtml(entry, open.query) +
+        (kind ? '<span class="entity-picker-kind">' + escapeHtml(kind) + '</span>' : '') + '</div>';
+    }).join('') + (loadingBelow ? line + '<div class="entity-picker-loading"><div></div><div></div></div>' : '') +
+      (open.remote === 'ready' && open.more
+        ? '<div class="entity-picker-loading entity-picker-more"><div></div></div>' : '');
+    if (!keepScroll) list.querySelector('.entity-picker-item.active')?.scrollIntoView({ block: 'nearest' });
+    // A short first page loads the next one right away.
+    if (open.remote === 'ready' && open.more) entityPickerNearEnd(list);
+  }
+
+  function loadEntityPickerEntries(force) {
+    const open = entityPickerOpen;
+    if (!open) return;
+    const apply = data => {
+      open.local = entityPickerEntries(data, open.input.dataset.entityPicker);
+      open.state = 'ready';
+      // Without own entities the list opens on All.
+      if (!open.local.length && !open.tabChosen) open.tab = 'all';
+      // Without a search the list starts at the chosen entity.
+      if (!open.query && open.remote !== 'ready') {
+        open.active = entityPickerRowOf(open.input.value);
+      }
+      renderEntityPickerList();
+    };
+    if (entityOptionsCache && !force) {
+      apply(entityOptionsCache);
+    } else {
+      open.state = 'loading';
+      renderEntityPickerList();
+    }
+    fetchEntityOptions(!!force)
+      .then(data => {
+        if (entityPickerOpen !== open) return;
+        apply(data);
+        renderEntityPicker(open.input);
+      })
+      .catch(() => {
+        if (entityPickerOpen !== open || open.state === 'ready') return;
+        open.state = 'failed';
+        renderEntityPickerList();
+      });
+  }
+
+  function placeEntityPickerPopover() {
+    const open = entityPickerOpen;
+    const field = open && entityPickerControl(open.input)?.querySelector('.entity-picker-field');
+    if (!field || !entityPickerPopover) return;
+    const pop = entityPickerPopover;
+    const viewportW = window.innerWidth;
+    const viewportH = window.innerHeight;
+    if (viewportW <= 560) {
+      // Phones: a sheet at the bottom edge.
+      pop.classList.add('sheet');
+      pop.style.left = pop.style.top = pop.style.width = pop.style.maxHeight = '';
+      return;
+    }
+    pop.classList.remove('sheet');
+    const rect = field.getBoundingClientRect();
+    const width = Math.min(Math.max(rect.width, 340), viewportW - 16);
+    const below = viewportH - rect.bottom - 12;
+    const above = rect.top - 12;
+    const up = below < 280 && above > below;
+    const height = Math.min(440, Math.max(160, up ? above : below));
+    // Wider than its field: open from the field's right edge when the list
+    // would leave the settings card on the right (user 2026-10-09).
+    const card = field.closest('.tile-settings')?.getBoundingClientRect();
+    let left = rect.left;
+    if (card && left + width > card.right) left = Math.max(card.left, rect.right - width);
+    pop.style.width = width + 'px';
+    pop.style.left = Math.max(8, Math.min(left, viewportW - width - 8)) + 'px';
+    pop.style.maxHeight = height + 'px';
+    pop.style.top = (up ? Math.max(8, rect.top - 6 - Math.min(height, pop.offsetHeight || height))
+      : rect.bottom + 6) + 'px';
+  }
+
+  function openEntityPicker(input) {
+    if (!input) return;
+    closeEntityPicker(false);
+    if (typeof closeIconPicker === 'function') closeIconPicker(false);
+    if (!entityPickerPopover) {
+      entityPickerPopover = document.createElement('div');
+      entityPickerPopover.className = 'entity-picker-popover';
+      entityPickerPopover.innerHTML = '<div class="entity-picker-search"><i class="mdi mdi-magnify"></i>' +
+        '<input type="search" autocomplete="off" spellcheck="false"></div>' +
+        '<div class="entity-picker-tabs" role="tablist"></div>' +
+        '<div class="entity-picker-list" role="listbox"></div>' +
+        '<div class="entity-picker-foot" hidden><i class="mdi mdi-lock-outline"></i><span></span>' +
+        '<button type="button" class="entity-picker-password"></button></div>';
+      document.body.appendChild(entityPickerPopover);
+    }
+    const search = entityPickerPopover.querySelector('input');
+    search.value = '';
+    search.placeholder = t('entityPickerSearch');
+    entityPickerPopover.querySelector('.entity-picker-foot span').textContent = t('entityPickerReleased');
+    entityPickerPopover.querySelector('.entity-picker-password').textContent = t('webAuthSet');
+    entityPickerOpen = { input, local: [], entries: [], query: '', active: 0, state: 'loading',
+      remote: null, full: false, more: false, offset: 0, paging: false, tab: 'favorites', tabChosen: false };
+    const field = entityPickerControl(input)?.querySelector('.entity-picker-field');
+    field?.classList.add('open');
+    field?.setAttribute('aria-expanded', 'true');
+    entityPickerPopover.classList.add('open');
+    loadEntityPickerEntries(false);
+    // The remembered first page shows at once; the Bridge's fresh one follows.
+    const remembered = entityRemoteSupported && entityRemoteFirstPages.get(input.dataset.entityPicker);
+    if (remembered) {
+      entityPickerApplyRemote(entityPickerOpen, remembered, false);
+      entityPickerOpen.active = entityPickerRowOf(input.value);
+    }
+    entityPickerRemoteSearch(entityPickerOpen);
+    // Drawn once the Bridge search is under way, so the panel's short list
+    // never shows first.
+    renderEntityPickerList();
+    placeEntityPickerPopover();
+    search.focus();
+  }
+
+  function closeEntityPicker(focusField) {
+    const open = entityPickerOpen;
+    if (!open) return;
+    entityPickerOpen = null;
+    window.clearTimeout(entityRemoteTimer);
+    entityPickerPopover?.classList.remove('open');
+    const field = entityPickerControl(open.input)?.querySelector('.entity-picker-field');
+    field?.classList.remove('open');
+    field?.setAttribute('aria-expanded', 'false');
+    if (focusField) field?.focus();
+  }
+
+  function pickEntityPickerIndex(index) {
+    const open = entityPickerOpen;
+    const entry = open ? entityPickerView()[index] : null;
+    if (!entry) return;
+    closeEntityPicker(true);
+    entityRecentNote(open.input.dataset.entityPicker, entry.value);
+    chooseEntityPickerValue(open.input, entry.value, entry);
+  }
+
+  document.addEventListener('click', event => {
+    const target = event.target;
+    const control = target?.closest?.('.entity-picker');
+    if (control) {
+      const input = control.previousElementSibling;
+      if (target.closest('.entity-picker-clear')) {
+        closeEntityPicker(false);
+        chooseEntityPickerValue(input, '');
+        control.querySelector('.entity-picker-field')?.focus();
+      } else if (target.closest('.entity-picker-field')) {
+        if (entityPickerOpen?.input === input) closeEntityPicker(true);
+        else openEntityPicker(input);
+      }
+      return;
+    }
+    if (!entityPickerOpen) return;
+    if (!target?.closest?.('.entity-picker-popover')) {
+      closeEntityPicker(false);
+      return;
+    }
+    const tab = target.closest('.entity-picker-tab');
+    if (tab) {
+      // Another switch: its list from its start, or at the chosen entity.
+      entityPickerOpen.tab = tab.dataset.tab;
+      entityPickerOpen.tabChosen = true;
+      entityPickerOpen.active = entityPickerRowOf(entityPickerOpen.input.value);
+      renderEntityPickerList();
+      const list = entityPickerPopover.querySelector('.entity-picker-list');
+      if (list && !list.querySelector('.entity-picker-item.active.selected')) list.scrollTop = 0;
+      entityPickerPopover.querySelector('.entity-picker-search input')?.focus();
+      return;
+    }
+    const item = target.closest('.entity-picker-item');
+    if (item) {
+      pickEntityPickerIndex(Number(item.dataset.index));
+    } else if (target.closest('.entity-picker-retry')) {
+      loadEntityPickerEntries(true);
+    } else if (target.closest('.entity-picker-password')) {
+      // The Web Admin password row (Settings > System).
+      closeEntityPicker(false);
+      if (typeof openSettingsPage === 'function') openSettingsPage('system', 'web_auth_section');
+    }
+  });
+
+  document.addEventListener('input', event => {
+    const open = entityPickerOpen;
+    if (!open || !event.target?.closest?.('.entity-picker-search')) return;
+    open.query = event.target.value;
+    open.active = 0;
+    if (open.remote) {
+      // The own list right away, the Bridge's answer after a short pause; a
+      // page of the previous search in flight is dropped.
+      open.remote = 'loading';
+      entityRemoteGeneration++;
+      window.clearTimeout(entityRemoteTimer);
+      entityRemoteTimer = window.setTimeout(() => entityPickerRemoteSearch(open), ENTITY_REMOTE_DELAY_MS);
+    }
+    renderEntityPickerList();
+  });
+
+  document.addEventListener('keydown', event => {
+    if (!entityPickerOpen || !event.target?.closest?.('.entity-picker-search')) return;
+    const count = entityPickerView().length;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (!count) return;
+      const step = event.key === 'ArrowDown' ? 1 : -1;
+      entityPickerOpen.active = (entityPickerOpen.active + step + count) % count;
+      renderEntityPickerList();
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      pickEntityPickerIndex(entityPickerOpen.active);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      closeEntityPicker(true);
+    } else if (event.key === 'Tab') {
+      closeEntityPicker(false);
+    }
+  });
+
+  // The open list follows its field once per frame while the page scrolls or
+  // the window is resized; scrolling the list itself moves nothing.
+  const placeEntityPickerSoon = perFrame(placeEntityPickerPopover);
+  window.addEventListener('resize', perFrame(placeEntityPickerPopover));
+  document.addEventListener('scroll', event => {
+    if (!entityPickerOpen) return;
+    if (event.target?.classList?.contains('entity-picker-list')) entityPickerNearEnd(event.target);
+    else if (!event.target?.closest?.('.entity-picker-popover')) placeEntityPickerSoon();
+  }, true);
+
+  // Tile tabs arrive later (folder fragments, session cache): attach the
+  // fields of every inserted entity input.
+  document.addEventListener('DOMContentLoaded', () => {
+    setupEntityPickers(document);
+    if (typeof MutationObserver !== 'function') return;
+    new MutationObserver(records => {
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          if (node.nodeType !== 1) continue;
+          if (node.matches?.('input[data-entity-picker]')) attachEntityPicker(node);
+          else if (node.querySelector?.('input[data-entity-picker]')) setupEntityPickers(node);
+        }
+      }
+    }).observe(document.body, { childList: true, subtree: true });
+  });
+  // The fixed head of the tile settings: Title and Icon side by side under
+  // the heading with Type (web_admin_html.cpp). The title has at most two
+  // lines like every tile title; the icon picker keeps the icon name in the
+  // hidden `<tab>_tile_icon` input: empty = automatic (the entity's own
+  // icon, also its state icons), "none" = no icon, else an MDI name from the
+  // panel's own list (/api/mdi_icons).
+  // The same picker sets a rule's own icon (tile_icon_colors_html.cpp): a
+  // button with data-icon-input names its hidden field (data-icon-value, when
+  // set, is the icon it shows); empty keeps the tile's own icon, and a rule
+  // has no "No icon".
+
+  const ICON_PICKER_STEP = 240;
+  const tileHeadNativeTitle = typeof HTMLTextAreaElement === 'function'
+    ? Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value') : null;
+  const tileHeadNativeInput = typeof HTMLInputElement === 'function'
+    ? Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value') : null;
+  let mdiIconNames = null;
+  let mdiIconFetch = null;
+  let iconPickerPopover = null;
+  let iconPickerOpen = null;  // {tab, input, button, rule, query, matches, shown, active, state}
+
+  function fetchMdiIconNames() {
+    if (mdiIconNames) return Promise.resolve(mdiIconNames);
+    if (!mdiIconFetch) {
+      mdiIconFetch = fetch('api/mdi_icons')
+        .then(res => {
+          if (!res.ok) throw new Error('MDI icons HTTP ' + res.status);
+          return res.text();
+        })
+        .then(text => {
+          mdiIconNames = text.split('\n').map(name => name.trim()).filter(Boolean);
+          return mdiIconNames;
+        })
+        .finally(() => { mdiIconFetch = null; });
+    }
+    return mdiIconFetch;
+  }
+
+  // ---- Title: one line, two at most ----
+
+  function syncTileTitleRows(textarea) {
+    textarea?.classList.toggle('two', String(textarea.value || '').includes('\n'));
+  }
+
+  function tileHeadTab(element) {
+    return String(element?.id || '').replace(/_tile_(icon|icon_picker|title|title_auto)$/, '');
+  }
+
+  // ---- Title: Auto = the entity's name from Home Assistant ----
+
+  function tileEntityName(tab) {
+    const entity = document.querySelector('#' + tab + '_tile_entity_slot input[data-entity-picker]');
+    return entity && entity.value && typeof entityPickerName === 'function' ? entityPickerName(entity) : '';
+  }
+
+  // The name Auto puts in: the entity's, or a fixed one (Home's head title:
+  // "Home" in the panel's language, data-auto-title).
+  function tileAutoTitle(tab) {
+    return document.getElementById(tab + '_tile_title_auto')?.dataset.autoTitle || tileEntityName(tab);
+  }
+
+  // Auto lights while the title is the entity's name: choosing an entity or
+  // the switch puts the name in, typing turns it off. The title stays a plain
+  // stored title, so nothing new is saved.
+  function syncTileTitleAuto(tab) {
+    const button = document.getElementById(tab + '_tile_title_auto');
+    const title = document.getElementById(tab + '_tile_title');
+    if (!button || !title) return;
+    const name = tileAutoTitle(tab);
+    const on = !!name && title.value === normalizeTileTitle(name);
+    button.classList.toggle('on', on);
+    button.setAttribute('aria-pressed', on ? 'true' : 'false');
+    button.disabled = !name;
+  }
+
+  // ---- Icon button ----
+
+  // The icon the tile shows without a choice of its own: its entity's icon,
+  // else the icon its preview draws (type defaults such as a folder).
+  function tileAutomaticIcon(tab) {
+    // A fixed one (Home's head: the house, data-auto-icon).
+    const fixed = document.getElementById(tab + '_tile_icon')?.dataset.autoIcon;
+    if (fixed) return fixed;
+    const entity = document.querySelector('#' + tab + '_tile_entity_slot input[data-entity-picker]');
+    const entry = entity && entity.value && typeof entityPickerEntryFor === 'function'
+      ? entityPickerEntryFor(entity, entity.value) : null;
+    if (entry && entry.icon) return entry.icon;
+    const preview = document.getElementById(tab + '-tile-' + currentTileIndex)?.querySelector('.tile-icon');
+    const drawn = Array.from(preview?.classList || []).find(name => name.startsWith('mdi-'));
+    return drawn ? drawn.substring(4) : 'shape-outline';
+  }
+
+  function renderTileIconButton(tab) {
+    const input = document.getElementById(tab + '_tile_icon');
+    const button = document.getElementById(tab + '_tile_icon_picker');
+    if (!input || !button) return;
+    const raw = String(input.value || '').trim();
+    const none = isExplicitlyDisabledValue(raw);
+    const icon = none ? 'cancel' : (normalizeMdiIconName(raw) || tileAutomaticIcon(tab));
+    button.innerHTML = '<i class="mdi mdi-' + escapeHtml(icon) + '"></i>';
+    button.classList.toggle('none', none);
+    button.title = none ? t('iconPickerNone') : raw ? normalizeMdiIconName(raw) : t('iconPickerAuto');
+  }
+
+  // Also after names and icons of entities arrived from the Bridge.
+  function refreshTileIconButtons(tab) {
+    const selector = tab ? '#' + tab + '_tile_icon' : 'input[data-tile-icon]';
+    document.querySelectorAll(selector).forEach(input => {
+      renderTileIconButton(tileHeadTab(input));
+      syncTileTitleAuto(tileHeadTab(input));
+    });
+  }
+
+  // Programmatic loads (tile, draft, paste, import) redraw the head.
+  function attachTileHead(element) {
+    if (!element || Object.prototype.hasOwnProperty.call(element, 'value')) return;
+    const title = element.tagName === 'TEXTAREA';
+    const native = title ? tileHeadNativeTitle : tileHeadNativeInput;
+    if (!native) return;
+    Object.defineProperty(element, 'value', {
+      configurable: true,
+      get() { return native.get.call(this); },
+      set(value) {
+        native.set.call(this, value);
+        if (title) {
+          syncTileTitleRows(this);
+          syncTileTitleAuto(tileHeadTab(this));
+        } else {
+          renderTileIconButton(tileHeadTab(this));
+        }
+      }
+    });
+    if (title) {
+      syncTileTitleRows(element);
+      syncTileTitleAuto(tileHeadTab(element));
+    } else {
+      renderTileIconButton(tileHeadTab(element));
+    }
+  }
+
+  function setupTileHeads(root) {
+    (root || document).querySelectorAll?.('input[data-tile-icon], textarea.tile-title-input').forEach(attachTileHead);
+  }
+
+  // ---- Icon list ----
+
+  function iconPickerChoose(value) {
+    const open = iconPickerOpen;
+    if (!open) return;
+    const input = document.getElementById(open.input);
+    closeIconPicker(true);
+    if (!input || iconPickerCurrent(open) === value) return;
+    input.value = value;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  function iconPickerCurrent(open) {
+    const shown = open.button?.dataset.iconValue;
+    const raw = String(shown ?? document.getElementById(open.input)?.value ?? '').trim();
+    return !open.rule && isExplicitlyDisabledValue(raw) ? 'none' : normalizeMdiIconName(raw);
+  }
+
+  function iconPickerCellsHtml(from, to) {
+    const open = iconPickerOpen;
+    const current = iconPickerCurrent(open);
+    let html = '';
+    for (let index = from; index < to; index++) {
+      const name = open.matches[index];
+      html += '<button type="button" class="icon-picker-cell' + (name === current ? ' selected' : '') +
+        (index === open.active ? ' active' : '') + '" data-icon="' + escapeHtml(name) + '" data-index="' + index +
+        '" title="' + escapeHtml(name) + '"><i class="mdi mdi-' + escapeHtml(name) + '"></i></button>';
+    }
+    return html;
+  }
+
+  function renderIconPickerList() {
+    const open = iconPickerOpen;
+    const list = iconPickerPopover?.querySelector('.icon-picker-list');
+    if (!open || !list) return;
+    const current = iconPickerCurrent(open);
+    const choice = (value, icon, name, hint) =>
+      '<button type="button" class="icon-picker-choice' + (current === value ? ' selected' : '') + '" data-icon="' +
+      value + '"><span class="entity-picker-icon"><i class="mdi mdi-' + escapeHtml(icon) + '"></i></span>' +
+      '<span class="entity-picker-text"><span class="entity-picker-name">' + escapeHtml(name) + '</span>' +
+      '<span class="entity-picker-context">' + escapeHtml(hint) + '</span></span></button>';
+    // Home's head always shows its circle: no "No icon" there, nor for a
+    // rule, whose Automatic keeps the tile's own icon.
+    const none = open.rule || document.getElementById(open.tab + '_tile_icon')?.dataset.autoIcon
+      ? '' : choice('none', 'cancel', t('iconPickerNone'), t('iconPickerNoneHint'));
+    let html = open.query ? '' : '<div class="icon-picker-choices' + (none ? '' : ' single') + '">' +
+      choice('', tileAutomaticIcon(open.tab), t('iconPickerAuto'),
+        t(open.rule ? 'iconPickerRuleHint' : 'iconPickerAutoHint')) + none + '</div>';
+    if (open.state === 'loading') {
+      html += '<div class="entity-picker-loading"><div></div><div></div><div></div></div>';
+    } else if (open.state === 'failed') {
+      html += '<div class="entity-picker-state"><i class="mdi mdi-lan-disconnect"></i>' + escapeHtml(t('networkError')) +
+        '<button type="button" class="btn icon-picker-retry">' + escapeHtml(t('entityPickerRetry')) + '</button></div>';
+    } else if (!open.matches.length) {
+      html += '<div class="entity-picker-state">' + escapeHtml(tf('iconPickerNoMatch', { query: open.query })) + '</div>';
+    } else {
+      html += '<div class="icon-picker-grid">' + iconPickerCellsHtml(0, open.shown) + '</div>';
+    }
+    list.innerHTML = html;
+    iconPickerShowName();
+  }
+
+  // More icons as the list scrolls near its end.
+  function growIconPickerList() {
+    const open = iconPickerOpen;
+    const grid = iconPickerPopover?.querySelector('.icon-picker-grid');
+    if (!open || !grid || open.shown >= open.matches.length) return;
+    const next = Math.min(open.matches.length, open.shown + ICON_PICKER_STEP);
+    grid.insertAdjacentHTML('beforeend', iconPickerCellsHtml(open.shown, next));
+    open.shown = next;
+  }
+
+  function iconPickerShowName(name) {
+    const footer = iconPickerPopover?.querySelector('.icon-picker-name');
+    const open = iconPickerOpen;
+    if (!footer || !open) return;
+    footer.textContent = name || open.matches[open.active] || ' ';
+  }
+
+  function filterIconPicker() {
+    const open = iconPickerOpen;
+    const words = open.query.toLowerCase().split(/\s+/).filter(Boolean);
+    open.matches = (mdiIconNames || []).filter(name => words.every(word => name.includes(word)));
+    open.shown = Math.min(open.matches.length, ICON_PICKER_STEP);
+    // A search marks its first match for Enter; without one only the chosen
+    // icon is marked.
+    open.active = open.query ? 0 : -1;
+    if (!open.query) {
+      const current = open.matches.indexOf(iconPickerCurrent(open));
+      if (current >= 0) {
+        open.active = current;
+        open.shown = Math.min(open.matches.length, Math.max(open.shown, current + ICON_PICKER_STEP));
+      }
+    }
+  }
+
+  function loadIconPicker() {
+    const open = iconPickerOpen;
+    if (!open) return;
+    open.state = mdiIconNames ? 'ready' : 'loading';
+    if (mdiIconNames) filterIconPicker();
+    renderIconPickerList();
+    if (mdiIconNames) return;
+    fetchMdiIconNames()
+      .then(() => {
+        if (iconPickerOpen !== open) return;
+        open.state = 'ready';
+        filterIconPicker();
+        renderIconPickerList();
+      })
+      .catch(() => {
+        if (iconPickerOpen !== open) return;
+        open.state = 'failed';
+        renderIconPickerList();
+      });
+  }
+
+  function placeIconPicker() {
+    const open = iconPickerOpen;
+    // The tile head's row, or a rule's section across the panel at the
+    // height of its button.
+    const row = !open ? null : open.rule ? open.button?.closest('.icon-color-section')
+      : document.getElementById(open.tab + '_tile_title')?.closest('.tile-head-row');
+    if (!row || !iconPickerPopover) return;
+    const pop = iconPickerPopover;
+    if (window.innerWidth <= 560) {
+      pop.classList.add('sheet');
+      pop.style.left = pop.style.top = pop.style.width = pop.style.maxHeight = '';
+      return;
+    }
+    pop.classList.remove('sheet');
+    const across = row.getBoundingClientRect();
+    const own = open.rule ? open.button.getBoundingClientRect() : across;
+    const rect = { left: across.left, width: across.width, top: own.top, bottom: own.bottom };
+    const below = window.innerHeight - rect.bottom - 12;
+    const above = rect.top - 12;
+    const up = below < 300 && above > below;
+    const height = Math.min(460, Math.max(180, up ? above : below));
+    pop.style.left = rect.left + 'px';
+    pop.style.width = rect.width + 'px';
+    pop.style.maxHeight = height + 'px';
+    pop.style.top = (up ? Math.max(8, rect.top - 6 - Math.min(height, pop.offsetHeight || height)) : rect.bottom + 6) + 'px';
+  }
+
+  // `button`: a rule's icon button (data-icon-input); without one the tile
+  // head's picker.
+  function openIconPicker(tab, button = null) {
+    closeIconPicker(false);
+    if (typeof closeEntityPicker === 'function') closeEntityPicker(false);
+    if (!iconPickerPopover) {
+      iconPickerPopover = document.createElement('div');
+      iconPickerPopover.className = 'icon-picker-popover';
+      iconPickerPopover.innerHTML = '<div class="icon-picker-search"><i class="mdi mdi-magnify"></i>' +
+        '<input type="search" autocomplete="off" spellcheck="false"></div>' +
+        '<div class="icon-picker-list" role="listbox"></div><div class="icon-picker-name"> </div>';
+      document.body.appendChild(iconPickerPopover);
+    }
+    const search = iconPickerPopover.querySelector('input');
+    search.value = '';
+    search.placeholder = t('iconPickerSearch');
+    const rule = !!button;
+    if (!button) button = document.getElementById(tab + '_tile_icon_picker');
+    iconPickerOpen = { tab, input: rule ? button.dataset.iconInput : tab + '_tile_icon', button, rule,
+      query: '', matches: [], shown: 0, active: 0, state: 'loading' };
+    button?.classList.add('open');
+    button?.setAttribute('aria-expanded', 'true');
+    iconPickerPopover.classList.add('open');
+    iconPickerPopover.querySelector('.icon-picker-list').scrollTop = 0;
+    loadIconPicker();
+    placeIconPicker();
+    iconPickerPopover.querySelector('.icon-picker-cell.active')?.scrollIntoView({ block: 'nearest' });
+    search.focus();
+  }
+
+  function closeIconPicker(focusButton) {
+    const open = iconPickerOpen;
+    if (!open) return;
+    iconPickerOpen = null;
+    iconPickerPopover?.classList.remove('open');
+    const button = open.button;
+    button?.classList.remove('open');
+    button?.setAttribute('aria-expanded', 'false');
+    if (focusButton) button?.focus();
+  }
+
+  function moveIconPickerActive(step) {
+    const open = iconPickerOpen;
+    const grid = iconPickerPopover?.querySelector('.icon-picker-grid');
+    if (!open || !grid || !open.matches.length) return;
+    const next = Math.max(0, Math.min(open.matches.length - 1, open.active + step));
+    while (next >= open.shown) growIconPickerList();
+    grid.querySelector('.icon-picker-cell.active')?.classList.remove('active');
+    open.active = next;
+    const cell = grid.querySelector('[data-index="' + next + '"]');
+    cell?.classList.add('active');
+    cell?.scrollIntoView({ block: 'nearest' });
+    iconPickerShowName();
+  }
+
+  document.addEventListener('click', event => {
+    const target = event.target;
+    const auto = target?.closest?.('.tile-title-auto');
+    if (auto) {
+      // Off: the entity's name comes back like typed (preview, draft, save).
+      const tab = tileHeadTab(auto);
+      const title = document.getElementById(tab + '_tile_title');
+      const name = tileAutoTitle(tab);
+      if (title && name && !auto.classList.contains('on')) {
+        title.value = normalizeTileTitle(name);
+        title.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      return;
+    }
+    const button = target?.closest?.('.tile-icon-picker');
+    if (button) {
+      const tab = tileHeadTab(button);
+      if (iconPickerOpen?.button === button) closeIconPicker(true);
+      else openIconPicker(tab);
+      return;
+    }
+    const ruleButton = target?.closest?.('button[data-icon-input]');
+    if (ruleButton) {
+      const tab = ruleButton.closest('[data-tab]')?.dataset.tab || '';
+      if (iconPickerOpen?.button === ruleButton) closeIconPicker(true);
+      else if (tab) openIconPicker(tab, ruleButton);
+      return;
+    }
+    if (!iconPickerOpen) return;
+    if (!target?.closest?.('.icon-picker-popover')) {
+      closeIconPicker(false);
+      return;
+    }
+    const choice = target.closest('[data-icon]');
+    if (choice) iconPickerChoose(choice.dataset.icon);
+    else if (target.closest('.icon-picker-retry')) loadIconPicker();
+  });
+
+  document.addEventListener('mouseover', event => {
+    const cell = iconPickerOpen && event.target?.closest?.('.icon-picker-cell');
+    if (cell) iconPickerShowName(cell.dataset.icon);
+  });
+
+  document.addEventListener('input', event => {
+    const target = event.target;
+    if (target?.classList?.contains('tile-title-input')) {
+      syncTileTitleRows(target);
+      syncTileTitleAuto(tileHeadTab(target));
+    }
+    if (!iconPickerOpen || !target?.closest?.('.icon-picker-search')) return;
+    iconPickerOpen.query = target.value;
+    if (iconPickerOpen.state === 'ready') filterIconPicker();
+    renderIconPickerList();
+  });
+
+  document.addEventListener('keydown', event => {
+    const target = event.target;
+    // A third line is blocked; pasted lines join the second line
+    // (normalizeTileTitle in the live editor).
+    if (event.key === 'Enter' && target?.classList?.contains('tile-title-input') &&
+        String(target.value || '').includes('\n')) {
+      event.preventDefault();
+      return;
+    }
+    if (!iconPickerOpen || !target?.closest?.('.icon-picker-search')) return;
+    const grid = iconPickerPopover.querySelector('.icon-picker-grid');
+    const first = grid?.querySelector('.icon-picker-cell');
+    let columns = 1;
+    if (first) {
+      const top = first.offsetTop;
+      columns = Array.from(grid.children).findIndex(cell => cell.offsetTop !== top);
+      if (columns <= 0) columns = grid.children.length || 1;
+    }
+    const steps = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: columns, ArrowUp: -columns };
+    if (steps[event.key]) {
+      event.preventDefault();
+      moveIconPickerActive(steps[event.key]);
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      const name = iconPickerOpen.matches[iconPickerOpen.active];
+      if (name) iconPickerChoose(name);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      closeIconPicker(true);
+    } else if (event.key === 'Tab') {
+      closeIconPicker(false);
+    }
+  });
+
+  // The open list follows its row once per frame while the page scrolls or
+  // the window is resized; scrolling the list itself loads more icons.
+  const placeIconPickerSoon = perFrame(placeIconPicker);
+  window.addEventListener('resize', perFrame(placeIconPicker));
+  document.addEventListener('scroll', event => {
+    if (!iconPickerOpen) return;
+    const list = event.target?.closest?.('.icon-picker-list');
+    if (list) {
+      if (list.scrollTop + list.clientHeight > list.scrollHeight - 200) growIconPickerList();
+    } else if (!event.target?.closest?.('.icon-picker-popover')) {
+      placeIconPickerSoon();
+    }
+  }, true);
+
+  // Rows of choices (Icon color, Tile color) span the panel in equal parts;
+  // every label stays on one line, the font steps down from 12 px to 10 px
+  // at most until nothing overflows.
+  const choiceRowObserver = typeof ResizeObserver === 'function'
+    ? new ResizeObserver(entries => entries.forEach(entry => fitChoiceRow(entry.target))) : null;
+
+  function fitChoiceRow(row) {
+    if (!row || !row.offsetWidth) return;
+    const buttons = Array.from(row.querySelectorAll('button'));
+    buttons.forEach(button => { button.style.fontSize = ''; });
+    row.style.gridAutoColumns = '';
+    const shown = buttons.filter(button => button.offsetWidth);
+    const overflows = () => shown.some(button => button.scrollWidth > button.clientWidth + 0.5);
+    for (let size = 11.5; size >= 10 && overflows(); size -= 0.5) {
+      shown.forEach(button => { button.style.fontSize = size + 'px'; });
+    }
+    // Still too narrow (a long label beside the row in a narrow panel): the
+    // short choices give their spare room to the long one.
+    if (overflows()) row.style.gridAutoColumns = 'auto';
+  }
+
+  function fitChoiceRows(tab) {
+    for (const suffix of ['_tile_icon_color_modes', '_tile_color_modes']) {
+      fitChoiceRow(document.getElementById(tab + suffix));
+    }
+  }
+
+  function observeChoiceRows(root) {
+    if (!choiceRowObserver) return;
+    (root || document).querySelectorAll?.('.choice-row').forEach(row => choiceRowObserver.observe(row));
+  }
+
+  // The Type list opens down from the head; keep it inside the panel.
+  function fitTileTypePicker(event) {
+    const select = event.target;
+    if (!select?.matches?.('.tile-head-top select')) return;
+    const panel = select.closest('.tile-settings')?.getBoundingClientRect();
+    if (!panel) return;
+    const room = Math.round(panel.bottom - select.getBoundingClientRect().bottom - 12);
+    select.style.setProperty('--picker-room', Math.max(160, room) + 'px');
+  }
+  document.addEventListener('pointerdown', fitTileTypePicker, true);
+  document.addEventListener('focusin', fitTileTypePicker);
+
+  // A newly chosen entity brings its icon to the button and its name (Auto).
+  document.addEventListener('change', event => {
+    const slot = event.target?.closest?.('.tile-entity-slot');
+    if (!slot) return;
+    const tab = slot.id.replace(/_tile_entity_slot$/, '');
+    renderTileIconButton(tab);
+    syncTileTitleAuto(tab);
+  });
+
+  document.addEventListener('DOMContentLoaded', () => {
+    setupTileHeads(document);
+    observeChoiceRows(document);
+    if (typeof MutationObserver !== 'function') return;
+    new MutationObserver(records => {
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          if (node.nodeType !== 1) continue;
+          if (node.matches?.('input[data-tile-icon], textarea.tile-title-input')) attachTileHead(node);
+          else if (node.querySelector?.('input[data-tile-icon], textarea.tile-title-input')) setupTileHeads(node);
+          if (node.matches?.('.choice-row')) observeChoiceRows(node.parentNode);
+          else observeChoiceRows(node);
+        }
+      }
+    }).observe(document.body, { childList: true, subtree: true });
+  });
+
+  // The icon block of the common fields only holds Weather's colored icons
+  // option: every circle shows, in its icon's color (user 2026-10-11: no
+  // circle options per tile). Stored per-tile disc values of older tiles are
+  // kept by the server but no longer drawn.
   function syncIconDiscFields(tab) {
-    const typeValue = document.getElementById(tab + '_tile_type')?.value || '0';
-    const discToggle = tileTypeHasDiscToggle(typeValue);
-    const colored = tileTypeHasColoredIcon(typeValue);
-    document.getElementById(tab + '_tile_icon_disc_fields')
-      ?.classList.toggle('hidden', !tileTypeHasIcon(typeValue) || (!discToggle && !colored));
-    document.getElementById(tab + '_tile_icon_disc_row')?.classList.toggle('hidden', !discToggle);
-    document.getElementById(tab + '_tile_icon_glow_row')?.classList.toggle('hidden', !colored);
+    const weather = (document.getElementById(tab + '_tile_type')?.value || '0') === '12';
+    document.getElementById(tab + '_tile_icon_disc_fields')?.classList.toggle('hidden', !weather);
+    document.getElementById(tab + '_weather_colored_icons_row')?.classList.toggle('hidden', !weather);
   }
 
   function collectTypeFieldValues(tab) {
     const prefix = tab;
     const typeValue = document.getElementById(prefix + '_tile_type')?.value || '0';
     const meta = getTileTypeMeta(typeValue);
-    const out = collectIconDiscFields(prefix, typeValue);
+    const out = {};
     if (!meta.save) return out;
     const fd = new FormData();
     callTypeHandler(meta, 'save', prefix, fd);
@@ -2526,15 +4401,19 @@ function syncTileRadiusControls(tabEl) {
   }
 
   function normalizeSnapshotLayout(snapshot, index, tab = currentTileTab) {
-    const fallbackCol = (index >= 0) ? ((index % GRID_COLS) + 1) : 1;
+    // The shown grid, like normalizeTileLayout (an upright layout's lower
+    // rows must survive the draft and the save).
+    const cols = placeCols(tab);
+    const rows = placeRows(tab);
+    const fallbackCol = (index >= 0) ? ((index % cols) + 1) : 1;
     const firstRow = firstAllowedGridRow(tab);
     const fallbackRow = (index >= 0)
-      ? (Math.max(firstRow, Math.floor(index / GRID_COLS)) + 1)
+      ? (Math.max(firstRow, Math.floor(index / cols)) + 1)
       : (firstRow + 1);
-    let col = clampHalf(snapshot?.col, 1, GRID_COLS, fallbackCol);
-    let row = clampHalf(snapshot?.row, firstRow + 1, GRID_ROWS + 0.5, fallbackRow);
-    let spanW = clampHalf(snapshot?.span_w, 0.5, GRID_COLS, 1);
-    let spanH = clampHalf(snapshot?.span_h, 0.5, GRID_ROWS, 1);
+    let col = clampHalf(snapshot?.col, 1, cols, fallbackCol);
+    let row = clampHalf(snapshot?.row, firstRow + 1, rows + 0.5, fallbackRow);
+    let spanW = clampHalf(snapshot?.span_w, 0.5, cols, 1);
+    let spanH = clampHalf(snapshot?.span_h, 0.5, rows, 1);
     return constrainLayoutToTab(
       normalizeLayoutForTileType(snapshot?.type, col - 1, row - 1,
                                  spanW, spanH),
@@ -2555,9 +4434,6 @@ function syncTileRadiusControls(tabEl) {
       span_w: document.getElementById(prefix + '_tile_span_w')?.value || '1',
       span_h: document.getElementById(prefix + '_tile_span_h')?.value || '1'
     };
-    if (isScreensaverTileTab(tab)) {
-      snapshot.background_opacity = document.getElementById('screensaver_tile_opacity')?.value || '0';
-    }
     Object.assign(snapshot, collectTypeFieldValues(tab));
     return snapshot;
   }
@@ -2574,9 +4450,11 @@ function syncTileRadiusControls(tabEl) {
     if (!Array.isArray(tiles) || index < 0) return;
 
     const prev = tiles[index] || {};
-    const tile = Object.assign({}, prev);
+    // A deleted (empty) tile starts from nothing: merged over the previous
+    // data, its entity and options returned with the next tile in the slot.
+    const tile = Number(snapshot?.type) === 0 ? {} : Object.assign({}, prev);
     const layout = normalizeSnapshotLayout(snapshot, index, tab);
-    const numericFields = ['type', 'sensor_decimals', 'sensor_value_font', 'sensor_display_mode', 'sensor_gauge_min', 'sensor_gauge_max', 'switch_style', 'navigate_target', 'popup_open_mode', 'key_code', 'key_modifier', 'background_opacity', 'icon_disc', 'icon_glow'];
+    const numericFields = ['type', 'sensor_decimals', 'sensor_value_font', 'sensor_display_mode', 'sensor_gauge_min', 'sensor_gauge_max', 'switch_style', 'bar_orientation', 'navigate_target', 'popup_open_mode', 'key_code', 'key_modifier', 'background_opacity', 'icon_disc', 'icon_glow'];
 
     tile.type = clampInt(snapshot?.type, 0, 255, Number(prev.type) || 0);
     tile.title = snapshot?.title || '';
@@ -2623,6 +4501,39 @@ function syncTileRadiusControls(tabEl) {
     if (snapshot && Object.prototype.hasOwnProperty.call(snapshot, 'camera_entity')) {
       tile.sensor_entity = snapshot.camera_entity || '';
     }
+    // The Media popup's layout in its stored field (types/media/admin.js).
+    if (Number(tile.type) === 15 && snapshot && Object.prototype.hasOwnProperty.call(snapshot, 'media_layout')) {
+      tile.sensor_display_mode = String(snapshot.media_layout) === '1' ? 1 : 0;
+    }
+    // The Camera tile's picture options in their stored fields (types/camera/admin.js).
+    if (Number(tile.type) === 18 && snapshot && Object.prototype.hasOwnProperty.call(snapshot, 'camera_display')) {
+      tile.sensor_display_mode = String(snapshot.camera_display) === '1' ? 1 : 0;
+      tile.sensor_decimals = Math.max(0, CAMERA_FITS.indexOf(String(snapshot.camera_fit)));
+      tile.image_slideshow_sec = cameraEvery(snapshot.camera_every);
+      tile.key_code = cameraTransparency(snapshot.camera_transparency);
+      tile.key_modifier = cameraOptionFlags({head: snapshot.camera_head, tap: snapshot.camera_tap});
+    }
+    for (const kind of ['lock', 'alarm', 'fan', 'vacuum']) {
+      if (snapshot && Object.prototype.hasOwnProperty.call(snapshot, kind + '_entity')) tile.sensor_entity = snapshot[kind + '_entity'] || '';
+    }
+    // The Vacuum popup's layout (types/device/web.cpp vacuum_layout).
+    if (Number(tile.type) === 29 && snapshot && Object.prototype.hasOwnProperty.call(snapshot, 'vacuum_layout')) {
+      tile.sensor_display_mode = String(snapshot.vacuum_layout) === '1' ? 1 : 0;
+    }
+    if (Number(tile.type) === 29 && snapshot && Object.prototype.hasOwnProperty.call(snapshot, 'vacuum_map')) {
+      tile.vacuum_map = snapshot.vacuum_map || '';
+    }
+    if (Number(tile.type) === 29 && snapshot && Object.prototype.hasOwnProperty.call(snapshot, 'vacuum_every')) {
+      tile.image_slideshow_sec = Math.max(3, Math.min(60, Number(snapshot.vacuum_every) || 5));
+    }
+    // Calendar: the view and the first day of the week (types/calendar/web.h).
+    if (Number(tile.type) === 27 && snapshot) {
+      if (Object.prototype.hasOwnProperty.call(snapshot, 'calendar_view')) tile.sensor_display_mode = Number(snapshot.calendar_view) || 0;
+      if (Object.prototype.hasOwnProperty.call(snapshot, 'calendar_week_start')) {
+        const value = Number(snapshot.calendar_week_start);
+        tile.sensor_decimals = [0, 1, 6].includes(value) ? value : 255;
+      }
+    }
     if (snapshot && (Object.prototype.hasOwnProperty.call(snapshot, 'clock_show_time') || Object.prototype.hasOwnProperty.call(snapshot, 'clock_show_date'))) {
       let flags = 0;
       if (String(snapshot.clock_show_time || '0') === '1') flags |= 1;
@@ -2647,8 +4558,20 @@ function syncTileRadiusControls(tabEl) {
       tile.sensor_gauge_max = Number.isFinite(num) ? num : 100;
     }
 
+    // The Text tile's alignment in its stored field (types/text/text_options.h).
+    if (Number(tile.type) === 10 && snapshot && Object.prototype.hasOwnProperty.call(snapshot, 'text_options')) {
+      const num = Number(snapshot.text_options);
+      tile.sensor_gauge_max = Number.isFinite(num) ? num : 100;
+    }
     if ([8,9,10].includes(Number(tile.type)) && snapshot?.tile_border !== undefined) {
       tile.sensor_display_mode = ['0','false'].includes(String(snapshot.tile_border)) ? 1 : 0;
+    }
+    // The Power flow options in their stored field (types/power_flow/admin.js).
+    if (Number(tile.type) === 28 && snapshot && Object.prototype.hasOwnProperty.call(snapshot, 'flow_header')) {
+      tile.key_code = powerFlowOptionBits(snapshot);
+    }
+    if (Number(tile.type) === 12 && snapshot?.weather_colored_icons !== undefined) {
+      tile.sensor_display_mode = ['0','false'].includes(String(snapshot.weather_colored_icons)) ? 1 : 0;
     }
     tiles[index] = tile;
     tilesData[tab] = tiles;
@@ -2702,17 +4625,20 @@ function syncTileRadiusControls(tabEl) {
   // (tileTypeHasFixedIconColorOnly / tileTypeRulesUseOwnEntity in
   // tile_type_policy.h).
   const ICON_COLOR_FIXED_TYPES = ['2', '4', '8', '9', '10', '18'];
-  const ICON_COLOR_OWN_TYPES = ['1', '5', '12', '14', '15', '17', '19', '20', '21', '22', '23'];
+  const ICON_COLOR_OWN_TYPES = ['1', '5', '12', '14', '15', '17', '19', '20', '21', '22', '23', '24', '25', '26', '29'];
   // The own entity field of each type (pairs, not an object with numeric keys).
   const ICON_COLOR_ENTITY_FIELDS = [['1', '_sensor_entity'], ['5', '_switch_entity'], ['12', '_weather_entity'],
     ['14', '_energy_entity'], ['15', '_media_entity'], ['17', '_climate_entity'], ['19', '_cover_entity'],
-    ['20', '_binary_sensor_entity'], ['21', '_number_entity'], ['22', '_select_entity'], ['23', '_datetime_entity']];
+    ['20', '_binary_sensor_entity'], ['21', '_number_entity'], ['22', '_select_entity'], ['23', '_datetime_entity'],
+    ['24', '_lock_entity'], ['25', '_alarm_entity'], ['26', '_fan_entity'], ['29', '_vacuum_entity']];
   // Domains shown by the Switch tile (tile_icon_source.cpp switch_domain).
   const ICON_COLOR_SWITCH_DOMAINS = ['light', 'switch', 'input_boolean', 'automation', 'fan',
     'humidifier', 'remote', 'siren'];
   const ICON_COLOR_TYPES = ICON_COLOR_OWN_TYPES.concat(ICON_COLOR_FIXED_TYPES);
   const ICON_COLOR_BAR_TYPES = ['1', '14', '21'];
   const ICON_COLOR_ROW_TYPES = ['1', '20', '22', '23'];
+  // Media: icon color and tile color "From cover" (the "cover" line).
+  const ICON_COLOR_MEDIA_TYPE = '15';
   const ICON_COLOR_MAX_STOPS = 6;
   const ICON_COLOR_MAX_ROWS = 6;
   const ICON_COLOR_MAX_VALUE_BYTES = 32;
@@ -2748,6 +4674,27 @@ function syncTileRadiusControls(tabEl) {
   function iconColorParseHex(text) {
     const match = /^#?([0-9a-fA-F]{6})$/.exec(String(text));
     return match ? parseInt(match[1], 16) : null;
+  }
+
+  // valid_icon(): a rule's own icon (user 2026-10-28) is an MDI name of
+  // lowercase letters, digits and dashes, at most 48 characters.
+  function iconColorValidIcon(name) {
+    return /^[a-z0-9-]{1,48}$/.test(String(name ?? ''));
+  }
+
+  // parse_color_icon(): "RRGGBB" or "RRGGBB,<icon>".
+  function iconColorParseHexIcon(text) {
+    const value = String(text);
+    const comma = value.indexOf(',');
+    const icon = comma < 0 ? '' : value.slice(comma + 1);
+    if (comma >= 0 && !iconColorValidIcon(icon)) return null;
+    const color = iconColorParseHex(comma < 0 ? value : value.slice(0, comma));
+    return color === null ? null : { color, icon };
+  }
+
+  // append_icon(): ",<icon>" after a color, nothing without one.
+  function iconColorIconSuffix(icon) {
+    return iconColorValidIcon(icon) ? ',' + icon : '';
   }
 
   function iconColorHex(rgb) {
@@ -2803,31 +4750,45 @@ function syncTileRadiusControls(tabEl) {
     return needle.length > 0 && haystack.includes(needle);
   }
 
-  // parse_rule(): "<op> RRGGBB <value>".
+  // parse_rule(): "<op>[+|-] RRGGBB[,<icon>] <value>"; `fill` is the state
+  // line's own "Fuellen" (1 "is+", 0 "is-", -1 a plain "is" following the
+  // "fill" line), `icon` its own icon ('' without one).
   function iconColorParseRule(line) {
     const text = iconColorTrim(line);
     const space = text.indexOf(' ');
-    const op = space < 0 ? '' : text.slice(0, space);
+    let op = space < 0 ? '' : text.slice(0, space);
+    let fill = -1;
+    if (/^(is|has)[+-]$/.test(op)) {
+      fill = op.endsWith('+') ? 1 : 0;
+      op = op.slice(0, -1);
+    }
     if (!['ge', 'le', 'eq', 'is', 'has'].includes(op)) return null;
     const rest = text.slice(space + 1);
     const colorEnd = rest.indexOf(' ');
-    const color = iconColorParseHex(colorEnd < 0 ? rest : rest.slice(0, colorEnd));
-    if (color === null) return null;
+    const parsed = iconColorParseHexIcon(colorEnd < 0 ? rest : rest.slice(0, colorEnd));
+    if (!parsed) return null;
     const value = colorEnd < 0 ? '' : iconColorTrim(rest.slice(colorEnd));
-    return value ? { op, color, value } : null;
+    return value ? { op, color: parsed.color, icon: parsed.icon, value, fill } : null;
+  }
+
+  // tile_icon_colors::rows_fill(): a state line with its own "Fuellen".
+  function iconColorRowsFill(record) {
+    const text = String(record ?? '');
+    if (!iconColorIsV2(text)) return false;
+    return text.split('\n').slice(2).some(line => iconColorParseRule(line)?.fill === 1);
   }
 
   function iconColorSortStops(stops) {
     return stops.sort((a, b) => a.position - b.position);
   }
 
-  // parse_stop(): "P:RRGGBB", P with 1-4 digits, clamped to 0..1000.
+  // parse_stop(): "P:RRGGBB[,<icon>]", P with 1-4 digits, clamped to 0..1000.
   function iconColorParseStop(token) {
     const colon = token.indexOf(':');
     if (colon < 1 || colon > 4 || !/^[0-9]+$/.test(token.slice(0, colon))) return null;
-    const color = iconColorParseHex(token.slice(colon + 1));
-    if (color === null) return null;
-    return { position: Math.min(Number(token.slice(0, colon)), 1000), color };
+    const parsed = iconColorParseHexIcon(token.slice(colon + 1));
+    if (!parsed) return null;
+    return { position: Math.min(Number(token.slice(0, colon)), 1000), color: parsed.color, icon: parsed.icon };
   }
 
   // parse_bar(): "bar <smooth|steps> <min> <max> <P>:<RRGGBB> ...".
@@ -2872,6 +4833,12 @@ function syncTileRadiusControls(tabEl) {
       else return null;
     }
     return layer;
+  }
+
+  // tile_icon_colors::rule_colors_icon(): a rule colors the icon, a former
+  // "Tint tile" rule too (user 2026-10-11: rules only color the icon).
+  function iconColorRuleColorsIcon(layer) {
+    return !!layer && (!!layer.icon || Number(layer.tile || 0) > 0);
   }
 
   // own_state_colors_icon(): no rule layer (b40 records) or an enabled
@@ -2919,9 +4886,27 @@ function syncTileRadiusControls(tabEl) {
     return iconColorBarColorAt(bar, (value - bar.min) / (bar.max - bar.min));
   }
 
+  // bar_icon(): the icon of the last stop at or below the value (the first
+  // stop below it), on smooth bars too: an icon cannot blend.
+  function iconColorBarIcon(bar, value) {
+    let t = (value - bar.min) / (bar.max - bar.min);
+    if (!(t > 0)) t = 0;
+    if (t > 1) t = 1;
+    let index = 0;
+    bar.stops.forEach((stop, i) => { if (stop.position / 1000 <= t) index = i; });
+    return bar.stops[index]?.icon || '';
+  }
+
   // resolve(): the icon color for a known state as "#RRGGBB", or '' for the
   // type default. Only v2 records are evaluated.
-  function resolveIconColorRecord(record, state, display, fixedFallback = true) {
+  // `out`, when given, receives the matching state line's own fill (`fill`:
+  // 1, 0 or -1 like iconColorParseRule) and the matching stop's or line's
+  // own icon (`icon`, '' without one).
+  function resolveIconColorRecord(record, state, display, fixedFallback = true, out = null) {
+    if (out) {
+      out.fill = -1;
+      out.icon = '';
+    }
     const text = String(record ?? '');
     if (!iconColorIsV2(text) || state === undefined || state === null) return '';
     const lines = text.split('\n');
@@ -2932,13 +4917,20 @@ function syncTileRadiusControls(tabEl) {
         if (barSeen) continue;
         barSeen = true;
         const bar = number !== null ? iconColorParseBar(line) : null;
-        if (bar) return '#' + iconColorHex(iconColorBarColor(bar, number));
+        if (bar) {
+          if (out) out.icon = iconColorBarIcon(bar, number);
+          return '#' + iconColorHex(iconColorBarColor(bar, number));
+        }
         continue;
       }
       const rule = iconColorParseRule(line);
       if (!rule || (rule.op !== 'is' && rule.op !== 'has')) continue;
       if (iconColorTextMatches(rule.op, rule.value, state) ||
           (display !== undefined && display !== null && iconColorTextMatches(rule.op, rule.value, display))) {
+        if (out) {
+          out.fill = rule.fill;
+          out.icon = rule.icon;
+        }
         return '#' + iconColorHex(rule.color);
       }
     }
@@ -3004,13 +4996,28 @@ function syncTileRadiusControls(tabEl) {
     return { mode: 'steps', min, max: highest, minText: String(min), maxText: String(highest), stops };
   }
 
+  // has_rule_lines(): a v2 record with a color bar or a state line.
+  function iconColorHasRuleLines(text) {
+    if (!iconColorIsV2(text)) return false;
+    return text.split('\n').slice(2).some(line => line.startsWith('bar ') ||
+      ['is', 'has'].includes(iconColorParseRule(line)?.op));
+  }
+
   // normalize(): any record (editor, import, b39) in the canonical v2 form;
   // numeric types keep only the bar, text types only the state lines.
-  function normalizeIconColorRecord(record, allowBar, allowRows, allowSource = false, allowSelf = false) {
+  function normalizeIconColorRecord(record, allowBar, allowRows, allowSource = false, allowSelf = false,
+    allowCover = false) {
     const text = String(record ?? '');
     const v2 = iconColorIsV2(text);
+    // Only the Sensor family and the Binary sensor evaluate rules on their
+    // own state themselves; every other type with an entity of its own keeps
+    // its "src rules self" line (records before b575 lost it, issue #102).
+    const ownRules = allowBar || allowRows;
     let source = allowSource ? iconColorRecordSource(text) : null;
     if (source?.self && !allowSelf) source = null;
+    if (!source && v2 && allowSource && allowSelf && !ownRules && iconColorHasRuleLines(text)) {
+      source = { mode: 'rules', self: true, entity: '', tile: 0, icon: true, enabled: true };
+    }
     if (source?.mode === 'rules') {
       if (!source.self || (!allowBar && !allowRows)) {
         allowBar = true;
@@ -3020,9 +5027,10 @@ function syncTileRadiusControls(tabEl) {
       allowBar = false;
       allowRows = false;
     }
-    // "src rules self" coloring the icon only is implicit (b40 records).
+    // "src rules self" coloring the icon only is implicit for the types that
+    // evaluate their own state (b40 records).
     const emitLayer = !!source &&
-      !(source.mode === 'rules' && source.self && source.icon && !source.tile && source.enabled);
+      !(ownRules && source.mode === 'rules' && source.self && source.icon && !source.tile && source.enabled);
     const lines = text.split('\n');
     const fixedIndex = v2 ? 1 : 0;
     const fixed = iconColorParseHex(iconColorTrim(lines[fixedIndex] ?? ''));
@@ -3037,20 +5045,23 @@ function syncTileRadiusControls(tabEl) {
     let out = 'v2\n' + (fixed === null ? '' : iconColorHex(fixed));
     const fill = v2 ? iconColorFillOf(body) : 0;
     if (fill) out += '\nfill ' + fill;
+    const cover = allowCover && v2 ? iconColorCoverOf(body) : { icon: false, tile: 0 };
+    const hasCover = cover.icon || cover.tile > 0;
+    if (hasCover) out += '\ncover' + (cover.icon ? ' icon' : '') + (cover.tile ? ' tile=' + cover.tile : '');
     if (emitLayer) {
       out += '\nsrc ' + source.mode + ' ' + (source.self ? 'self' : source.entity) +
         (source.tile ? ' tile=' + source.tile : '') + (source.icon ? '' : ' noicon') + (source.enabled ? '' : ' off');
     }
     if (bar) {
       out += '\nbar ' + bar.mode + ' ' + bar.minText + ' ' + bar.maxText +
-        bar.stops.map(stop => ' ' + stop.position + ':' + iconColorHex(stop.color)).join('');
+        bar.stops.map(stop => ' ' + stop.position + ':' + iconColorHex(stop.color) + iconColorIconSuffix(stop.icon)).join('');
     }
     let rows = 0;
     if (allowRows) {
       let legacyRules = 0;
       for (const line of body) {
         if (rows >= ICON_COLOR_MAX_ROWS) break;
-        if (v2 && (line.startsWith('bar ') || line.startsWith('src '))) continue;
+        if (v2 && (line.startsWith('bar ') || line.startsWith('src ') || line.startsWith('cover'))) continue;
         const rule = iconColorParseRule(line);
         if (!rule) continue;
         const textRule = rule.op === 'is' || rule.op === 'has';
@@ -3066,11 +5077,12 @@ function syncTileRadiusControls(tabEl) {
         }
         const value = iconColorClipValue(rule.value);
         if (!value) continue;
-        out += '\n' + rule.op + ' ' + iconColorHex(rule.color) + ' ' + value;
+        const mark = rule.fill === 1 ? '+' : rule.fill === 0 ? '-' : '';
+        out += '\n' + rule.op + mark + ' ' + iconColorHex(rule.color) + iconColorIconSuffix(rule.icon) + ' ' + value;
         rows++;
       }
     }
-    return fixed === null && !fill && !emitLayer && !bar && rows === 0 ? '' : out;
+    return fixed === null && !fill && !hasCover && !emitLayer && !bar && rows === 0 ? '' : out;
   }
 
   // tile_icon_colors::fill_of(): the "fill NN" tint of the fixed color in
@@ -3083,19 +5095,40 @@ function syncTileRadiusControls(tabEl) {
     return Math.min(50, Math.max(10, Number(text)));
   }
 
+  // tile_icon_colors::cover_of(): "From cover" of a Media tile, the first
+  // "cover [icon] [tile=NN]" line; an unknown token makes it invalid.
+  function iconColorCoverOf(lines) {
+    const none = { icon: false, tile: 0 };
+    const line = lines.find(candidate => candidate.startsWith('cover'));
+    if (line === undefined) return none;
+    const tokens = line.split(/[ \t\r]+/).filter(Boolean);
+    if (tokens[0] !== 'cover') return none;
+    const out = { icon: false, tile: 0 };
+    for (const token of tokens.slice(1)) {
+      if (token === 'icon') out.icon = true;
+      else if (/^tile=[0-9]{1,2}$/.test(token)) out.tile = Math.min(50, Math.max(10, Number(token.slice(5))));
+      else return none;
+    }
+    return out;
+  }
+
   // Editor view of a record: fixed color, bar and state rows.
   function parseIconColorRecord(record) {
-    const lines = normalizeIconColorRecord(record, true, true, true, true).split('\n');
+    const lines = normalizeIconColorRecord(record, true, true, true, true, true).split('\n');
     const fixed = iconColorParseHex(lines[1] ?? '');
     let bar = null;
     const rows = [];
     for (const line of lines.slice(2)) {
       if (line.startsWith('bar ')) { bar = iconColorParseBar(line); continue; }
       const rule = iconColorParseRule(line);
-      if (rule) rows.push({ has: rule.op === 'has', color: '#' + iconColorHex(rule.color), value: rule.value });
+      if (rule) {
+        rows.push({ has: rule.op === 'has', color: '#' + iconColorHex(rule.color), value: rule.value, fill: rule.fill,
+          icon: rule.icon });
+      }
     }
     return { color: fixed === null ? '' : '#' + iconColorHex(fixed), bar, rows,
-      fill: iconColorFillOf(lines.slice(2)), source: iconColorRecordSource(lines.join('\n')) };
+      fill: iconColorFillOf(lines.slice(2)), cover: iconColorCoverOf(lines.slice(2)),
+      source: iconColorRecordSource(lines.join('\n')) };
   }
 
   // ---- Source entity (icon-and-title tiles), mirrors tile_icon_source.cpp ----
@@ -3125,7 +5158,9 @@ function syncTileRadiusControls(tabEl) {
     if (ICON_COLOR_SWITCH_DOMAINS.includes(domain) && typeof parseSwitchPayload === 'function') {
       const state = parseSwitchPayload(text);
       if (!state || state.available === false || !state.hasState) return '';
-      return state.isOn ? (state.hasColor ? state.color : '#FFD54F') : '#B0B0B0';
+      const onColor = state.hasColor ? state.color : '#FFD54F';
+      return state.isOn ? (typeof toneLightShown === 'function' ? toneLightShown(onColor) : onColor)
+        : panelRoleHex('icon-off', '#B0B0B0');
     }
     if (domain === 'binary_sensor' && typeof parseBinarySensorPreviewPayload === 'function') {
       const state = parseBinarySensorPreviewPayload(text);
@@ -3143,47 +5178,21 @@ function syncTileRadiusControls(tabEl) {
     return '';
   }
 
-  // The `active` flag of tile_icon_source.cpp's auto_color(): false while the
-  // entity is off, closed or not running (climate_visuals::state_active()).
-  function iconColorSourceAutoActive(entity, payload) {
-    const domain = String(entity).split('.')[0];
-    const text = String(payload ?? '').trim();
-    if (!text) return false;
-    if (ICON_COLOR_SWITCH_DOMAINS.includes(domain) && typeof parseSwitchPayload === 'function') {
-      const state = parseSwitchPayload(text);
-      return !!state && state.available !== false && !!state.hasState && !!state.isOn;
-    }
-    if (domain === 'binary_sensor' && typeof parseBinarySensorPreviewPayload === 'function') {
-      const state = parseBinarySensorPreviewPayload(text);
-      return !!state?.valid && state.available === true && state.state === 'on';
-    }
-    if (domain === 'climate' && typeof parseClimatePreviewPayload === 'function') {
-      const state = parseClimatePreviewPayload(text);
-      if (!state || state.available === false) return false;
-      const action = String(state.action || '');
-      const mode = String(state.mode || '');
-      if (['heating', 'preheating', 'cooling', 'drying', 'fan', 'defrosting'].includes(action)) return true;
-      return !!mode && mode !== 'off' && mode !== 'unknown' && action !== 'off';
-    }
-    if (domain === 'cover' && typeof parseCoverPreviewPayload === 'function') {
-      const state = parseCoverPreviewPayload(text);
-      const value = String(state?.state || 'unknown').toLowerCase();
-      return !!state && state.available !== false && !['closed', 'unknown', 'unavailable'].includes(value);
-    }
-    return false;
-  }
-
   // tile_icon_source::rule_color(): the rule color of a layer from the preview
   // states of its entity (own or other); '' without a known state or result.
   // Rules never fall back to the fixed color here.
-  function iconColorLayerColor(record, layer, ownEntity, meta, typeValue) {
+  function iconColorLayerColor(record, layer, ownEntity, meta, typeValue, out = null) {
+    if (out) {
+      out.fill = -1;
+      out.icon = '';
+    }
     if (!layer || !layer.enabled) return '';
     const entity = layer.self ? String(ownEntity || '') : layer.entity;
     if (!entity) return '';
     if (layer.self && ['21', '22', '23'].includes(String(typeValue))) {
       if (layer.mode === 'auto' || typeof iconColorRuleState !== 'function') return '';
       const rule = iconColorRuleState(typeValue, entity, meta, null);
-      return rule ? resolveIconColorRecord(record, rule.state, rule.display, false) : '';
+      return rule ? resolveIconColorRecord(record, rule.state, rule.display, false, out) : '';
     }
     const payload = meta?.values?.[entity];
     if (payload === undefined || payload === null || !String(payload).trim()) return '';
@@ -3196,34 +5205,15 @@ function syncTileRadiusControls(tabEl) {
       const parsed = parseBinarySensorPreviewPayload(String(payload));
       if (parsed?.valid && ['on', 'off'].includes(parsed.state)) display = binarySensorPreviewStateText(parsed);
     }
-    return resolveIconColorRecord(record, state, display, false);
+    return resolveIconColorRecord(record, state, display, false, out);
   }
 
   // The icon color of a tile with rules on another entity, else the fixed
   // color ('' = white).
   function iconColorSourcePreview(record, meta) {
     const layer = iconColorRecordSource(record);
-    const color = layer && !layer.self && layer.icon ? iconColorLayerColor(record, layer, '', meta, '') : '';
+    const color = layer && !layer.self && iconColorRuleColorsIcon(layer) ? iconColorLayerColor(record, layer, '', meta, '') : '';
     return color || resolveIconColorRecord(record, '', null);
-  }
-
-  // The rules' tile tint for the preview: { color, percent } or null. Entity
-  // color tints only while the entity is active, like refresh_card(). With
-  // Tile color "From icon" the tile follows the icon instead (no rule tint).
-  function iconColorTilePreviewTint(typeValue, record, ownEntity, meta) {
-    const layer = iconColorRecordSource(record);
-    if (parseIconColorRecord(record).fill) return null;
-    const ruleTint = (() => {
-      if (!layer || !layer.enabled || !layer.tile) return null;
-      const color = iconColorLayerColor(record, layer, ownEntity, meta, typeValue);
-      if (!color) return null;
-      if (layer.mode === 'auto') {
-        const entity = layer.self ? String(ownEntity || '') : layer.entity;
-        if (!iconColorSourceAutoActive(entity, meta?.values?.[entity])) return null;
-      }
-      return tileTintChoice(true, color, layer.tile, 0, '');
-    })();
-    return ruleTint;
   }
 
   // tile_tint::has_hue(): white, grey and black never tint a tile.
@@ -3257,9 +5247,55 @@ function syncTileRadiusControls(tabEl) {
     const contrast = rgb => 1.05 / (0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2]) + 0.05);
     const from = parse(base);
     const to = parse(color);
-    let out = from.map((v, i) => Math.floor((v * (100 - percent) + to[i] * percent + 50) / 100));
+    const mix = (under, p) => under.map((v, i) => Math.floor((v * (100 - p) + to[i] * p + 50) / 100));
+    const hex = rgb => '#' + rgb.map(v => v.toString(16).toUpperCase().padStart(2, '0')).join('');
+    if (typeof panelLight === 'function' && panelLight()) {
+      // The light theme: the tint on the light card at --pv-light-tint of its
+      // strength, never darkened (its text is dark); a default grey base is
+      // the light card.
+      const greyDefault = ['#1A1A1A', '#2A2A2A', '#222222'].includes(hex(from));
+      const scale = Number(panelVar('--pv-light-tint', '0.8'));
+      const p = Math.floor(percent * (Number.isFinite(scale) ? scale : 0.8) + 1e-6);
+      return hex(mix(greyDefault ? (panelRole('card') || [255, 255, 255]) : from, p));
+    }
+    let out = mix(from, percent);
     for (let i = 0; i < 40 && contrast(out) < 4.5; i++) out = out.map(v => Math.floor((v * 95 + 50) / 100));
-    return '#' + out.map(v => v.toString(16).toUpperCase().padStart(2, '0')).join('');
+    return hex(out);
+  }
+  // Tints a preview card from the global tile color. A screensaver card keeps
+  // its own opacity (data-bg-opacity): the panel sets bg_opa after the tint
+  // (image_screensaver build_slot_tile); the opaque tint hid the wallpaper
+  // in the preview (user 2026-10-02).
+  // `idle`: the idle grey of a tile without a color (kNeutralIdle).
+  function setTileTintBackground(el, color, percent, idle = false) {
+    const given = [1, 3, 5].map(i => parseInt(String(color).slice(i, i + 2), 16));
+    // A tile filled while tinted (light theme) enters that surface first
+    // (tile_icon_source::change_surface in set_tile_tint).
+    if (el?.dataset?.followTint === '1' && el.dataset.surface !== 'jewel' && typeof applyTileSurface === 'function') {
+      applyTileSurface(el, 'jewel');
+    }
+    // A tile on its own surface tints with that surface's rules, from that
+    // theme's card (set_tile_tint).
+    const surface = el?.dataset?.surface || '';
+    const theme = typeof surfaceTheme === 'function' ? surfaceTheme(surface) : -1;
+    const pageLight = typeof panelThemeLight === 'function' ? panelThemeLight() : false;
+    let base = String(getComputedStyle(document.documentElement).getPropertyValue('--tile-card') || '').trim();
+    if (theme === 0 && pageLight) base = String(getComputedStyle(document.documentElement).getPropertyValue('--tile-default-bg') || '').trim();
+    if (theme === 1 && !pageLight) base = String(getComputedStyle(document.documentElement).getPropertyValue('--pvl-card') || '').trim();
+    let hex = typeof withSurface === 'function'
+      ? withSurface(theme, () => tileTintBackground(base || '#1A1A1A', color, percent))
+      : tileTintBackground(base || '#1A1A1A', color, percent);
+    if (surface === 'jewel' && typeof toneJewelCard === 'function') {
+      // Filled (tone_color::jewel_card): from the icon's own color, white
+      // light in the neutral grey; its strength for the circle.
+      const card = idle ? toneJewelIdleCard() : toneJewelCard(given, Number(percent) || 20);
+      hex = toneHex(card).toUpperCase();
+      el.dataset.jewelStrength = String(Number(percent) || 20);
+    }
+    const opacity = el.dataset.bgOpacity;
+    el.style.background = opacity === undefined ? hex : hex + Number(opacity).toString(16).padStart(2, '0');
+    // Cut-outs (the Media play glyph) take the new card color.
+    el.style.setProperty?.('--tile-cut', hex);
   }
 
   // Entities offered as a source: the states the Bridge publishes to tiles.
@@ -3297,7 +5333,8 @@ function syncTileRadiusControls(tabEl) {
     const input = iconColorEl(tab, '_tile_icon_bar');
     if (!input) return;
     input.value = mode === 'off' ? ''
-      : [mode].concat(stops.map(stop => stop.position + ':' + iconColorHex(stop.color))).join(' ');
+      : [mode].concat(stops.map(stop => stop.position + ':' + iconColorHex(stop.color) + iconColorIconSuffix(stop.icon)))
+        .join(' ');
   }
 
   function iconColorSelectedStop(tab) {
@@ -3362,8 +5399,9 @@ function syncTileRadiusControls(tabEl) {
     strip.style.background = iconColorGradient(bar.mode, iconColorSortStops(bar.stops.map(stop => ({ ...stop }))));
     let knobs = Array.from(handles.querySelectorAll('.icon-color-stop'));
     let labels = Array.from(handles.querySelectorAll('.icon-color-stop-label'));
-    if (knobs.length !== bar.stops.length) {
-      knobs.concat(labels).forEach(el => el.remove());
+    let icons = Array.from(handles.querySelectorAll('.icon-color-stop-icon'));
+    if (knobs.length !== bar.stops.length || icons.length !== bar.stops.length) {
+      knobs.concat(labels, icons).forEach(el => el.remove());
       knobs = bar.stops.map((stop, index) => {
         const knob = document.createElement('button');
         knob.type = 'button';
@@ -3379,6 +5417,20 @@ function syncTileRadiusControls(tabEl) {
         handles.appendChild(label);
         return label;
       });
+      // Each stop's own icon below its value: the tile head's icon picker
+      // for the selected stop (tile-head.js data-icon-input).
+      icons = bar.stops.map((stop, index) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'icon-color-stop-icon';
+        button.dataset.iconColor = 'stop-icon-button';
+        button.dataset.stop = String(index);
+        button.dataset.iconInput = tab + '_tile_icon_stop_icon';
+        button.setAttribute('aria-haspopup', 'listbox');
+        button.title = typeof t === 'function' ? t('iconPickerAuto') : '';
+        handles.appendChild(button);
+        return button;
+      });
     }
     const selected = iconColorSelectedStop(tab);
     const range = iconColorBarRange(tab);
@@ -3391,6 +5443,8 @@ function syncTileRadiusControls(tabEl) {
       labels[index].textContent = range
         ? iconColorFormatValue(range.min + stop.position / 1000 * (range.max - range.min), range.max - range.min)
         : '';
+      icons[index].style.left = left;
+      renderIconColorIconButton(tab, icons[index], stop.icon || '', '#' + iconColorHex(stop.color));
     });
     const remove = handles.querySelector('[data-icon-color="stop-remove"]');
     const removable = selected >= 0 && selected < bar.stops.length && bar.stops.length > 2;
@@ -3404,6 +5458,48 @@ function syncTileRadiusControls(tabEl) {
     return iconColorEl(tab, '_tile_icon_rule_' + index);
   }
 
+  // A rule's icon button: its own icon in the rule's color, else the tile's
+  // own icon dimmed (data-icon-value: the icon the picker marks).
+  function renderIconColorIconButton(tab, button, icon, color) {
+    if (!button) return;
+    const own = iconColorValidIcon(icon) ? icon : '';
+    const shown = own || (typeof tileAutomaticIcon === 'function' ? tileAutomaticIcon(tab) : 'shape-outline');
+    const html = '<i class="mdi mdi-' + escapeHtml(shown) + '"></i>';
+    if (button.innerHTML !== html) button.innerHTML = html;
+    button.classList.toggle('none', !own);
+    button.style.color = own ? (normalizeIconColorHex(color) || '') : '';
+    button.dataset.iconValue = own;
+  }
+
+  function renderIconColorIconButtons(tab) {
+    for (let index = 0; index < ICON_COLOR_MAX_ROWS; index++) {
+      const row = iconColorRuleRow(tab, index);
+      if (!row || row.classList.contains('hidden')) continue;
+      renderIconColorIconButton(tab, document.getElementById(row.id + '_icon_button'),
+        document.getElementById(row.id + '_icon')?.value || '', document.getElementById(row.id + '_color')?.value || '');
+    }
+    for (const state of ['on', 'off']) {
+      const input = iconColorEl(tab, '_tile_icon_' + state);
+      renderIconColorIconButton(tab, iconColorEl(tab, '_tile_icon_' + state + '_icon_button'),
+        iconColorEl(tab, '_tile_icon_' + state + '_icon')?.value || '', input?.value || '');
+    }
+  }
+
+  // A row's "Fuellen" box: its own mark, else (a new row, or a line from
+  // before b382 that follows the "fill" line) the tile's "Ausfuellen". The
+  // box keeps the mark in data-mark ('+', '-', '' = follows "Ausfuellen"):
+  // only a click gives a row its own mark, so a loaded record stays as it is.
+  function iconColorRowFills(tab, fill) {
+    return fill === 1 || (fill !== 0 && !!iconColorEl(tab, '_tile_icon_fill')?.checked);
+  }
+  function iconColorMarkOf(fill) { return fill === 1 ? '+' : fill === 0 ? '-' : ''; }
+  function iconColorFillOfBox(box) { return box?.dataset.mark === '+' ? 1 : box?.dataset.mark === '-' ? 0 : -1; }
+  function setIconColorFillBox(tab, box, fill) {
+    if (!box) return;
+    box.dataset.mark = iconColorMarkOf(fill);
+    box.checked = iconColorRowFills(tab, fill);
+  }
+
   function readIconColorRows(tab) {
     const rows = [];
     for (let index = 0; index < ICON_COLOR_MAX_ROWS; index++) {
@@ -3412,7 +5508,9 @@ function syncTileRadiusControls(tabEl) {
       rows.push({
         value: document.getElementById(row.id + '_value')?.value || '',
         has: !!document.getElementById(row.id + '_has')?.checked,
-        color: document.getElementById(row.id + '_color')?.value || ICON_COLOR_ROW_DEFAULT
+        color: document.getElementById(row.id + '_color')?.value || ICON_COLOR_ROW_DEFAULT,
+        fill: iconColorFillOfBox(document.getElementById(row.id + '_fill')),
+        icon: document.getElementById(row.id + '_icon')?.value || ''
       });
     }
     return rows;
@@ -3427,27 +5525,40 @@ function syncTileRadiusControls(tabEl) {
       const value = document.getElementById(row.id + '_value');
       const has = document.getElementById(row.id + '_has');
       const color = document.getElementById(row.id + '_color');
+      const fill = document.getElementById(row.id + '_fill');
+      const icon = document.getElementById(row.id + '_icon');
+      if (icon) icon.value = entry && iconColorValidIcon(entry.icon) ? entry.icon : '';
       if (value) value.value = entry ? entry.value : '';
       if (has) has.checked = !!entry?.has;
+      setIconColorFillBox(tab, fill, entry ? (entry.fill ?? -1) : -1);
       if (color) color.value = entry ? (normalizeIconColorHex(entry.color) || ICON_COLOR_ROW_DEFAULT) : ICON_COLOR_ROW_DEFAULT;
     }
     iconColorEl(tab, '_tile_icon_rule_add')?.classList.toggle('hidden', rows.length >= ICON_COLOR_MAX_ROWS);
+    renderIconColorIconButtons(tab);
   }
 
-  // Binary sensor On/Off pickers; unset pickers keep the type color.
-  function setIconColorBinaryInput(tab, state, color) {
+  // Binary sensor On/Off pickers; unset pickers keep the type color and
+  // follow "Ausfuellen" (their "Fuellen" box shows it).
+  function setIconColorBinaryInput(tab, state, color, fill = -1, icon = '') {
     const input = iconColorEl(tab, '_tile_icon_' + state);
     if (!input) return;
     const hex = normalizeIconColorHex(color);
     input.value = hex || input.dataset.default || ICON_COLOR_BINARY_DEFAULTS[state];
     input.dataset.unset = hex ? '0' : '1';
+    setIconColorFillBox(tab, iconColorEl(tab, '_tile_icon_' + state + '_fill'), hex ? fill : -1);
+    const iconInput = iconColorEl(tab, '_tile_icon_' + state + '_icon');
+    if (iconInput) iconInput.value = hex && iconColorValidIcon(icon) ? icon : '';
   }
 
   function readIconColorBinaryRows(tab) {
     const rows = [];
     for (const state of ['on', 'off']) {
       const input = iconColorEl(tab, '_tile_icon_' + state);
-      if (input && input.dataset.unset === '0') rows.push({ value: state, has: false, color: input.value });
+      if (input && input.dataset.unset === '0') {
+        rows.push({ value: state, has: false, color: input.value,
+          fill: iconColorFillOfBox(iconColorEl(tab, '_tile_icon_' + state + '_fill')),
+          icon: iconColorEl(tab, '_tile_icon_' + state + '_icon')?.value || '' });
+      }
     }
     return rows;
   }
@@ -3473,14 +5584,12 @@ function syncTileRadiusControls(tabEl) {
     const own = ICON_COLOR_OWN_TYPES.includes(type) && iconColorEl(tab, '_tile_icon_source_kind')?.value !== 'other';
     const entity = String(iconColorEl(tab, '_tile_icon_source')?.value || '').trim();
     if (!own && !iconColorValidEntity(entity)) return null;
-    const strength = Number(iconColorEl(tab, '_tile_icon_rule_strength')?.value || 20);
     return {
       mode: iconColorEl(tab, '_tile_icon_source_mode')?.value === 'auto' ? 'auto' : 'rules',
       self: own,
       entity: own ? '' : entity,
-      tile: iconColorEl(tab, '_tile_icon_rule_tile')?.checked
-        ? Math.min(50, Math.max(10, Math.round(strength / 5) * 5)) : 0,
-      icon: iconColorEl(tab, '_tile_icon_rule_icon')?.checked !== false,
+      tile: 0,
+      icon: true,
       enabled: iconColorEl(tab, '_tile_icon_rules_on')?.value === '1'
     };
   }
@@ -3488,38 +5597,26 @@ function syncTileRadiusControls(tabEl) {
   function writeIconColorSource(tab, layer) {
     const select = iconColorEl(tab, '_tile_icon_source');
     const entity = layer && !layer.self ? layer.entity : '';
-    if (select) {
-      if (entity && !Array.from(select.options).some(option => option.value === entity)) {
-        const option = document.createElement('option');
-        option.value = entity;
-        option.textContent = entity;
-        select.appendChild(option);
-      }
-      select.value = entity;
-      if (entity) select.dataset.configuredValue = entity;
-      else delete select.dataset.configuredValue;
-    }
+    if (select) select.value = entity;
     const set = (suffix, value) => { const el = iconColorEl(tab, suffix); if (el) el.value = value; };
     // Without a stored layer the rules start at Own entity and Own rules, also
     // when the cell is still Empty and only gets its type afterwards; types
     // without an entity of their own show Other entity regardless.
     set('_tile_icon_source_kind', layer && !layer.self ? 'other' : 'self');
     set('_tile_icon_source_mode', layer?.mode === 'auto' ? 'auto' : 'rules');
-    const icon = iconColorEl(tab, '_tile_icon_rule_icon');
-    if (icon) icon.checked = layer ? layer.icon : true;
-    const tile = iconColorEl(tab, '_tile_icon_rule_tile');
-    if (tile) tile.checked = !!layer?.tile;
-    set('_tile_icon_rule_strength', String(layer?.tile || 20));
   }
 
   function collectIconColorRecord(tab) {
     const type = iconColorTypeOf(tab);
     const input = iconColorEl(tab, '_tile_icon_color');
-    const fixed = input && input.dataset.unset !== '1' ? normalizeIconColorHex(input.value).slice(1) : '';
+    // Media "From cover": the icon takes the cover color instead of its own.
+    const media = type === ICON_COLOR_MEDIA_TYPE;
+    const coverIcon = media && !!iconColorEl(tab, '_tile_icon_cover')?.checked;
+    const fixed = input && input.dataset.unset !== '1' && !coverIcon ? normalizeIconColorHex(input.value).slice(1) : '';
     const lines = ['v2', fixed];
-    if (iconColorEl(tab, '_tile_icon_fill')?.checked) {
-      lines.push('fill ' + (iconColorEl(tab, '_tile_icon_fill_strength')?.value || '20'));
-    }
+    // "Ausfuellen": the fixed strength (tile_icon_colors::kTintDefault).
+    if (iconColorEl(tab, '_tile_icon_fill')?.checked) lines.push('fill 20');
+    if (coverIcon) lines.push('cover icon');
     const layer = ICON_COLOR_TYPES.includes(type) ? readIconColorSource(tab) : null;
     const bar = readIconColorBar(tab);
     if (bar.mode !== 'off') {
@@ -3529,14 +5626,17 @@ function syncTileRadiusControls(tabEl) {
         return /^[^ \t\r]+$/.test(text) ? text : '-';
       };
       lines.push(['bar', bar.mode, number('_tile_icon_bar_min'), number('_tile_icon_bar_max')]
-        .concat(bar.stops.map(stop => stop.position + ':' + iconColorHex(stop.color))).join(' '));
+        .concat(bar.stops.map(stop => stop.position + ':' + iconColorHex(stop.color) + iconColorIconSuffix(stop.icon)))
+        .join(' '));
     }
     const binaryOwn = type === '20' && (!layer || layer.self);
     const rows = binaryOwn ? readIconColorBinaryRows(tab) : readIconColorRows(tab);
     for (const row of rows) {
       const color = normalizeIconColorHex(row.color) || ICON_COLOR_ROW_DEFAULT;
       const value = row.value.replace(/[\u0000-\u001f\u007f]/g, '');
-      lines.push((row.has ? 'has ' : 'is ') + color.slice(1) + ' ' + value);
+      // A row's own "Fuellen" (user 2026-10-11), else it follows "Ausfuellen".
+      lines.push((row.has ? 'has' : 'is') + iconColorMarkOf(row.fill) + ' ' + color.slice(1) +
+        iconColorIconSuffix(row.icon) + ' ' + value);
     }
     // A switched-off own layer at its defaults without rules is no layer.
     const idle = layer && layer.self && !layer.enabled && layer.mode === 'rules' && layer.icon && !layer.tile &&
@@ -3546,7 +5646,7 @@ function syncTileRadiusControls(tabEl) {
         (layer.tile ? ' tile=' + layer.tile : '') + (layer.icon ? '' : ' noicon') + (layer.enabled ? '' : ' off'));
     }
     return normalizeIconColorRecord(lines.join('\n'), ICON_COLOR_BAR_TYPES.includes(type),
-      ICON_COLOR_ROW_TYPES.includes(type), true, ICON_COLOR_OWN_TYPES.includes(type));
+      ICON_COLOR_ROW_TYPES.includes(type), true, ICON_COLOR_OWN_TYPES.includes(type), media);
   }
 
   // States can be numbers or text: the current state picks the bar or the
@@ -3576,31 +5676,32 @@ function syncTileRadiusControls(tabEl) {
     if (typeof syncTileColorMode === 'function') syncTileColorMode(tab);
     block.classList.toggle('hidden', !visible);
     iconColorEl(tab, '_tile_icon_color_fixed')?.classList.toggle('hidden', !visible);
+    // Icon color: Automatic (unset), Custom (the color field) or, on Media
+    // only, From cover.
+    const media = type === ICON_COLOR_MEDIA_TYPE;
+    const coverIconBox = iconColorEl(tab, '_tile_icon_cover');
+    if (coverIconBox && !media) coverIconBox.checked = false;
+    const coverIcon = media && !!coverIconBox?.checked;
+    const unset = iconColorEl(tab, '_tile_icon_color')?.dataset.unset !== '0';
+    const iconMode = coverIcon ? 'cover' : unset ? 'auto' : 'own';
+    iconColorEl(tab, '_tile_icon_color_row')?.classList.toggle('hidden', iconMode !== 'own');
+    iconColorEl(tab, '_tile_icon_color_modes')?.querySelectorAll('[data-icon-color="icon-color-mode"]').forEach(button => {
+      const active = button.dataset.mode === iconMode;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+      if (button.dataset.mode === 'cover') button.classList.toggle('hidden', !media);
+    });
+    if (typeof fitChoiceRows === 'function') fitChoiceRows(tab);
     if (!visible) return;
     const own = ICON_COLOR_OWN_TYPES.includes(type);
     const kindInput = iconColorEl(tab, '_tile_icon_source_kind');
     const kind = own && kindInput?.value !== 'other' ? 'self' : 'other';
     const on = iconColorEl(tab, '_tile_icon_rules_on')?.value === '1';
     const mode = iconColorEl(tab, '_tile_icon_source_mode')?.value === 'auto' ? 'auto' : 'rules';
-    const tileTint = !!iconColorEl(tab, '_tile_icon_rule_tile')?.checked;
-    // With Tile color "From icon" the tile follows the icon: "Tint tile"
-    // stays visible but greyed out (its setting is kept) and a note says why.
-    const followsIcon = !!iconColorEl(tab, '_tile_icon_fill')?.checked;
     iconColorEl(tab, '_tile_icon_source_section')?.classList.remove('hidden');
     iconColorEl(tab, '_tile_icon_rules_body')?.classList.toggle('hidden', !on);
     iconColorEl(tab, '_tile_icon_source_kinds')?.classList.toggle('hidden', !own);
     iconColorEl(tab, '_tile_icon_source')?.classList.toggle('hidden', kind !== 'other');
-    iconColorEl(tab, '_tile_icon_rule_strength_row')?.classList.toggle('hidden', !tileTint);
-    iconColorEl(tab, '_tile_icon_rule_strength_row')?.classList.toggle('is-disabled', followsIcon);
-    const tintBox = iconColorEl(tab, '_tile_icon_rule_tile');
-    if (tintBox) tintBox.disabled = followsIcon;
-    tintBox?.closest('label')?.classList.toggle('is-disabled', followsIcon);
-    const tintStrength = iconColorEl(tab, '_tile_icon_rule_strength');
-    if (tintStrength) tintStrength.disabled = followsIcon;
-    iconColorEl(tab, '_tile_icon_rule_follows_icon')?.classList.toggle('hidden', !followsIcon);
-    const strength = iconColorEl(tab, '_tile_icon_rule_strength');
-    const output = iconColorEl(tab, '_tile_icon_rule_strength_value');
-    if (strength && output) output.textContent = strength.value + ' %';
     iconColorMarkActive(tab, 'rules-on', on ? '1' : '0');
     iconColorMarkActive(tab, 'source-kind', kind);
     iconColorMarkActive(tab, 'source-mode', mode);
@@ -3638,20 +5739,26 @@ function syncTileRadiusControls(tabEl) {
         }
       }
     }
+    // Boxes without their own mark show "Ausfuellen".
+    block.querySelectorAll('[data-icon-color="row-fill"], [data-icon-color="binary-fill"]').forEach(box => {
+      if (!box.dataset.mark) box.checked = iconColorRowFills(tab, -1);
+    });
     iconColorEl(tab, '_tile_icon_bar_section')?.classList.toggle('hidden', !showBar);
     iconColorEl(tab, '_tile_icon_state_section')?.classList.toggle('hidden', !showRows);
     iconColorEl(tab, '_tile_icon_binary_section')?.classList.toggle('hidden', !showBinary);
     if (showBar) renderIconColorBar(tab);
+    renderIconColorIconButtons(tab);
   }
 
   function loadIconColorFields(tab, data) {
     const type = iconColorTypeOf(tab);
     const parsed = parseIconColorRecord(data?.icon_colors);
     setIconColorInput(tab, parsed.color);
+    const media = type === ICON_COLOR_MEDIA_TYPE;
     const fill = iconColorEl(tab, '_tile_icon_fill');
-    if (fill) fill.checked = parsed.fill > 0;
-    const fillStrength = iconColorEl(tab, '_tile_icon_fill_strength');
-    if (fillStrength) fillStrength.value = String(parsed.fill || 20);
+    if (fill) fill.checked = parsed.fill > 0 || (media && parsed.cover.tile > 0) || Number(parsed.source?.tile || 0) > 0;
+    const coverIcon = iconColorEl(tab, '_tile_icon_cover');
+    if (coverIcon) coverIcon.checked = media && (parsed.cover.icon || parsed.cover.tile > 0);
     const barInput = iconColorEl(tab, '_tile_icon_bar');
     if (barInput) barInput.dataset.last = '';
     writeIconColorBar(tab, parsed.bar ? parsed.bar.mode : 'off', parsed.bar ? parsed.bar.stops : []);
@@ -3669,7 +5776,7 @@ function syncTileRadiusControls(tabEl) {
     if (onInput) onInput.value = on ? '1' : '0';
     for (const state of ['on', 'off']) {
       const row = parsed.rows.find(entry => !entry.has && iconColorFold(entry.value) === state);
-      setIconColorBinaryInput(tab, state, row ? row.color : '');
+      setIconColorBinaryInput(tab, state, row ? row.color : '', row ? row.fill : -1, row ? row.icon : '');
     }
     syncIconColorFields(tab);
   }
@@ -3730,10 +5837,23 @@ function syncTileRadiusControls(tabEl) {
   document.addEventListener('input', event => {
     const target = event.target;
     const role = target?.dataset?.iconColor;
-    if (!['color', 'binary', 'value', 'rule-color', 'min', 'max', 'stop-color', 'rule-strength', 'fill-strength'].includes(role)) return;
+    if (!['color', 'binary', 'value', 'rule-color', 'min', 'max', 'stop-color', 'rule-strength', 'fill-strength',
+      'rule-icon', 'binary-icon', 'stop-icon'].includes(role)) return;
     const tab = iconColorEventTab(target);
     if (!tab) return;
     if (role === 'color' || role === 'binary') target.dataset.unset = '0';
+    // An On/Off icon keeps its row with the color it shows.
+    if (role === 'binary-icon') {
+      const color = document.getElementById(target.id.replace(/_icon$/, ''));
+      if (color) color.dataset.unset = '0';
+    }
+    if (role === 'stop-icon') {
+      const bar = readIconColorBar(tab);
+      const stop = bar.stops[iconColorSelectedStop(tab)];
+      if (!stop) return;
+      stop.icon = iconColorValidIcon(target.value) ? target.value : '';
+      writeIconColorBar(tab, bar.mode, bar.stops);
+    }
     if (role === 'stop-color') {
       const bar = readIconColorBar(tab);
       const stop = bar.stops[iconColorSelectedStop(tab)];
@@ -3748,9 +5868,17 @@ function syncTileRadiusControls(tabEl) {
   document.addEventListener('change', event => {
     const target = event.target;
     const id = target?.id || '';
-    if (['has', 'source', 'rule-target', 'fill-target'].includes(target?.dataset?.iconColor)) {
+    if (['has', 'source', 'fill-target', 'row-fill', 'binary-fill'].includes(target?.dataset?.iconColor)) {
       const tab = iconColorEventTab(target);
-      if (tab) commitIconColorChange(tab);
+      if (!tab) return;
+      // A clicked box gives its row its own mark; an On/Off box keeps that
+      // row with the color it shows.
+      if (['row-fill', 'binary-fill'].includes(target.dataset.iconColor)) target.dataset.mark = target.checked ? '+' : '-';
+      if (target.dataset.iconColor === 'binary-fill') {
+        const input = iconColorEl(tab, '_tile_icon_' + target.dataset.state);
+        if (input) input.dataset.unset = '0';
+      }
+      commitIconColorChange(tab);
       return;
     }
     for (const suffix of ['_tile_type', '_sensor_entity', '_select_entity', '_datetime_entity']) {
@@ -3763,6 +5891,12 @@ function syncTileRadiusControls(tabEl) {
     const tab = iconColorEventTab(button);
     if (!button || !tab) return;
     const role = button.dataset.iconColor;
+    if (role === 'stop-icon-button') {
+      // Its icon picker (tile-head.js) sets this stop's icon.
+      setIconColorSelectedStop(tab, Number(button.dataset.stop));
+      renderIconColorBar(tab);
+      return;
+    }
     if (role === 'stop') {
       // A finished drag is not a click on the stop.
       if (button.dataset.dragged === '1') {
@@ -3775,17 +5909,17 @@ function syncTileRadiusControls(tabEl) {
       openIconColorStopPicker(tab, index);
       return;
     }
-    if (role === 'clear') {
-      setIconColorInput(tab, '');
+    if (role === 'icon-color-mode') {
+      const mode = button.dataset.mode;
+      const cover = iconColorEl(tab, '_tile_icon_cover');
+      if (cover) cover.checked = mode === 'cover';
+      // Custom starts from the color the field shows; Automatic forgets it.
+      const input = iconColorEl(tab, '_tile_icon_color');
+      if (mode === 'auto') setIconColorInput(tab, '');
+      else if (mode === 'own' && input) input.dataset.unset = '0';
     } else if (role === 'source-mode') {
       const mode = iconColorEl(tab, '_tile_icon_source_mode');
       if (mode) mode.value = button.dataset.mode === 'rules' ? 'rules' : 'auto';
-    } else if (role === 'strength-reset') {
-      const strength = iconColorEl(tab, '_tile_icon_rule_strength');
-      if (strength) strength.value = '20';
-    } else if (role === 'fill-strength-reset') {
-      const strength = iconColorEl(tab, '_tile_icon_fill_strength');
-      if (strength) strength.value = '20';
     } else if (role === 'rules-on') {
       const on = iconColorEl(tab, '_tile_icon_rules_on');
       if (on) on.value = button.dataset.mode === '1' ? '1' : '0';
@@ -3801,7 +5935,7 @@ function syncTileRadiusControls(tabEl) {
     } else if (role === 'add') {
       const rows = readIconColorRows(tab);
       if (rows.length >= ICON_COLOR_MAX_ROWS) return;
-      rows.push({ value: '', has: false, color: ICON_COLOR_ROW_DEFAULT });
+      rows.push({ value: '', has: false, color: ICON_COLOR_ROW_DEFAULT, fill: -1 });
       writeIconColorRows(tab, rows);
       document.getElementById(tab + '_tile_icon_rule_' + (rows.length - 1) + '_value')?.focus();
     } else if (role === 'mode') {
@@ -3957,8 +6091,21 @@ function syncTileRadiusControls(tabEl) {
   function isScreensaverTileTab(tab) {
     return tab === 'screensaver';
   }
-  function firstAllowedGridRow(tab) {
-    return isScreensaverTileTab(tab) ? Math.max(0, GRID_ROWS - 2) : 0;
+  // The first of the screensaver's rows at the bottom of a layout's screen
+  // with `rows` rows: two, three upright (screensaver_places::first_row).
+  function screensaverFirstRow(key, rows) {
+    return Math.max(0, rows - (key === 'portrait' ? 3 : 2));
+  }
+  function firstAllowedGridRow(tab, classic = false) {
+    // The screensaver's two rows at the bottom of the shown grid, three
+    // upright (screensaver_places.cpp); in the layout window at the bottom
+    // of that layout's screen; for an import's classic places at the bottom
+    // of the stored grid.
+    if (!isScreensaverTileTab(tab)) return 0;
+    if (classic) return Math.max(0, GRID_ROWS - 2);
+    const inWindow = typeof layoutWindow !== 'undefined' && layoutWindow;
+    const key = inWindow ? layoutWindow.key : typeof ACTIVE_LAYOUT === 'string' ? ACTIVE_LAYOUT : 'classic';
+    return screensaverFirstRow(key, inWindow ? LAYOUTS[key].rows : placeRows(tab));
   }
   function restoreCurrentTileSelectionUi() {
     if (currentTileIndex === -1 || !currentTileTab) return;
@@ -3998,7 +6145,6 @@ function syncTileRadiusControls(tabEl) {
 
   function syncFolderFragmentWithRoot(tabEl) {
     if (!tabEl) return;
-    syncTileRadiusControls(tabEl);
     syncGlobalDisplayControls(tabEl);
 
     const sourceBorderToggle = Array.from(
@@ -4019,7 +6165,7 @@ function syncTileRadiusControls(tabEl) {
       .map(button => {
         const folderId = Number(button.dataset.folderId);
         if (!Number.isInteger(folderId) || folderId <= 0) return null;
-        const buttonLabel = button.querySelector('span')?.textContent || '';
+        const buttonLabel = button.querySelector('.tab-label')?.textContent || '';
         return {
           value: String(folderId),
           label: String(button.dataset.folderName || buttonLabel ||
@@ -4067,12 +6213,8 @@ function syncTileRadiusControls(tabEl) {
       buttonTpl.innerHTML = String(data.button_html || '').trim();
       buttonEl = buttonTpl.content.firstElementChild;
       if (!buttonEl) return false;
-      const navButtons = Array.from(nav.querySelectorAll('.tab-btn'));
-      const fixedBtn = navButtons.find(
-        btn => btn.dataset.tabTarget === 'tab-tiles-screensaver') ||
-        navButtons.find(btn => btn.dataset.tabTarget === 'tab-network');
-      if (fixedBtn) nav.insertBefore(buttonEl, fixedBtn);
-      else nav.appendChild(buttonEl);
+      // Folders go after the others in the folder row.
+      (document.getElementById('folderTabs') || nav).appendChild(buttonEl);
     }
 
     const expectedTabId = String(
@@ -4098,6 +6240,8 @@ function syncTileRadiusControls(tabEl) {
     const screensaverTab = document.getElementById('tab-tiles-screensaver');
     networkTab.parentNode.insertBefore(tabEl, screensaverTab || networkTab);
     syncFolderFragmentWithRoot(tabEl);
+    // Markup kept from before a page change shows the pages as they are now.
+    if (typeof syncPageHeads === 'function') syncPageHeads();
     associateFieldLabels(tabEl);
 
     initTileTabs();
@@ -4125,6 +6269,16 @@ function syncTileRadiusControls(tabEl) {
         ensureNavigateTargetOption(
           folderNum, formatFolderLabel(name, folderNum));
       }
+      return true;
+    }
+    // A known folder whose page is not loaded yet: its tab takes the name
+    // and icon at once, its page loads (fresh) when it is opened. Loading it
+    // here held the tab back until the panel had built the page.
+    if ((name !== null || icon !== null) && !folderTabLoadPromises[folderNum] &&
+        document.querySelector('.folder-tab-btn[data-folder-id="' + folderNum + '"]')) {
+      updateFolderTabUi(folderNum, name || '', icon || '');
+      ensureNavigateTargetOption(folderNum, formatFolderLabel(name, folderNum));
+      forgetFolderTabSessionFragment(folderNum);
       return true;
     }
     if (folderTabLoadPromises[folderNum]) {
@@ -4167,9 +6321,72 @@ function syncTileRadiusControls(tabEl) {
     }
   }
 
+  // Folder tabs not opened yet are prefetched one at a time while the Web
+  // Admin is idle, so a later click opens them at once. The device answers
+  // from its UI loop, so the prefetch waits for a quiet editor, leaves a short
+  // gap between requests and stops at the first failure.
+  const FOLDER_TAB_PREFETCH_IDLE_MS = 2500;
+  const FOLDER_TAB_PREFETCH_STEP_MS = 150;
+  let folderTabPrefetchTimer = null;
+  let folderTabPrefetchStopped = false;
+  let lastAdminInteractionMs = Date.now();
+
+  function noteAdminInteraction() {
+    lastAdminInteractionMs = Date.now();
+  }
+
+  function scheduleFolderTabPrefetch(delayMs = FOLDER_TAB_PREFETCH_IDLE_MS) {
+    if (folderTabPrefetchStopped || folderTabPrefetchTimer) return;
+    folderTabPrefetchTimer = window.setTimeout(runFolderTabPrefetch, delayMs);
+  }
+
+  function nextFolderTabToPrefetch() {
+    for (const key of Object.keys(tabByFolder)) {
+      const folderId = Number(key);
+      if (!Number.isInteger(folderId) || folderId <= 0) continue;
+      const tab = tabByFolder[folderId];
+      if (!document.getElementById('tab-tiles-' + tab)) {
+        return { folderId, tab, step: 'tab' };
+      }
+      if (!tileDataLoadedTabs.has(tab)) return { folderId, tab, step: 'tiles' };
+    }
+    return null;
+  }
+
+  async function runFolderTabPrefetch() {
+    folderTabPrefetchTimer = null;
+    if (folderTabPrefetchStopped) return;
+    const idleMs = Date.now() - lastAdminInteractionMs;
+    if (document.hidden || dragSource || resizeState || fileManagerUploadBusy ||
+        idleMs < FOLDER_TAB_PREFETCH_IDLE_MS) {
+      scheduleFolderTabPrefetch(Math.max(
+        FOLDER_TAB_PREFETCH_STEP_MS, FOLDER_TAB_PREFETCH_IDLE_MS - idleMs));
+      return;
+    }
+    const next = nextFolderTabToPrefetch();
+    if (!next) return;
+    let ok = false;
+    try {
+      ok = next.step === 'tab'
+        ? await ensureFolderTabUi(next.folderId)
+        : Array.isArray(await fetchTileGridData(next.tab, false));
+    } catch (error) {
+      ok = false;
+    }
+    if (!ok) {
+      folderTabPrefetchStopped = true;
+      return;
+    }
+    scheduleFolderTabPrefetch(FOLDER_TAB_PREFETCH_STEP_MS);
+  }
+
+  // Folder tab markup is kept in localStorage, so a second browser tab or a
+  // new window opens folders without asking the device again. The namespace
+  // carries the per-boot token, so nothing survives a reboot or OTA; the tile
+  // data itself is always fetched fresh and re-rendered over the markup.
   const FOLDER_TAB_SESSION_CACHE_PREFIX = 'hometilesAdminFolderTabs:';
   const FOLDER_TAB_SESSION_CACHE_VERSION = 2;
-  const FOLDER_TAB_SESSION_CACHE_LIMIT = 4;
+  const FOLDER_TAB_SESSION_CACHE_LIMIT = 8;
 
   function folderTabSessionCacheNamespace() {
     return FOLDER_TAB_SESSION_CACHE_PREFIX + 'v' +
@@ -4188,7 +6405,7 @@ function syncTileRadiusControls(tabEl) {
 
   function readFolderTabSessionIndex() {
     try {
-      const raw = sessionStorage.getItem(folderTabSessionIndexKey());
+      const raw = localStorage.getItem(folderTabSessionIndexKey());
       if (!raw) return [];
       const parsed = JSON.parse(raw);
       if (parsed?.version !== FOLDER_TAB_SESSION_CACHE_VERSION ||
@@ -4201,7 +6418,7 @@ function syncTileRadiusControls(tabEl) {
 
   function writeFolderTabSessionIndex(entries) {
     try {
-      sessionStorage.setItem(folderTabSessionIndexKey(), JSON.stringify({
+      localStorage.setItem(folderTabSessionIndexKey(), JSON.stringify({
         version: FOLDER_TAB_SESSION_CACHE_VERSION,
         entries: entries.slice(0, FOLDER_TAB_SESSION_CACHE_LIMIT)
       }));
@@ -4221,14 +6438,14 @@ function syncTileRadiusControls(tabEl) {
     let stored = false;
     while (!stored) {
       try {
-        sessionStorage.setItem(
+        localStorage.setItem(
           folderTabSessionEntryKey(folderId), String(data.tab_html));
         stored = true;
       } catch (error) {
         const evicted = entries.pop();
         if (!evicted) break;
         try {
-          sessionStorage.removeItem(
+          localStorage.removeItem(
             folderTabSessionEntryKey(evicted.folder_id));
         } catch (removeError) {}
       }
@@ -4239,7 +6456,7 @@ function syncTileRadiusControls(tabEl) {
     while (nextEntries.length > FOLDER_TAB_SESSION_CACHE_LIMIT) {
       const evicted = nextEntries.pop();
       try {
-        sessionStorage.removeItem(
+        localStorage.removeItem(
           folderTabSessionEntryKey(evicted.folder_id));
       } catch (error) {}
     }
@@ -4259,7 +6476,7 @@ function syncTileRadiusControls(tabEl) {
   function forgetFolderTabSessionFragment(folderId) {
     const folderNum = Number(folderId);
     try {
-      sessionStorage.removeItem(folderTabSessionEntryKey(folderNum));
+      localStorage.removeItem(folderTabSessionEntryKey(folderNum));
     } catch (error) {}
     writeFolderTabSessionIndex(readFolderTabSessionIndex().filter(
       entry => Number(entry?.folder_id) !== folderNum));
@@ -4277,7 +6494,7 @@ function syncTileRadiusControls(tabEl) {
       return null;
     }
     try {
-      const tabHtml = sessionStorage.getItem(
+      const tabHtml = localStorage.getItem(
         folderTabSessionEntryKey(folderNum));
       if (!tabHtml) {
         forgetFolderTabSessionFragment(folderNum);
@@ -4297,14 +6514,14 @@ function syncTileRadiusControls(tabEl) {
     const namespace = folderTabSessionCacheNamespace();
     const storageKeys = [];
     try {
-      for (let index = 0; index < sessionStorage.length; index += 1) {
-        const key = sessionStorage.key(index) || '';
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const key = localStorage.key(index) || '';
         storageKeys.push(key);
       }
       storageKeys.filter(key =>
         key.startsWith(FOLDER_TAB_SESSION_CACHE_PREFIX) &&
         !key.startsWith(namespace + ':'))
-        .forEach(key => sessionStorage.removeItem(key));
+        .forEach(key => localStorage.removeItem(key));
     } catch (error) {}
 
     const availableEntryKeys = new Set(storageKeys.filter(key =>
@@ -4332,7 +6549,7 @@ function syncTileRadiusControls(tabEl) {
       folderTabSessionEntryKey(entry.folder_id)));
     availableEntryKeys.forEach(key => {
       if (!validEntryKeys.has(key)) {
-        try { sessionStorage.removeItem(key); } catch (error) {}
+        try { localStorage.removeItem(key); } catch (error) {}
       }
     });
     writeFolderTabSessionIndex(validEntries);
@@ -4433,6 +6650,25 @@ function syncTileRadiusControls(tabEl) {
     const targetId = Number(tile?.navigate_target ?? tileEl.dataset.navigateTarget);
     switchToFolderId(targetId);
   }
+  // The shown grid (grid_layout.h): with a bar layout the panel shows fewer,
+  // larger cells. New places, moves and sizes stay inside it. A tile without
+  // a place in the active layout (layout_hidden, tile_layouts.h) is not shown
+  // and takes no room; the layout window places it. The screensaver tab
+  // shows the same grid, its two rows at the bottom (screensaver_places.h).
+  function headBarLayout() { return typeof HEAD_BAR === 'boolean' && HEAD_BAR; }
+  // `classic`: the stored grid whatever layout is shown, for the classic
+  // places an import writes (the server's setPlaceGrid).
+  function placeCols(tab = currentTileTab, classic = false) {
+    return !classic && headBarLayout() && typeof GRID_SHOWN_COLS === 'number' ? GRID_SHOWN_COLS : GRID_COLS;
+  }
+  function placeRows(tab = currentTileTab, classic = false) {
+    return !classic && headBarLayout() && typeof GRID_SHOWN_ROWS === 'number' ? GRID_SHOWN_ROWS : GRID_ROWS;
+  }
+  // A tile that is shown and takes room in the editor's grid.
+  function tileTakesRoom(tile) {
+    return !!tile && Number(tile.type || 0) !== 0 && !tile.layout_hidden;
+  }
+
   function clampInt(value, min, max, fallback) {
     const v = parseInt(value, 10);
     if (isNaN(v)) return fallback !== undefined ? fallback : min;
@@ -4446,9 +6682,16 @@ function syncTileRadiusControls(tabEl) {
     return Number.isFinite(number) ? Math.max(min, Math.min(max, Math.round(number * 2) / 2)) : fallback;
   }
   function isCompactSensorType(type) { return [1, 14, 20].includes(Number(type)); }
+  // Number, Select and Date/Time render through the Sensor tile
+  // (tile_geometry::editable).
+  function isEditableValueType(type) { return [21, 22, 23].includes(Number(type)); }
   // Types that may use half-cell sizes (mirrors tile_geometry::half_size).
-  // Scene, Folder, Settings, Back and Camera show only an icon and a title.
-  function supportsHalfSize(type) { return isCompactSensorType(type) || [2, 4, 7, 8, 9, 18].includes(Number(type)); }
+  // Scene, Folder, Settings, Back and Camera show only an icon and a title;
+  // Switch and Cover show their state (tile_geometry::compact_switch,
+  // compact_cover).
+  function supportsHalfSize(type) {
+    return isCompactSensorType(type) || isEditableValueType(type) || [2, 4, 5, 7, 8, 9, 10, 17, 18, 19, 24, 25, 26, 27, 29].includes(Number(type));
+  }
   // Every type resizes in half steps from 1x1; only half-size types may be half
   // a row high (mirrors tile_geometry::supported).
   function supportedTileLayout(type, layout) {
@@ -4465,24 +6708,69 @@ function syncTileRadiusControls(tabEl) {
     if (value === '2') return 24;
     return ['3', '4', '5'].includes(value) ? 28 : 20;
   }
-  // The value size choices a tile shows: Default, 24 and 28 in half-height
-  // tiles; Default, 20, 24, 32 and 40 otherwise (28 is the default there).
-  // A choice the other size lacks moves to the one that looks the same.
-  function syncCompactValueFontOptions(select, halfHeight) {
+  // The value size choices a tile shows: Default, 24 and 28 in the header
+  // row beside the disc (`compact`: half-height tiles, the Sensor graph);
+  // Default, 20, 24, 32 and 40 otherwise (28 is the default there). With
+  // the panel's sizes on the select (value_size_attrs.h) each choice is named
+  // by the size it draws there and each size is offered once: the lists
+  // named the 1280x800 sizes, so a graph tile's "28 (Default)" was its 20 px
+  // title size (user 2026-10-27). A choice the shape lacks moves to the one
+  // that looks the same, else to the nearest size.
+  // `inside`: a value inside a Sensor look's arc or ring (1 one row high,
+  // 2 taller), whose Default is the 20 or 24 of the full sizes; every other
+  // size stays offered (types/sensor/renderer.cpp).
+  function syncCompactValueFontOptions(select, compact, inside = 0) {
     if (!select?.options) return;
-    const shown = halfHeight ? ['0', '2', '5'] : ['0', '1', '2', '3', '4'];
-    for (const option of Array.from(select.options)) {
-      const hidden = !shown.includes(option.value);
+    const allowed = inside ? ['0', '1', '2', '5', '3', '4'] : compact ? ['0', '2', '5'] : ['0', '1', '2', '3', '4'];
+    const sizes = String(select.dataset?.[compact && !inside ? 'compactSizes' : 'sizes'] || '').split(',').map(Number);
+    if (inside && sizes.length > 5) sizes[0] = sizes[inside === 2 ? 2 : 1];
+    const known = sizes.length > 5 && sizes.every(size => size > 0);
+    const defaultLabel = select.dataset?.defaultLabel || '';
+    const options = Array.from(select.options);
+    const seen = [];
+    for (const option of options) {
+      const size = known ? sizes[Number(option.value)] : 0;
+      const hidden = !allowed.includes(option.value) || (known && seen.includes(size));
       option.hidden = hidden;
       option.disabled = hidden;
-      if (option.value === '0') {
-        option.textContent = option.textContent.replace(/^\d+(?= )/, halfHeight ? '20' : '28');
-      }
+      if (!hidden) seen.push(size);
+      if (known) option.textContent = option.value === '0' && defaultLabel ? size + ' (' + defaultLabel + ')' : String(size);
+      else if (option.value === '0') option.textContent = option.textContent.replace(/^\d+(?= )/, compact ? '20' : '28');
     }
-    const value = select.value;
-    if (halfHeight && value === '1') select.value = '0';
-    else if (halfHeight && (value === '3' || value === '4')) select.value = '5';
-    else if (!halfHeight && value === '5') select.value = '0';
+    const current = options.find(option => option.value === String(select.value));
+    if (!current?.hidden) return;
+    if (!known) {
+      const value = select.value;
+      if (compact && value === '1') select.value = '0';
+      else if (compact && (value === '3' || value === '4')) select.value = '5';
+      else if (!compact && value === '5') select.value = '0';
+      return;
+    }
+    const want = sizes[Number(current.value)];
+    let best = null;
+    for (const option of options) {
+      if (option.hidden) continue;
+      const distance = Math.abs(sizes[Number(option.value)] - want);
+      if (!best || distance < best.distance) best = {value: option.value, distance};
+    }
+    if (best) select.value = best.value;
+  }
+  // Number, Select and Date/Time value sizes (1 = 20, 2 = 24, 0 = 28, 3 = 32,
+  // 4 = 40): half-height tiles offer 20, 24 and 28 (editable_display_tile).
+  function syncEditableValueFontOptions(select, halfHeight) {
+    if (!select?.options) return;
+    for (const option of Array.from(select.options)) {
+      const hidden = halfHeight && (option.value === '3' || option.value === '4');
+      option.hidden = hidden;
+      option.disabled = hidden;
+    }
+    if (halfHeight && (select.value === '3' || select.value === '4')) select.value = '0';
+  }
+  // The Sensor value size choice that matches a Number, Select or Date/Time
+  // size at half height (editable_display_tile).
+  function editableCompactValueFont(choice) {
+    const value = String(choice ?? '2');
+    return value === '1' ? '0' : value === '2' ? '2' : '5';
   }
   function applyCompactSensorPreview(el, type, layout, mode = 0, valueFont = 0) {
     const halfHeight = layout?.span_w >= 1 && layout.span_h === 0.5;
@@ -4490,29 +6778,81 @@ function syncTileRadiusControls(tabEl) {
     // half-height Sensor header: the icon in the corner disc and the title
     // (if any) centered beside it.
     const compactIconTitle = [2, 4, 7, 8, 18].includes(Number(type)) && halfHeight;
-    const compact = (isCompactSensorType(type) || compactIconTitle) && halfHeight;
+    // Half-height Switch: icon, title and state like a compact Sensor.
+    // A half-height Calendar: the next event's time and title (compact_calendar).
+    const compactSwitch = [5, 17, 19, 24, 25, 26, 27, 29].includes(Number(type)) && halfHeight;
+    // Number, Select and Date/Time like a compact Sensor.
+    const compactEditable = isEditableValueType(type) && halfHeight;
+    if (compactEditable) valueFont = editableCompactValueFont(valueFont);
+    const compact = (isCompactSensorType(type) || compactIconTitle || compactSwitch || compactEditable) && halfHeight;
     el.classList.toggle('sensor-compact', compact);
     el.classList.toggle('sensor-half', compact);
     el.classList.toggle('compact-title-only', compactIconTitle);
-    const valueSize = compact && !compactIconTitle ? compactValueSize(valueFont) : 20;
+    // Switch header layouts show their state beside the disc at the
+    // half-height value sizes; from 1.5 rows like a Sensor tile at its value
+    // sizes, the bar a third of the extra height higher
+    // (switch_layout::sensor_look).
+    // The Cover position bar uses the same header (tile_header.h).
+    // Lock, Alarm panel and Fan too (types/device).
+    const switchHeader = [5, 19, 24, 25, 26, 29].includes(Number(type)) && el.classList.contains('switch-bar');
+    // An upright bar keeps the header beside the disc (bar_orientation.h).
+    // A two-by-two Vacuum takes the tall title and state size too; its state
+    // stands beside its map (render_vacuum_tile, applyVacuumPreview).
+    const switchTall = switchHeader && Number(layout?.span_h) > 1 && !el.classList.contains('switch-upright');
+    el.classList.toggle('switch-tall', switchTall);
+    if (switchTall) el.style?.setProperty?.('--switch-span-h', String(Number(layout.span_h)));
+    else el.style?.removeProperty?.('--switch-span-h');
+    const tallSize = switchTall ? ({1: 20, 2: 24, 3: 32, 4: 40}[Number(valueFont)] || 28) : 0;
+    for (const size of [20, 24, 32, 40]) el.classList.toggle('switch-value-' + size, tallSize === size);
+    // A Sensor graph tile (display mode 2) has the Switch header beside the
+    // disc at the half-height value sizes (types/sensor/renderer.cpp); its
+    // graph needs the Bridge's history, so the box below stays empty like
+    // the panel's before the history arrives. An Energy tile with bars has
+    // the same header and box (types/energy/renderer.cpp).
+    const sensorGraph = (Number(type) === 1 || Number(type) === 14) && Number(mode) === 2 && !halfHeight;
+    el.classList.toggle('sensor-graph', sensorGraph);
+    // The looks below the header (types/sensor/sensor_look.h, admin-look.js):
+    // the graph's header with the value beside the disc, or the title alone
+    // right-aligned with the value inside the arc or ring.
+    const sensorLook = Number(type) === 1 && !halfHeight && typeof isSensorLookMode === 'function' && isSensorLookMode(mode);
+    const lookInside = sensorLook && sensorLookValueInside(mode);
+    el.classList.toggle('sensor-look-head', sensorLook && !lookInside);
+    el.classList.toggle('sensor-look-inside', lookInside);
+    if (el.dataset) {
+      el.dataset.lookTall = Number(layout?.span_h) > 1 ? '1' : '0';
+      el.dataset.lookFont = String(Number(valueFont) || 0);
+    }
+    if (typeof setSensorLookData === 'function') setSensorLookData(el, sensorLook ? mode : 0, layout);
+    const valueSize = (compact && !compactIconTitle) || (switchHeader && !switchTall) || sensorGraph ||
+      (sensorLook && !lookInside) ? compactValueSize(valueFont) : 20;
     el.classList.toggle('compact-value-24', valueSize === 24);
     el.classList.toggle('compact-value-28', valueSize === 28);
     el.classList.toggle('clock-compact', Number(type) === 9 && halfHeight);
+    // A half-height Text tile: the text alone (tile_geometry::compact_text).
+    el.classList.toggle('text-compact', Number(type) === 10 && halfHeight);
     if (Number(type) === 9) fitCompactClockPreview(el);
+    if (typeof renderSensorLookPreview === 'function') renderSensorLookPreview(el);
   }
 
-  function normalizeLayoutForTileType(typeValue, col, row, spanW, spanH) {
-    let safeCol = clampHalf(col, 0, GRID_COLS - 0.5, 0);
-    let safeRow = clampHalf(row, 0, GRID_ROWS - 0.5, 0);
-    let safeW = clampHalf(spanW, 0.5, GRID_COLS, 1);
-    let safeH = clampHalf(spanH, 0.5, GRID_ROWS, 1);
+  // Every bound is the shown grid (placeCols/placeRows, the server's
+  // tilePlaceCols/tilePlaceRows): an upright layout has more rows than the
+  // stored grid (1280 x 800: 4 x 6.5 against 7 x 5), and the stored grid
+  // pushed its lower tiles up and halved them (8-inch export, 2026-10-09).
+  // An import's classic places keep the stored grid (`classic`).
+  function normalizeLayoutForTileType(typeValue, col, row, spanW, spanH, classic = false) {
+    const cols = placeCols(currentTileTab, classic);
+    const rows = placeRows(currentTileTab, classic);
+    let safeCol = clampHalf(col, 0, cols - 0.5, 0);
+    let safeRow = clampHalf(row, 0, rows - 0.5, 0);
+    let safeW = clampHalf(spanW, 0.5, cols, 1);
+    let safeH = clampHalf(spanH, 0.5, rows, 1);
     if (Number(typeValue) === MEDIA_TILE_TYPE) {
-      const minW = Math.min(MEDIA_TILE_MIN_SPAN, GRID_COLS);
-      const minH = Math.min(MEDIA_TILE_MIN_SPAN, GRID_ROWS);
-      safeW = clampHalf(safeW, minW, Math.min(MEDIA_TILE_MAX_SPAN, GRID_COLS), minW);
-      safeH = clampHalf(safeH, minH, Math.min(MEDIA_TILE_MAX_SPAN, GRID_ROWS), minH);
-      safeCol = Math.min(safeCol, GRID_COLS - safeW);
-      safeRow = Math.min(safeRow, GRID_ROWS - safeH);
+      const minW = Math.min(MEDIA_TILE_MIN_SPAN, cols);
+      const minH = Math.min(MEDIA_TILE_MIN_SPAN, rows);
+      safeW = clampHalf(safeW, minW, Math.min(MEDIA_TILE_MAX_SPAN, cols), minW);
+      safeH = clampHalf(safeH, minH, Math.min(MEDIA_TILE_MAX_SPAN, rows), minH);
+      safeCol = Math.min(safeCol, cols - safeW);
+      safeRow = Math.min(safeRow, rows - safeH);
     } else {
       // Keep at least a whole cell wide (and a whole row high unless the type
       // allows half a row), so clamping at the grid edge never yields 0.5.
@@ -4520,33 +6860,35 @@ function syncTileRadiusControls(tabEl) {
       const minH = (type === 0 || supportsHalfSize(type)) ? 0.5 : 1;
       safeW = Math.max(1, safeW);
       safeH = Math.max(minH, safeH);
-      safeCol = Math.min(safeCol, GRID_COLS - 1);
-      safeRow = Math.min(safeRow, GRID_ROWS - minH);
-      safeW = Math.min(safeW, GRID_COLS - safeCol);
-      safeH = Math.min(safeH, GRID_ROWS - safeRow);
+      safeCol = Math.min(safeCol, cols - 1);
+      safeRow = Math.min(safeRow, rows - minH);
+      safeW = Math.min(safeW, cols - safeCol);
+      safeH = Math.min(safeH, rows - safeRow);
     }
     return { col: safeCol, row: safeRow, span_w: safeW, span_h: safeH };
   }
 
-  function constrainLayoutToTab(layout, tab) {
-    const firstRow = firstAllowedGridRow(tab);
+  function constrainLayoutToTab(layout, tab, classic = false) {
+    const firstRow = firstAllowedGridRow(tab, classic);
     if (layout.row < firstRow) layout.row = firstRow;
-    if (layout.span_h > GRID_ROWS - layout.row) {
-      layout.span_h = GRID_ROWS - layout.row;
+    if (layout.span_h > placeRows(tab, classic) - layout.row) {
+      layout.span_h = placeRows(tab, classic) - layout.row;
     }
     return layout;
   }
 
-  function normalizeTileLayout(tile, index, tab = currentTileTab) {
-    const fallbackCol = index % GRID_COLS;
-    const firstRow = firstAllowedGridRow(tab);
-    const fallbackRow = Math.max(firstRow, Math.floor(index / GRID_COLS));
-    const col = clampHalf(tile?.col, 0, GRID_COLS - 0.5, fallbackCol);
-    const row = clampHalf(tile?.row, firstRow, GRID_ROWS - 0.5, fallbackRow);
-    let spanW = clampHalf(tile?.span_w, 0.5, GRID_COLS, 1);
-    let spanH = clampHalf(tile?.span_h, 0.5, GRID_ROWS, 1);
+  function normalizeTileLayout(tile, index, tab = currentTileTab, classic = false) {
+    const cols = placeCols(tab, classic);
+    const rows = placeRows(tab, classic);
+    const fallbackCol = index % cols;
+    const firstRow = firstAllowedGridRow(tab, classic);
+    const fallbackRow = Math.max(firstRow, Math.floor(index / cols));
+    const col = clampHalf(tile?.col, 0, cols - 0.5, fallbackCol);
+    const row = clampHalf(tile?.row, firstRow, rows - 0.5, fallbackRow);
+    let spanW = clampHalf(tile?.span_w, 0.5, cols, 1);
+    let spanH = clampHalf(tile?.span_h, 0.5, rows, 1);
     return constrainLayoutToTab(
-      normalizeLayoutForTileType(tile?.type, col, row, spanW, spanH), tab);
+      normalizeLayoutForTileType(tile?.type, col, row, spanW, spanH, classic), tab, classic);
   }
 
   function setGridItemPosition(el, col, row, spanW, spanH) {
@@ -4568,20 +6910,42 @@ function syncTileRadiusControls(tabEl) {
 
   }
 
+  // A render sets a tile's classes anew through here: the grid place's class
+  // (setTileGridPosition, the server's fractional-tile) stays. Without it a
+  // half-step tile was one grid cell until layoutTiles ran, and everything
+  // measured in between read that cell (user 2026-10-12: the V2's 2x1.5
+  // analog clock showed its 1x1 face at every page load and after every
+  // render).
+  function resetTileClasses(el, classes) {
+    const fractional = el.classList.contains('fractional-tile');
+    // A page's tile stays in its field (page-fields.js); emptied it is none.
+    const pageField = el.classList.contains('page-field-tile') && !classes.includes('empty');
+    el.className = classes.join(' ');
+    if (fractional) el.classList.add('fractional-tile');
+    if (pageField) el.classList.add('page-field-tile');
+  }
+
   function getTileElementLayout(tab, index) {
     const el = document.getElementById(tab + '-tile-' + index);
     if (!el) return null;
-    const col = clampHalf(el.dataset.col, 0, GRID_COLS - 0.5, null);
-    const row = clampHalf(el.dataset.row, firstAllowedGridRow(tab), GRID_ROWS - 0.5, null);
-    const spanW = clampHalf(el.dataset.spanW, 0.5, GRID_COLS, null);
-    const spanH = clampHalf(el.dataset.spanH, 0.5, GRID_ROWS, null);
+    const col = clampHalf(el.dataset.col, 0, placeCols(tab) - 0.5, null);
+    const row = clampHalf(el.dataset.row, firstAllowedGridRow(tab), placeRows(tab) - 0.5, null);
+    const spanW = clampHalf(el.dataset.spanW, 0.5, placeCols(tab), null);
+    const spanH = clampHalf(el.dataset.spanH, 0.5, placeRows(tab), null);
     if (col === null || row === null || spanW === null || spanH === null) return null;
     return { col, row, span_w: spanW, span_h: spanH };
   }
 
+  // Half-cell occupancy over the stored and the shown grid, whichever is larger.
+  function emptyOccupancy(tab) {
+    const rows = Math.ceil(Math.max(GRID_ROWS, placeRows(tab)) * 2);
+    const cols = Math.ceil(Math.max(GRID_COLS, placeCols(tab)) * 2);
+    return Array.from({ length: rows }, () => Array(cols).fill(false));
+  }
+
   function layoutTiles(tab, tiles) {
     if (!Array.isArray(tiles)) return;
-    const occupied = Array.from({ length: GRID_ROWS * 2 }, () => Array(GRID_COLS * 2).fill(false));
+    const occupied = emptyOccupancy(tab);
     const emptyIndices = [];
 
     tiles.forEach((tile, idx) => {
@@ -4590,8 +6954,21 @@ function syncTileRadiusControls(tabEl) {
         emptyIndices.push(idx);
         return;
       }
-      const layout = normalizeTileLayout(tile, idx, tab);
       const el = document.getElementById(tab + '-tile-' + idx);
+      // A page's folder tile stands in its page field (page-fields.js).
+      const field = typeof pageFieldOfTile === 'function' ? pageFieldOfTile(tab, tile) : null;
+      if (el && field) {
+        placeOnPageField(el, field);
+        return;
+      }
+      el?.classList.remove('page-field-tile');
+      if (tile.layout_hidden) {
+        el?.classList.add('tile-unplaced');
+        if (el) el.style.display = 'none';
+        return;
+      }
+      el?.classList.remove('tile-unplaced');
+      const layout = normalizeTileLayout(tile, idx, tab);
       if (el) {
         setTileGridPosition(el, layout.col, layout.row, layout.span_w, layout.span_h);
         el.style.display = '';
@@ -4611,7 +6988,7 @@ function syncTileRadiusControls(tabEl) {
     let freeEl = null;
     empties.forEach(({ idx, el }) => {
       delete el.dataset.freeSlot;
-      el.classList.remove('free-slot-hover');
+      el.classList.remove('free-slot-hover', 'page-field-tile');
       const kept = editingNew(idx) && newTileSpot?.tab === tab && newTileSpot.index === idx
         ? newTileSpot.layout : null;
       if (kept && slotFits(tab, occupied, kept.col, kept.row, kept.span_w, kept.span_h)) {
@@ -4630,19 +7007,23 @@ function syncTileRadiusControls(tabEl) {
         el.style.display = 'none';
       }
     });
+    // Home's page fields and Settings field beside or under the screen.
+    if (typeof layoutPageFields === 'function') layoutPageFields(tab);
+    // The layout window marks what does not fit its layout.
+    if (typeof layoutWindowOpen === 'function' && layoutWindowOpen()) markLayoutRed(tab);
   }
 
   function markOccupied(occupied, layout) {
     for (let r = layout.row * 2; r < (layout.row + layout.span_h) * 2; r++) {
       for (let c = layout.col * 2; c < (layout.col + layout.span_w) * 2; c++) {
-        if (r >= 0 && c >= 0 && r < GRID_ROWS * 2 && c < GRID_COLS * 2) occupied[r][c] = true;
+        if (r >= 0 && c >= 0 && r < occupied.length && c < occupied[r].length) occupied[r][c] = true;
       }
     }
   }
 
   function slotFits(tab, occupied, col, row, spanW, spanH) {
     if (col < 0 || row < firstAllowedGridRow(tab) ||
-        col + spanW > GRID_COLS || row + spanH > GRID_ROWS) return false;
+        col + spanW > placeCols(tab) || row + spanH > placeRows(tab)) return false;
     for (let r = row * 2; r < (row + spanH) * 2; r++) {
       for (let c = col * 2; c < (col + spanW) * 2; c++) {
         if (occupied[r][c]) return false;
@@ -4660,7 +7041,9 @@ function syncTileRadiusControls(tabEl) {
 
   // Smallest size a type accepts (Media needs 2x2, half-size types 1x0.5).
   function minimumTileSize(type) {
-    if (Number(type) === MEDIA_TILE_TYPE) return [Math.min(MEDIA_TILE_MIN_SPAN, GRID_COLS), Math.min(MEDIA_TILE_MIN_SPAN, GRID_ROWS)];
+    if (Number(type) === MEDIA_TILE_TYPE) return [Math.min(MEDIA_TILE_MIN_SPAN, placeCols()), Math.min(MEDIA_TILE_MIN_SPAN, placeRows())];
+    // The Power flow needs room for its four nodes (types/power_flow).
+    if (Number(type) === 28) return [Math.min(2, placeCols()), Math.min(2, placeRows())];
     return [1, supportsHalfSize(type) ? 0.5 : 1];
   }
 
@@ -4718,8 +7101,8 @@ function syncTileRadiusControls(tabEl) {
 
   function firstFreeSlot(tab, occupied) {
     for (const [spanW, spanH, step] of [[1, 1, 1], [1, 1, 0.5], [1, 0.5, 1], [1, 0.5, 0.5]]) {
-      for (let r = firstAllowedGridRow(tab); r + spanH <= GRID_ROWS; r += step) {
-        for (let c = 0; c + spanW <= GRID_COLS; c += step) {
+      for (let r = firstAllowedGridRow(tab); r + spanH <= placeRows(tab); r += step) {
+        for (let c = 0; c + spanW <= placeCols(tab); c += step) {
           if (slotFits(tab, occupied, c, r, spanW, spanH)) {
             return { col: c, row: r, span_w: spanW, span_h: spanH };
           }
@@ -4732,14 +7115,17 @@ function syncTileRadiusControls(tabEl) {
   // Occupancy as currently shown, including unsaved local edits and a selected
   // new tile, but without the free slot itself.
   function occupiedFromGrid(tab, grid, freeEl) {
-    const occupied = Array.from({ length: GRID_ROWS * 2 }, () => Array(GRID_COLS * 2).fill(false));
+    const occupied = emptyOccupancy(tab);
     // A selected new tile still of type Empty does not block the free slot:
     // the pointer may pick a spot half a cell next to or over it, and a click
     // moves the new tile there. Once a type is chosen it blocks like a tile.
     const selectedIsEmpty =
       String(document.getElementById(tab + '_tile_type')?.value ?? '0') === '0';
     grid.querySelectorAll(':scope > .tile[data-index]').forEach(el => {
-      if (el === freeEl || el.style.display === 'none') return;
+      // A page's tile stands in its field: its stored place takes no room
+      // (page-fields.js; user 2026-10-13: the pages' old places blocked the
+      // free slot, only half cells were left).
+      if (el === freeEl || el.style.display === 'none' || el.classList.contains('page-field-tile')) return;
       if (Number(el.dataset.type || 0) === 0 &&
           (el.dataset.selected !== '1' || selectedIsEmpty)) return;
       const layout = getTileElementLayout(tab, parseInt(el.dataset.index, 10));
@@ -4763,9 +7149,40 @@ function syncTileRadiusControls(tabEl) {
     const grid = getTileGrid(tab);
     if (!grid || grid.dataset.freeSlotBound === '1') return;
     grid.dataset.freeSlotBound = '1';
+    // A folder whose every entry is used has no free slot to offer: its free
+    // cell still shows the hand, and a click tells why (user 2026-10-16).
+    // The marker is no tile, so nothing that walks the tiles sees it.
+    const fullMarker = () => {
+      let marker = grid.querySelector(':scope > .folder-full-slot');
+      if (!marker) {
+        marker = document.createElement('div');
+        marker.className = 'folder-full-slot';
+        marker.addEventListener('click', event => {
+          event.stopPropagation();
+          const used = getTilesData(tab).filter(tile => Number(tile?.type || 0) !== 0).length;
+          showNotification(tf('folderFull', {n: used, max: TILES_PER_GRID}), false);
+        });
+        grid.appendChild(marker);
+      }
+      return marker;
+    };
+    const hideFull = () => grid.querySelector(':scope > .folder-full-slot')?.classList.remove('shown');
+    const markFull = (clientX, clientY) => {
+      const point = pointerGridPoint(tab, clientX, clientY);
+      const slot = point && freeSlotNear(tab, occupiedFromGrid(tab, grid, null), point);
+      if (!slot) {
+        hideFull();
+        return null;
+      }
+      const marker = fullMarker();
+      setTileGridPosition(marker, slot.col, slot.row, slot.span_w, slot.span_h);
+      marker.classList.add('shown');
+      return null;
+    };
     const placeAt = (clientX, clientY) => {
       const el = freeSlotElement(grid);
-      if (!el) return null;
+      if (!el) return markFull(clientX, clientY);
+      hideFull();
       const point = pointerGridPoint(tab, clientX, clientY);
       const slot = point && freeSlotNear(tab, occupiedFromGrid(tab, grid, el), point);
       if (!slot) {
@@ -4785,20 +7202,29 @@ function syncTileRadiusControls(tabEl) {
       el.classList.add('free-slot-hover');
       return el;
     };
+    // Beside or under the screen only the page fields are: no free slot.
+    const besideScreen = event => typeof pointerBesideScreen === 'function' &&
+      pointerBesideScreen(grid, event.clientX, event.clientY);
     grid.addEventListener('pointermove', event => {
       if (event.pointerType === 'touch' || resizeState || dragSource) return;
+      if (besideScreen(event)) {
+        grid.querySelector(':scope > .tile.free-slot-hover')?.classList.remove('free-slot-hover');
+        return;
+      }
       const over = event.target.closest('.tile');
       if (over && over.parentElement === grid && !over.classList.contains('empty')) {
         grid.querySelector(':scope > .tile.free-slot-hover')?.classList.remove('free-slot-hover');
+        hideFull();
         return;
       }
       placeAt(event.clientX, event.clientY);
     });
     grid.addEventListener('pointerleave', () => {
       grid.querySelector(':scope > .tile.free-slot-hover')?.classList.remove('free-slot-hover');
+      hideFull();
     });
     grid.addEventListener('click', event => {
-      if (event.target !== grid) return;
+      if (event.target !== grid || besideScreen(event)) return;
       const el = placeAt(event.clientX, event.clientY);
       if (el) selectTile(parseInt(el.dataset.index, 10), tab);
     });
@@ -4828,11 +7254,11 @@ function syncTileRadiusControls(tabEl) {
       return { col: 0, row: 0, span_w: 1, span_h: 1 };
     }
 
-    let col = clampHalf(colEl.value, 1, GRID_COLS, 1);
+    let col = clampHalf(colEl.value, 1, placeCols(tab), 1);
     const firstRow = firstAllowedGridRow(tab);
-    let row = clampHalf(rowEl.value, firstRow + 1, GRID_ROWS + 0.5, firstRow + 1);
-    let spanW = clampHalf(spanWEl.value, 0.5, GRID_COLS, 1);
-    let spanH = clampHalf(spanHEl.value, 0.5, GRID_ROWS, 1);
+    let row = clampHalf(rowEl.value, firstRow + 1, placeRows(tab) + 0.5, firstRow + 1);
+    let spanW = clampHalf(spanWEl.value, 0.5, placeCols(tab), 1);
+    let spanH = clampHalf(spanHEl.value, 0.5, placeRows(tab), 1);
 
     const typeValue = document.getElementById(prefix + '_tile_type')?.value || '0';
     const layout = constrainLayoutToTab(
@@ -4853,6 +7279,9 @@ function syncTileRadiusControls(tabEl) {
 
   function updateLayoutFromInputs(tab) {
     if (currentTileIndex === -1) return;
+    // A page's tile keeps its field; its place and size fields are its
+    // stored ones (page-fields.js selectedPageTile).
+    if (typeof selectedPageTile === 'function' && selectedPageTile(tab)) return;
     const layout = normalizeLayoutInputs(tab);
     if (newTileSpot && newTileSpot.tab === tab && newTileSpot.index === currentTileIndex) {
       newTileSpot.layout = layout;
@@ -4867,7 +7296,12 @@ function syncTileRadiusControls(tabEl) {
     const tile = tiles[currentTileIndex] || {};
     const type = document.getElementById(tab + '_tile_type')?.value ?? tile.type;
     if (Number(type) !== 0 && (!supportedTileLayout(type, layout) || !canPlaceTileLayout(tab, currentTileIndex, layout))) {
-      applyLayoutInputsFromLayout(tab, normalizeTileLayout(tile, currentTileIndex, tab), false);
+      // The stored place stays; a preview redraw may have dropped the tile's
+      // placement classes (a tile outside the shown grid then fell into the
+      // first free grid cell), so they are set again.
+      const stored = normalizeTileLayout(tile, currentTileIndex, tab);
+      applyLayoutInputsFromLayout(tab, stored, false);
+      if (tileEl) setTileGridPosition(tileEl, stored.col, stored.row, stored.span_w, stored.span_h);
       return;
     }
     tile.col = layout.col;
@@ -4948,9 +7382,6 @@ function syncTileRadiusControls(tabEl) {
       span_h: document.getElementById(prefix + '_tile_span_h')?.value || '1'
     };
     if (currentTileIndex === HIDDEN_SETTINGS_TILE_INDEX) d.type = '7';
-    if (isScreensaverTileTab(tab)) {
-      d.background_opacity = document.getElementById('screensaver_tile_opacity')?.value || '0';
-    }
     Object.assign(d, collectTypeFieldValues(tab));
     d._dirty = true;
     d._rev = (prevDraft && prevDraft._rev) ? (prevDraft._rev + 1) : 1;
@@ -4969,10 +7400,6 @@ function syncTileRadiusControls(tabEl) {
     document.getElementById(prefix + '_tile_title').value = d.title || '';
     document.getElementById(prefix + '_tile_icon').value = d.icon || '';
     setTileColorInputFromSnapshot(tab, d);
-    if (isScreensaverTileTab(tab)) {
-      const opacity = document.getElementById('screensaver_tile_opacity');
-      if (opacity) opacity.value = String(d.background_opacity ?? 0);
-    }
     const colEl = document.getElementById(prefix + '_tile_col');
     if (colEl) colEl.value = d.col || '1';
     const rowEl = document.getElementById(prefix + '_tile_row');
@@ -4984,7 +7411,7 @@ function syncTileRadiusControls(tabEl) {
     syncTileSizePolicy(tab);
     const meta = getTileTypeMeta(d.type || '0');
     callTypeHandler(meta, 'load', prefix, d);
-    loadIconDiscFields(prefix, d);
+    syncIconDiscFields(prefix);
     refreshEntityOptionLists(prefix);
     syncGaugeUi(tab);
     updateTilePreview(tab);
@@ -5014,9 +7441,6 @@ function syncTileRadiusControls(tabEl) {
       span_w: document.getElementById(prefix + '_tile_span_w')?.value || '1',
       span_h: document.getElementById(prefix + '_tile_span_h')?.value || '1'
     };
-    if (isScreensaverTileTab(tab)) {
-      data.background_opacity = document.getElementById('screensaver_tile_opacity')?.value || '0';
-    }
     Object.assign(data, collectTypeFieldValues(tab));
     return data;
   }
@@ -5035,10 +7459,6 @@ function syncTileRadiusControls(tabEl) {
     const iconEl = document.getElementById(prefix + '_tile_icon');
     if (iconEl) iconEl.value = data.icon || '';
     setTileColorInputFromSnapshot(tab, data);
-    if (isScreensaverTileTab(tab)) {
-      const opacity = document.getElementById('screensaver_tile_opacity');
-      if (opacity) opacity.value = String(data.background_opacity ?? 0);
-    }
     const spanWEl = document.getElementById(prefix + '_tile_span_w');
     if (spanWEl) spanWEl.value = data.span_w || '1';
     const spanHEl = document.getElementById(prefix + '_tile_span_h');
@@ -5046,7 +7466,7 @@ function syncTileRadiusControls(tabEl) {
     syncTileSizePolicy(tab);
     const meta = getTileTypeMeta(typeValue);
     callTypeHandler(meta, 'load', prefix, data);
-    loadIconDiscFields(prefix, data);
+    syncIconDiscFields(prefix);
     refreshEntityOptionLists(prefix);
     syncGaugeUi(tab);
   }
@@ -5099,7 +7519,18 @@ function syncTileRadiusControls(tabEl) {
     showNotification(t('tilePasted'));
   }
 
+  // Every pick in the editor (a tile, the parked Settings tile, a free page
+  // field): a tab switch that waited for its grid keeps one made meanwhile.
+  let tileSelectionSeq = 0;
+  // Each tab's pick (user 2026-10-22: an empty cell or a page field jumped
+  // to the top left tile on the way back): {kind: 'tile', index}, an empty
+  // cell {kind: 'empty', index, spot}, {kind: 'page', slot} or
+  // {kind: 'settings'}. The way back and the refreshes show it again.
+  const tileSelectionByTab = {};
+
   function selectTile(index, tab) {
+    ++tileSelectionSeq;
+    clearPageFieldMark();
     if (currentTileTab &&
         typeof parkClimateMiniEditor === 'function') {
       parkClimateMiniEditor(currentTileTab);
@@ -5110,6 +7541,7 @@ function syncTileRadiusControls(tabEl) {
     newTileSpot = Number(getTilesData(tab)?.[index]?.type || 0) === 0
       ? { tab, index, layout: getTileElementLayout(tab, index) }
       : null;
+    tileSelectionByTab[tab] = newTileSpot ? {kind: 'empty', index, spot: newTileSpot.layout} : {kind: 'tile', index};
     document.getElementById('settingsHiddenTile')?.classList.remove('active');
     persistSelectedTileState();
     document.querySelectorAll(
@@ -5140,6 +7572,7 @@ function syncTileRadiusControls(tabEl) {
       if (tileSpecific) {
         tileSpecific.classList.remove('hidden');
       }
+      setSettingsPane(tab, 'tile');
     }
     // Bind the live handlers right away. This used to happen only after the
     // asynchronous GET of the tile data, and until then size, position and style
@@ -5151,6 +7584,9 @@ function syncTileRadiusControls(tabEl) {
   function selectHiddenSettingsTile() {
     const hiddenTile = document.getElementById('settingsHiddenTile');
     if (!hiddenTile || hiddenTile.dataset.hidden !== '1') return;
+    ++tileSelectionSeq;
+    tileSelectionByTab.folder0 = {kind: 'settings'};
+    clearPageFieldMark();
     if (currentTileTab && typeof parkClimateMiniEditor === 'function') {
       parkClimateMiniEditor(currentTileTab);
     }
@@ -5166,6 +7602,7 @@ function syncTileRadiusControls(tabEl) {
     if (specific) {
       specific.classList.remove('hidden');
     }
+    setSettingsPane('folder0', 'tile');
     applyFolderTypeLock('folder0', false);
     const snapshot = normalizeHiddenSettingsSnapshot();
     if (!applyDraft('folder0', HIDDEN_SETTINGS_TILE_INDEX)) {
@@ -5184,16 +7621,36 @@ function syncTileRadiusControls(tabEl) {
     updateTileSettingsMaxHeight();
   }
 
-  function titleFromOption(option) {
-    if (!option) return '';
-    // The first option is the translated "No selection" placeholder.  It is
-    // not an entity name and must never become a persisted tile title.
-    if (!String(option.value || '').trim().length) return '';
-    const label = String(option.textContent || option.innerText || '').trim();
-    if (!label.length) return '';
-    const sep = label.indexOf(' - ');
-    if (sep > 0) return label.substring(0, sep).trim();
-    return label;
+  // The tab's pick again (tileSelectionByTab): the tile, an empty cell at its
+  // spot while that is free (or the tile it became), a free page field, the
+  // parked Settings tile. False when it is gone; the caller picks then.
+  function restoreTabSelection(tab) {
+    const pick = tileSelectionByTab[tab];
+    if (!pick) return false;
+    if (pick.kind === 'page') {
+      if (tab !== 'folder0' || !pageFieldsShown() || !pageSlotsShown() || pageSlotList()[pick.slot]) return false;
+      selectPageField(pick.slot);
+      return pageFieldPicked();
+    }
+    if (pick.kind === 'settings') {
+      selectHiddenSettingsTile();
+      return currentTileIndex === HIDDEN_SETTINGS_TILE_INDEX;
+    }
+    const el = document.getElementById(tab + '-tile-' + pick.index);
+    if (!el) return false;
+    if (Number(getTilesData(tab)?.[pick.index]?.type || 0) !== 0) {
+      if (el.classList.contains('tile-unplaced')) return false;
+      selectTile(pick.index, tab);
+      return true;
+    }
+    if (pick.kind !== 'empty' || !pick.spot) return false;
+    const {col, row, span_w: spanW, span_h: spanH} = pick.spot;
+    if (!slotFits(tab, occupiedFromGrid(tab, getTileGrid(tab), el), col, row, spanW, spanH)) return false;
+    delete el.dataset.freeSlot;
+    setTileGridPosition(el, col, row, spanW, spanH);
+    el.style.display = '';
+    selectTile(pick.index, tab);
+    return true;
   }
 
   function titleFromEntity(entity) {
@@ -5212,8 +7669,8 @@ function syncTileRadiusControls(tabEl) {
     const selectEl = document.getElementById(prefix + selectSuffix);
     if (!titleInput || !selectEl) return;
     if (titleInput.value && titleInput.value.trim().length) return;
-    const opt = selectEl.selectedOptions && selectEl.selectedOptions[0];
-    let title = titleFromOption(opt);
+    if (!String(selectEl.value || '').trim()) return;
+    let title = entityPickerName(selectEl);
     if (!title.length) title = titleFromEntity(selectEl.value);
     if (title.length) titleInput.value = title;
   }
@@ -5242,8 +7699,6 @@ function syncTileRadiusControls(tabEl) {
     const spanWInput = document.getElementById(prefix + '_tile_span_w');
     const spanHInput = document.getElementById(prefix + '_tile_span_h');
     const typeSelect = document.getElementById(prefix + '_tile_type');
-    const opacityInput = isScreensaverTileTab(tab)
-      ? document.getElementById('screensaver_tile_opacity') : null;
     const entitySelect = document.getElementById(prefix + '_sensor_entity');
     const binarySensorSelect = document.getElementById(
       prefix + '_binary_sensor_entity');
@@ -5263,15 +7718,19 @@ function syncTileRadiusControls(tabEl) {
       const graphHeightInput = document.getElementById(prefix + '_sensor_graph_height');
       const weatherSelect = document.getElementById(prefix + '_weather_entity');
       const weatherPopupModeSelect = document.getElementById(prefix + '_weather_popup_open_mode');
+      const weatherColoredIconsCheck = document.getElementById(prefix + '_weather_colored_icons');
       const energySelect = document.getElementById(prefix + '_energy_entity');
       const energyUnitInput = document.getElementById(prefix + '_energy_unit');
       const energyDecimalsInput = document.getElementById(prefix + '_energy_decimals');
       const energyValueFontSelect = document.getElementById(prefix + '_energy_value_font');
       const energyPopupModeSelect = document.getElementById(prefix + '_energy_popup_open_mode');
+      const energyDisplayModeSelect = document.getElementById(prefix + '_energy_display_mode');
       const energyValueYOffsetInput = document.getElementById(prefix + '_energy_value_y_offset');
       const sceneInput = document.getElementById(prefix + '_scene_alias');
     const textInput = document.getElementById(prefix + '_text_value');
     const textFontInput = document.getElementById(prefix + '_text_value_font');
+    const textAlignInput = document.getElementById(prefix + '_text_align');
+    const textValignInput = document.getElementById(prefix + '_text_valign');
     const navigateSelect = document.getElementById(prefix + '_navigate_target');
     const folderPinToggle = document.getElementById(prefix + '_folder_pin_enabled');
     const folderPinApply = document.getElementById(prefix + '_folder_pin_apply');
@@ -5310,16 +7769,14 @@ function syncTileRadiusControls(tabEl) {
       updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab);
     });
     bindLive(iconInput, 'input', 'tileIcon', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
-    bindLive(document.getElementById(prefix + '_tile_icon_disc'), 'change', 'tileIconDisc', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
-    bindLive(document.getElementById(prefix + '_tile_icon_glow'), 'change', 'tileIconGlow', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(colorInput, 'input', 'tileColor', () => { markTileColorInputExplicit(tab); updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
-    bindLive(opacityInput, 'input', 'tileOpacity', () => { updateTilePreview(tab); updateDraft(tab); });
-    bindLive(opacityInput, 'change', 'tileOpacitySave', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(colInput, 'input', 'tileCol', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(rowInput, 'input', 'tileRow', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(spanWInput, 'input', 'tileSpanW', () => { syncClimateSlotFields(tab); updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(spanHInput, 'input', 'tileSpanH', () => { syncClimateSlotFields(tab); updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(typeSelect, 'change', 'tileType', () => {
+      // A picked free page field: Folder makes its page (page-fields.js).
+      if (tab === 'folder0' && pageFieldTypeChosen(typeSelect)) return;
       const tileEl = document.getElementById(tab + '-tile-' + currentTileIndex);
       const previousType = Number(tileEl?.dataset.type ?? 0);
       const nextType = Number(typeSelect.value);
@@ -5344,19 +7801,26 @@ function syncTileRadiusControls(tabEl) {
         setTileColorInputFromStored(
           tab, 0, nextMeta.defaultBg || '#2A2A2A');
       }
-      if (isScreensaverTileTab(tab) && previousType === 0 &&
-          nextType !== 0 && opacityInput) {
-        opacityInput.value = String(SCREENSAVER_TILE_DEFAULT_OPACITY);
-      }
       updateTileType(tab);
-      // New tiles start in the HomeTiles look: a type with icon colors tints
-      // the tile with the color its icon shows at 20 % (Tile color "From
-      // icon"). Existing tiles and the screensaver keep their own style.
+      // New Clocks and Texts sit on the screen: Transparent, without a frame
+      // line (user 2026-10-12).
+      if (previousType === 0 && tileTypeBlackIsTransparent(String(nextType)) && !isScreensaverTileTab(tab)) {
+        const color = document.getElementById(tab + '_tile_color');
+        if (color) {
+          color.value = '#000000';
+          color.dataset.bgColorDefault = '0';
+          color.dataset.colorMode = 'transparent';
+        }
+        const border = document.getElementById(tab + (Number(nextType) === 9 ? '_clock_tile_border' : '_text_tile_border'));
+        if (border) border.checked = false;
+        syncTileColorMode(tab);
+      }
+      // New tiles start in the HomeTiles look: a type with icon colors is
+      // filled with the color its icon shows ("Fill"). Existing tiles and the
+      // screensaver keep their own style.
       if (previousType === 0 && nextType !== 0 && !isScreensaverTileTab(tab) &&
           typeof tileTypeHasIconColors === 'function' &&
           tileTypeHasIconColors(String(nextType))) {
-        const strength = document.getElementById(tab + '_tile_icon_fill_strength');
-        if (strength) strength.value = '20';
         const fill = document.getElementById(tab + '_tile_icon_fill');
         if (fill) fill.checked = true;
         syncTileColorMode(tab);
@@ -5372,8 +7836,6 @@ function syncTileRadiusControls(tabEl) {
     for (const kind of ['number', 'select', 'datetime']) {
       const select = document.getElementById(prefix + '_' + kind + '_entity');
       bindLive(select, 'change', kind + 'Entity', () => {
-        if (select.value) select.dataset.configuredValue = select.value;
-        else delete select.dataset.configuredValue;
         maybeFillTitleFromEntity(tab, '_' + kind + '_entity');
         updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab);
       });
@@ -5385,25 +7847,28 @@ function syncTileRadiusControls(tabEl) {
       });
     }
     bindLive(binarySensorSelect, 'change', 'binarySensorEntity', () => {
-      if (binarySensorSelect.value) {
-        binarySensorSelect.dataset.configuredValue = binarySensorSelect.value;
-      } else {
-        delete binarySensorSelect.dataset.configuredValue;
-      }
       maybeFillTitleFromEntity(tab, '_binary_sensor_entity');
       updateTilePreview(tab);
       updateDraft(tab);
       scheduleAutoSave(tab);
     });
     bindLive(document.getElementById(prefix + '_binary_sensor_value_font'), 'change', 'binarySensorValueFont', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
+    bindLive(document.getElementById(prefix + '_switch_value_font'), 'change', 'switchValueFont', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(binarySensorPopupModeSelect, 'change', 'binarySensorPopupMode', () => {
       updateDraft(tab);
       scheduleAutoSave(tab);
     });
     bindLive(weatherSelect, 'change', 'weatherEntity', () => { maybeFillTitleFromWeather(tab); updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
+    // Temperature/humidity sensors replace the weather entity's current values.
+    for (const [field, name] of [['weather_temperature_sensor', 'weatherTemperatureSensor'],
+                                 ['weather_humidity_sensor', 'weatherHumiditySensor']]) {
+      bindLive(document.getElementById(prefix + '_' + field), 'change', name, () => {
+        updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab);
+      });
+    }
     bindLive(weatherPopupModeSelect, 'change', 'weatherPopupMode', () => { updateDraft(tab); scheduleAutoSave(tab); });
+    bindLive(weatherColoredIconsCheck, 'change', 'weatherColoredIcons', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(energySelect, 'change', 'energyEntity', () => {
-      energySelect.dataset.configuredValue = energySelect.value || '';
       maybeFillTitleFromEnergy(tab);
       updateTilePreview(tab);
       updateEnergyValuePreview(tab);
@@ -5414,22 +7879,29 @@ function syncTileRadiusControls(tabEl) {
     bindLive(energyDecimalsInput, 'input', 'energyDecimals', () => { updateEnergyValuePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(energyValueFontSelect, 'change', 'energyValueFont', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(energyPopupModeSelect, 'change', 'energyPopupMode', () => { updateDraft(tab); scheduleAutoSave(tab); });
+    bindLive(energyDisplayModeSelect, 'change', 'energyDisplayMode', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(energyValueYOffsetInput, 'input', 'energyValueYOffset', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(unitInput, 'input', 'sensorUnit', () => { updateSensorValuePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(decimalsInput, 'input', 'sensorDecimals', () => { updateSensorValuePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(valueFontSelect, 'change', 'sensorValueFont', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(sensorPopupModeSelect, 'change', 'sensorPopupMode', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(displayModeSelect, 'change', 'sensorDisplayMode', () => { syncGaugeUi(tab); updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
-    bindLive(gaugeMinInput, 'input', 'sensorGaugeMin', () => { updateDraft(tab); scheduleAutoSave(tab); });
-    bindLive(gaugeMaxInput, 'input', 'sensorGaugeMax', () => { updateDraft(tab); scheduleAutoSave(tab); });
+    // The Sensor menu's choices set the display mode (admin-editor.js).
+    for (const field of ['sensor_layout', 'sensor_form', 'sensor_orientation', 'sensor_ring', 'sensor_place']) {
+      bindLive(document.getElementById(prefix + '_' + field), 'change', 'sensorChoice_' + field, () => applySensorLayoutChoices(tab));
+    }
+    bindLive(gaugeMinInput, 'input', 'sensorGaugeMin', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
+    bindLive(gaugeMaxInput, 'input', 'sensorGaugeMax', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(gaugeArcInput, 'input', 'sensorGaugeArc', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(gaugeSizeInput, 'input', 'sensorGaugeSize', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(gaugeYOffsetInput, 'input', 'sensorGaugeYOffset', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(valueYOffsetInput, 'input', 'sensorValueYOffset', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(graphHeightInput, 'input', 'sensorGraphHeight', () => { updateDraft(tab); scheduleAutoSave(tab); });
-    bindLive(sceneInput, 'input', 'sceneAlias', () => { maybeFillTitleFromScene(tab); updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
+    bindLive(sceneInput, 'change', 'sceneAlias', () => { maybeFillTitleFromScene(tab); updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(textInput, 'input', 'textValue', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(textFontInput, 'change', 'textFont', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
+    bindLive(textAlignInput, 'change', 'textAlign', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
+    bindLive(textValignInput, 'change', 'textValign', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(navigateSelect, 'change', 'navigateTarget', () => {
       syncFolderPinControls(tab);
       updateTilePreview(tab);
@@ -5450,26 +7922,35 @@ function syncTileRadiusControls(tabEl) {
     });
     bindLive(switchSelect, 'change', 'switchEntity', () => { maybeFillTitleFromSwitch(tab); updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(switchStyleSelect, 'change', 'switchStyle', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
+    // The bar upright (bar_orientation.h): Switch and Fan.
+    for (const id of ['_switch_orientation', '_fan_orientation']) {
+      bindLive(document.getElementById(prefix + id), 'change', id === '_fan_orientation' ? 'fanOrientation' : 'switchOrientation',
+        () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
+    }
+    // The Vacuum popup's layout (map left or centred).
+    bindLive(document.getElementById(prefix + '_vacuum_layout'), 'change', 'vacuumLayout', () => { updateDraft(tab); scheduleAutoSave(tab); });
+    // The Vacuum's map (empty: the map the Bridge finds on its device).
+    bindLive(document.getElementById(prefix + '_vacuum_map'), 'change', 'vacuumMap', () => { updateDraft(tab); scheduleAutoSave(tab); });
+    // A camera map's interval.
+    bindLive(document.getElementById(prefix + '_vacuum_every'), 'change', 'vacuumEvery', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(switchPopupModeSelect, 'change', 'switchPopupMode', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(mediaSelect, 'change', 'mediaEntity', () => { maybeFillTitleFromMedia(tab); updateTilePreview(tab); updateMediaValuePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(climateSelect, 'change', 'climateEntity', () => {
-      if (climateSelect.value) {
-        climateSelect.dataset.configuredValue = climateSelect.value;
-      } else {
-        delete climateSelect.dataset.configuredValue;
-      }
       maybeFillTitleFromEntity(tab, '_climate_entity');
       updateTilePreview(tab);
       updateDraft(tab);
       scheduleAutoSave(tab);
     });
     bindLive(climatePopupModeSelect, 'change', 'climatePopupMode', () => { updateDraft(tab); scheduleAutoSave(tab); });
+    // Layout "with value" drops the current temperature from the automatic
+    // mini fields (climateAutomaticEditorKinds).
+    bindLive(document.getElementById(prefix + '_climate_view'), 'change', 'climateView', () => {
+      syncClimateSlotFields(tab); updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab);
+    });
+    bindLive(document.getElementById(prefix + '_cover_value_font'), 'change', 'coverValueFont', () => { updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab); });
+    // The Media popup's layout (cover left or centred); the tile looks the same.
+    bindLive(document.getElementById(prefix + '_media_layout'), 'change', 'mediaLayout', () => { updateDraft(tab); scheduleAutoSave(tab); });
     bindLive(coverSelect, 'change', 'coverEntity', () => {
-      if (coverSelect.value) {
-        coverSelect.dataset.configuredValue = coverSelect.value;
-      } else {
-        delete coverSelect.dataset.configuredValue;
-      }
       maybeFillTitleFromEntity(tab, '_cover_entity');
       updateTilePreview(tab);
       updateDraft(tab);
@@ -5479,17 +7960,68 @@ function syncTileRadiusControls(tabEl) {
       updateDraft(tab);
       scheduleAutoSave(tab);
     });
+    // Lock, Alarm panel, Fan and Vacuum: entity, state size and popup gesture.
+    for (const kind of ['lock', 'alarm', 'fan', 'vacuum']) {
+      const select = document.getElementById(prefix + '_' + kind + '_entity');
+      bindLive(document.getElementById(prefix + '_' + kind + '_value_font'), 'change', kind + 'ValueFont', () => {
+        updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab);
+      });
+      bindLive(select, 'change', kind + 'Entity', () => {
+        maybeFillTitleFromEntity(tab, '_' + kind + '_entity');
+        updateTilePreview(tab);
+        updateDraft(tab);
+        scheduleAutoSave(tab);
+      });
+      bindLive(document.getElementById(prefix + '_' + kind + '_popup_open_mode'), 'change', kind + 'PopupMode', () => {
+        updateDraft(tab);
+        scheduleAutoSave(tab);
+      });
+    }
+    // Power flow: the node sensors and the options (types/power_flow).
+    for (const field of ['flow_pv_entity', 'flow_grid_entity', 'flow_battery_entity', 'flow_battery_charge_entity',
+                         'flow_home_entity', 'flow_header', 'flow_card', 'flow_grid_invert', 'flow_battery_invert']) {
+      bindLive(document.getElementById(prefix + '_' + field), 'change', field, () => {
+        if (field === 'flow_header') powerFlowHeaderTitle(prefix);
+        updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab);
+      });
+    }
+    // Calendar: up to four calendars, the view, the first day of the week and
+    // the popup gesture (types/calendar).
+    CALENDAR_FIELDS.forEach((field, i) => {
+      bindLive(document.getElementById(prefix + '_' + field), 'change', 'calendarEntity' + i, () => {
+        if (i === 0) maybeFillTitleFromEntity(tab, '_calendar_entity');
+        updateTilePreview(tab);
+        updateDraft(tab);
+        scheduleAutoSave(tab);
+      });
+    });
+    for (const [field, key] of [['_calendar_view', 'calendarView'], ['_calendar_week_start', 'calendarWeekStart']]) {
+      bindLive(document.getElementById(prefix + field), 'change', key, () => {
+        updateTilePreview(tab); updateDraft(tab); scheduleAutoSave(tab);
+      });
+    }
+    bindLive(document.getElementById(prefix + '_calendar_popup_open_mode'), 'change', 'calendarPopupMode', () => {
+      updateDraft(tab);
+      scheduleAutoSave(tab);
+    });
     bindLive(cameraSelect, 'change', 'cameraEntity', () => {
-      if (cameraSelect.value) {
-        cameraSelect.dataset.configuredValue = cameraSelect.value;
-      } else {
-        delete cameraSelect.dataset.configuredValue;
-      }
       maybeFillTitleFromEntity(tab, '_camera_entity');
+      syncCameraFields(tab);
       updateTilePreview(tab);
       updateDraft(tab);
       scheduleAutoSave(tab);
     });
+    // The picture options (types/camera/admin.js); the slider follows live.
+    for (const [field, eventName] of [['camera_display', 'change'], ['camera_fit', 'change'],
+                                      ['camera_every', 'change'], ['camera_transparency', 'input'],
+                                      ['camera_head', 'change'], ['camera_tap', 'change']]) {
+      bindLive(document.getElementById(prefix + '_' + field), eventName, field, () => {
+        syncCameraFields(tab);
+        updateTilePreview(tab);
+        updateDraft(tab);
+        scheduleAutoSave(tab);
+      });
+    }
     climateSlotSelects.forEach((select, index) => {
       bindLive(select, 'change', 'climateSlot' + index, () => {
         syncClimateSlotFields(tab);
@@ -5550,8 +8082,14 @@ function syncTileRadiusControls(tabEl) {
         if (!target || !target.id) return;
         if (
           target.id === (prefix + '_clock_show_time') ||
-          target.id === (prefix + '_clock_show_date')
+          target.id === (prefix + '_clock_show_date') ||
+          target.id === (prefix + '_clock_weekday') ||
+          target.id === (prefix + '_clock_align') ||
+          target.id === (prefix + '_clock_style') ||
+          target.id === (prefix + '_clock_dial') ||
+          target.id === (prefix + '_clock_hands')
         ) {
+          if (target.id === (prefix + '_clock_style') && typeof syncClockStyleFields === 'function') syncClockStyleFields(prefix);
           ensureClockSelection(prefix);
           updateTilePreview(tab);
           updateDraft(tab);
@@ -5562,7 +8100,8 @@ function syncTileRadiusControls(tabEl) {
           target.id === (prefix + '_clock_time_font') ||
           target.id === (prefix + '_clock_date_font') ||
           target.id === (prefix + '_clock_time_format') ||
-          target.id === (prefix + '_clock_date_format')
+          target.id === (prefix + '_clock_date_format') ||
+          target.id === (prefix + '_clock_roll')
         ) {
           updateClockValuePreview(tab);
           updateDraft(tab);
@@ -5574,6 +8113,26 @@ function syncTileRadiusControls(tabEl) {
       settingsPanel.addEventListener('input', delegatedClockRefresh);
       settingsPanel.dataset.clockLiveBound = '1';
     }
+  }
+
+  // The settings panel's tabs (web_admin_html.cpp): "Tile" shows the selected
+  // tile's settings, "Head bar" Home's title, icon and the head's options
+  // (bar layouts), "Global" the global tile settings; the screensaver page
+  // has "Tile", "Slideshow" (its picture settings, pane "global") and
+  // "Global" (its tile options and design, pane "options"). Selecting a tile
+  // shows its settings again; the panel's data-pane picks what admin.css
+  // shows.
+  function setSettingsPane(tab, pane) {
+    const panel = document.getElementById(tab + 'Settings');
+    if (panel) panel.dataset.pane = ['tile', 'options', 'head'].includes(pane) ? pane : 'global';
+  }
+
+  function showSettingsPane(tab, pane) {
+    // The screensaver's picture settings are its background's selection.
+    if (pane === 'global' && isScreensaverTileTab(tab) && typeof selectScreensaverBackground === 'function') {
+      selectScreensaverBackground();
+    }
+    setSettingsPane(tab, pane);
   }
 
   // Tile Settings keep a clicked control where it is on screen. A choice that
@@ -5642,7 +8201,15 @@ function syncTileRadiusControls(tabEl) {
     if (event.target?.classList?.contains('tile-settings-body')) trimSettingsScrollSpacer(event.target);
   }, true);
 
+  // globalThis.hometilesPreviewForcedSurface: the second pass of a preview
+  // whose tint changed its surface (tile_surface::change), drawn from the
+  // start with that surface.
   function updateTilePreview(tab) {
+    // The edited tile draws with its surface's rules (tile_surface), set
+    // below once its color is known; restored at the end.
+    const surfaceSaved = globalThis.hometilesPreviewSurface;
+    let surfaceDrawn = null;
+    try {
     if (currentTileIndex === -1) return;
     if (currentTileIndex === HIDDEN_SETTINGS_TILE_INDEX) {
       const snapshot = buildTileSnapshotFromInputs(tab);
@@ -5659,6 +8226,24 @@ function syncTileRadiusControls(tabEl) {
     const tileId = tab + '-tile-' + currentTileIndex;
     const tileElem = document.getElementById(tileId);
     if (!tileElem) return;
+    // A page's tile is drawn as one cell in its field; its stored size
+    // stays in the size fields (page-fields.js).
+    const pageTile = tileElem.classList.contains('page-field-tile');
+    const tileSpan = name => pageTile ? 1 : Number(document.getElementById(prefix + '_tile_' + name)?.value || 1);
+    // The edited tile's size, and for a Sensor look its gauge range and
+    // color record from the editor (admin-look.js setSensorLookData).
+    const sensorLookLayout = () => {
+      const layout = {span_w: tileSpan('span_w'), span_h: tileSpan('span_h')};
+      if (document.getElementById(prefix + '_tile_type')?.value !== '1') return layout;
+      const number = id => {
+        const raw = document.getElementById(prefix + id)?.value;
+        return raw === undefined || String(raw).trim() === '' ? undefined : Number(raw);
+      };
+      layout.sensor_gauge_min = number('_sensor_gauge_min');
+      layout.sensor_gauge_max = number('_sensor_gauge_max');
+      layout.icon_colors = typeof collectIconColorRecord === 'function' ? collectIconColorRecord(tab) : '';
+      return layout;
+    };
 
     const wasActive = currentTileTab === tab && currentTileIndex >= 0;
     const typeWas = tileElem.dataset.type || '0';
@@ -5668,17 +8253,61 @@ function syncTileRadiusControls(tabEl) {
     const meta = getTileTypeMeta(type);
     const iconInput = document.getElementById(prefix + '_tile_icon');
     const switchStyle = document.getElementById(prefix + '_switch_style')?.value || '0';
+    // The bar upright (bar_orientation.h): Switch and Fan.
+    const switchUpright = document.getElementById(prefix + '_switch_orientation')?.value === '1';
+    const fanUpright = document.getElementById(prefix + '_fan_orientation')?.value === '1';
     const isEnergyType = type === '14';
     // Half-height tiles offer only the value sizes that fit.
-    const halfHeight = Number(document.getElementById(prefix + '_tile_span_h')?.value || 1) === 0.5;
-    for (const id of ['_sensor_value_font', '_binary_sensor_value_font', '_energy_value_font'])
-      syncCompactValueFontOptions(document.getElementById(prefix + id), halfHeight);
-    const sensorValueFont = isEnergyType
-      ? (document.getElementById(prefix + '_energy_value_font')?.value || '0')
-      : (document.getElementById(prefix + (type === '20' ? '_binary_sensor_value_font' : '_sensor_value_font'))?.value || '0');
+    const halfHeight = tileSpan('span_h') === 0.5;
+    // An Energy tile with bars has its value beside the disc like the Sensor
+    // graph tile (types/energy/renderer.cpp).
+    const energyBars = isEnergyType && document.getElementById(prefix + '_energy_display_mode')?.value === '2';
+    syncCompactValueFontOptions(document.getElementById(prefix + '_binary_sensor_value_font'), halfHeight);
+    syncCompactValueFontOptions(document.getElementById(prefix + '_energy_value_font'), halfHeight || energyBars);
+    // The display mode the previews take: the Energy tile keeps its own field.
+    const previewDisplayMode = document.getElementById(prefix + (isEnergyType ? '_energy_display_mode' : '_sensor_display_mode'))?.value || 0;
+    // A Sensor graph tile, and a look with its value in the head, shows its
+    // value in the header row beside the disc like a half-height tile
+    // (types/sensor/renderer.cpp).
+    const sensorMode = document.getElementById(prefix + '_sensor_display_mode')?.value || '0';
+    const sensorGraph = type === '1' && (sensorMode === '2' ||
+      (typeof isSensorLookMode === 'function' && isSensorLookMode(sensorMode) && !sensorLookValueInside(sensorMode)));
+    // A value inside a look's arc or ring offers every size, its Default the
+    // 20 or 24 the panel draws there.
+    const sensorInside = type === '1' && !halfHeight && typeof isSensorLookMode === 'function' &&
+      isSensorLookMode(sensorMode) && sensorLookValueInside(sensorMode);
+    syncCompactValueFontOptions(document.getElementById(prefix + '_sensor_value_font'), halfHeight || sensorGraph,
+                                sensorInside ? (tileSpan('span_h') > 1 ? 2 : 1) : 0);
+    if (type === '1' || isEnergyType) syncSwitchChoices(tab);
+    for (const kind of ['number', 'select', 'datetime'])
+      syncEditableValueFontOptions(document.getElementById(prefix + '_' + kind + '_value_font'), halfHeight);
+    if (type === '5') {
+      // The state beside the disc takes the half-height sizes, the large
+      // state of a tall tile the full-size ones.
+      const spanH = tileSpan('span_h');
+      syncCompactValueFontOptions(document.getElementById(prefix + '_switch_value_font'),
+                                  !switchSensorLook(switchStyle, spanH, switchUpright));
+      syncSwitchChoices(tab);
+    }
+    const deviceKind = typeof devicePreviewKind === 'function' ? devicePreviewKind(type) : '';
+    if (type === '19' || deviceKind) {
+      // Like the Switch: beside the disc the half-height sizes, from 1.5 rows
+      // the full-size ones (tile_header.h).
+      const spanH = tileSpan('span_h');
+      syncCompactValueFontOptions(document.getElementById(prefix + (deviceKind ? '_' + deviceKind : '_cover') +
+        '_value_font'), !(spanH > 1 && !(deviceKind === 'fan' && fanUpright)));
+      syncSwitchChoices(tab);
+    }
     const previewKind = meta.preview || 'none';
-    const sensorValueClass = getSensorValueFontClass(isEditablePreview(previewKind)
-      ? (document.getElementById(prefix + '_' + previewKind + '_value_font')?.value ?? '2') : sensorValueFont);
+    // Number, Select and Date/Time keep their own value size field.
+    const sensorValueFont = isEditablePreview(previewKind)
+      ? (document.getElementById(prefix + '_' + previewKind + '_value_font')?.value ?? '2')
+      : isEnergyType
+      ? (document.getElementById(prefix + '_energy_value_font')?.value || '0')
+      : (document.getElementById(prefix + (type === '20' ? '_binary_sensor_value_font'
+        : (type === '5' ? '_switch_value_font' : (type === '19' ? '_cover_value_font'
+          : (deviceKind ? '_' + deviceKind + '_value_font' : '_sensor_value_font')))))?.value || '0');
+    const sensorValueClass = getSensorValueFontClass(sensorValueFont);
     const sensorEntity = document.getElementById(prefix + '_sensor_entity')?.value || '';
     const binarySensorEntity = document.getElementById(
       prefix + '_binary_sensor_entity')?.value || '';
@@ -5705,9 +8334,11 @@ function syncTileRadiusControls(tabEl) {
                 ? coverEntity
                 : (previewKind === 'camera' ? cameraEntity : '')))))));
     if (isEditablePreview(previewKind)) iconEntity = document.getElementById(prefix + '_' + previewKind + '_entity')?.value || '';
+    if (deviceKind) iconEntity = document.getElementById(prefix + '_' + deviceKind + '_entity')?.value || '';
+    const calendarTile = previewKind === 'calendar' ? calendarTileFromInputs(tab, tileSpan('span_w'), tileSpan('span_h')) : null;
     if (type === '2') {
       const alias = document.getElementById(prefix + '_scene_alias')?.value || '';
-      iconEntity = sensorMetaCache.sceneEntities?.[alias] || '';
+      iconEntity = sceneEntityOf(alias);
     }
     const rawIcon = iconInput ? iconInput.value : '';
     let iconName = resolveIconName(
@@ -5736,6 +8367,14 @@ function syncTileRadiusControls(tabEl) {
         iconName = coverPreviewIcon(coverPreviewState, iconName);
       }
     }
+    let devicePreviewState = null;
+    if (deviceKind) {
+      devicePreviewState = parseDevicePreviewPayload(deviceDetailPayload(iconEntity));
+      if (!normalizeMdiIconName(rawIcon) && !isExplicitlyDisabledValue(rawIcon)) {
+        iconName = devicePreviewIcon(deviceKind, devicePreviewState, '', iconName);
+      }
+    }
+    if (calendarTile && !normalizeMdiIconName(rawIcon) && !isExplicitlyDisabledValue(rawIcon)) iconName = 'calendar';
     let binarySensorPreviewState = null;
     if (previewKind === 'binary_sensor') {
       binarySensorPreviewState = parseBinarySensorPreviewPayload(
@@ -5745,16 +8384,19 @@ function syncTileRadiusControls(tabEl) {
         rawIcon, binarySensorEntity, binarySensorPreviewState,
         sensorMetaCache.icons);
     }
+    if (previewKind === 'media') {
+      iconName = mediaPreviewIcon(parseMediaPreviewPayload(
+        mediaEntity ? (sensorMetaCache.mediaValues?.[mediaEntity] ?? '') : ''), iconName);
+    }
 
-    tileElem.className = 'tile';
-    if (meta.css) tileElem.classList.add(meta.css);
-    if (type === '5' && switchStyle === '1') tileElem.classList.add('switch-toggle');
+    resetTileClasses(tileElem, meta.css ? ['tile', meta.css] : ['tile']);
+    if (type === '5') applySwitchPreviewLayout(tileElem, switchStyle, halfHeight, switchUpright);
     tileElem.style.background = '';
+    delete tileElem.dataset.bgOpacity;
     tileElem.dataset.type = type;
-    tileElem.dataset.iconDisc = tileTypeHasDiscToggle(type)
-      && document.getElementById(prefix + '_tile_icon_disc')?.checked === false ? '2' : '0';
-    tileElem.dataset.iconGlow = tileTypeHasColoredIcon(type)
-      && document.getElementById(prefix + '_tile_icon_glow')?.checked === false ? '0' : '1';
+    // Every circle shows, in its icon's color (user 2026-10-11).
+    tileElem.dataset.iconDisc = '0';
+    tileElem.dataset.iconGlow = '1';
     const borderToggle = type === '8' ? '_back_tile_border'
       : (type === '9' ? '_clock_tile_border' : (type === '10' ? '_text_tile_border' : ''));
     tileElem.classList.toggle('tile-border-hidden', !!borderToggle && document.getElementById(prefix + borderToggle)?.checked === false);
@@ -5766,56 +8408,87 @@ function syncTileRadiusControls(tabEl) {
       applyTileAriaLabel(tileElem, '', type);
       if (wasActive) tileElem.classList.add('active');
       updateLayoutFromInputs(tab);
-    applyCompactSensorPreview(tileElem, type, {span_w:Number(document.getElementById(prefix + '_tile_span_w')?.value || 1),
-      span_h:Number(document.getElementById(prefix + '_tile_span_h')?.value || 1)},
-      document.getElementById(prefix + '_sensor_display_mode')?.value || 0, sensorValueFont);
+    applyCompactSensorPreview(tileElem, type, sensorLookLayout(), previewDisplayMode, sensorValueFont);
       return;
     }
 
     const defaultBg = meta.defaultBg || '#353535';
     // Tiles without their own color (or with the stored default grey) show
-    // and keep following the global default tile color.
-    const isDefaultBg = tileColorInputIsDefault(tab);
-    if (isDefaultBg) {
-      const colorInput = document.getElementById(prefix + '_tile_color');
-      if (colorInput) {
-        colorInput.value = defaultBg;
-        colorInput.dataset.bgColorDefault = '1';
-      }
-    }
+    // the global default tile color. Only the Tile color buttons change the
+    // choice: a Custom color that is still a default grey (Custom was just
+    // selected and nothing picked yet) stays Custom instead of switching back
+    // to Global and hiding the color field.
+    const isDefaultBg = tileColorInputIsDefault(tab) || !tileTypeKeepsOwnColor(type);
+    const colorInput = document.getElementById(prefix + '_tile_color');
+    if (colorInput?.dataset.bgColorDefault === '1') colorInput.value = defaultBg;
     syncTileColorMode(tab);
     const tileBg = tileBackgroundCss(meta, isDefaultBg,
-      isDefaultBg ? defaultBg : (color || defaultBg));
+      isDefaultBg ? defaultBg : (color || defaultBg), null, type);
+    tileElem.classList.toggle('tile-transparent', tileBg === 'transparent');
     if (isScreensaverTileTab(tab)) {
-      const opacity = clampInt(
-        document.getElementById('screensaver_tile_opacity')?.value,
-        0, 255, 0);
+      // One opacity for every screensaver tile (screensaver footer).
+      const opacity = screensaverTileOpacity();
       tileElem.style.background = tileBackgroundCss(meta, isDefaultBg,
         isDefaultBg ? defaultBg : (color || defaultBg), opacity);
+      tileElem.dataset.bgOpacity = String(opacity);
+      // A fully transparent card casts no shadow (apply_slot_tile_shadows).
+      tileElem.classList.toggle('screensaver-bg-clear', opacity === 0);
     } else {
       tileElem.style.background = tileBg;
     }
-    tileElem.style.removeProperty('--switch-knob-color');
-    tileElem.style.removeProperty('--switch-on-color');
-    if (type === '5' && switchStyle === '1') {
-      tileElem.style.setProperty('--switch-knob-color', tileBg);
-      tileElem.style.setProperty('--switch-on-color', '#3B82F6');
+    // The tile's surface (tile_surface): own colors and the dark design.
+    if (typeof tileSurfaceOf === 'function' && typeof applyTileSurface === 'function') {
+      const record = typeof collectIconColorRecord === 'function' ? collectIconColorRecord(prefix) : '';
+      const bgValue = isDefaultBg ? 0 : makeTileBgValue(hexToRgb(color || defaultBg));
+      // A Camera tile's head over its picture: its fixed surface on that
+      // theme's tile color (picture.h head_over_picture).
+      const cameraHead = meta.preview === 'camera' ? cameraHeadSurface(cameraPictureOptions(tab), halfHeight) : '';
+      if (cameraHead) tileElem.style.background = cameraHeadBackground(cameraHead);
+      const surface = globalThis.hometilesPreviewForcedSurface ||
+        (cameraHead ? (cameraHead === 'auto' ? '' : cameraHead) : tileSurfaceOf(tab, meta.preview || '', bgValue, record, type));
+      if (!cameraHead && tileFollowsTint(tab, meta.preview || '', bgValue, record, type)) tileElem.dataset.followTint = '1';
+      else delete tileElem.dataset.followTint;
+      // A Media tile and a tile "From icon" show the neutral grey without a
+      // tint (kNeutralIdle).
+      if (tileElem.dataset.followTint === '1' && tileFillOf(record) > 0) {
+        tileElem.dataset.neutralIdle = '1';
+      } else {
+        delete tileElem.dataset.neutralIdle;
+      }
+      surfaceDrawn = surface;
+      applyTileSurface(tileElem, surface);
+      applyFrameLine(tileElem);
+      const surfaceMode = typeof surfaceTheme === 'function' ? surfaceTheme(surface) : -1;
+      // 0 dark, 1 light, 2 a filled tile (ui_theme::kDarkTinted): its rules everywhere.
+      if (surfaceMode >= 0) globalThis.hometilesPreviewSurface = surfaceMode;
     }
 
     let html = '';
+    const locked = typeof previewTileLocked === 'function' && previewTileLocked(type, tileElem);
+    const lockIsIcon = locked && !iconName;
+    if (lockIsIcon) iconName = 'lock';
 
+    delete tileElem.dataset.ruleFill;
     if (iconName) {
       const iconRecord = typeof collectIconColorRecord === 'function' ? collectIconColorRecord(prefix) : '';
+      const ruleFill = {};
       const iconColor = previewIconColor(type, iconRecord, iconEntity, sensorMetaCache,
         binarySensorPreviewState, previewKind === 'climate'
           ? climatePreviewColor(climatePreviewState)
           : (previewKind === 'cover'
             ? coverPreviewColor(coverPreviewState)
-            : (previewKind === 'binary_sensor'
-              ? binarySensorPreviewColor(binarySensorPreviewState)
-              : '')));
+            : (deviceKind
+              ? devicePreviewColor(deviceKind, devicePreviewState)
+              : (previewKind === 'binary_sensor'
+                ? binarySensorPreviewColor(binarySensorPreviewState)
+                : (calendarTile ? calendarPreviewIconColor(calendarTile) : '')))), ruleFill);
+      if (typeof setPreviewRuleFill === 'function') setPreviewRuleFill(tileElem, ruleFill);
+      // A matching rule shows its own icon (tile_rule_icon.h); weather icons
+      // keep their own.
+      if (ruleFill.icon && previewKind !== 'weather' && !lockIsIcon) iconName = ruleFill.icon;
       const iconStyle = iconColor ? ' style="color:' + escapeHtml(iconColor) + '"' : '';
-      html += '<i class="mdi mdi-' + escapeHtml(iconName) + ' tile-icon"' + iconStyle + '></i>';
+      html += '<i class="mdi mdi-' + escapeHtml(iconName) + ' tile-icon"' + iconStyle + '>' +
+        (locked && !lockIsIcon ? PREVIEW_LOCK_MARK : '') + '</i>';
     }
 
     let displayTitle = title;
@@ -5823,37 +8496,37 @@ function syncTileRadiusControls(tabEl) {
       displayTitle = sensorMetaCache.names[cameraEntity] ||
         titleFromEntity(cameraEntity);
     }
+    if (calendarTile) displayTitle = calendarPreviewTitle(calendarTile, displayTitle);
     if (displayTitle) {
       html += '<div class="tile-title" id="' + tileId + '-title">' +
         tileTitleHtml(displayTitle) + '</div>';
     }
     applyTileAriaLabel(tileElem, displayTitle, type);
 
-    if (previewKind === 'weather') {
-      html += '<div class="tile-ghost-icon"><i class="mdi mdi-weather-partly-cloudy"></i></div>';
-    }
-    if (previewKind === 'media') {
-      html += '<div class="tile-ghost-icon"><i class="mdi mdi-music"></i></div>';
-    }
     if (previewKind === 'climate') {
-      const climateSpanW = document.getElementById(
-        prefix + '_tile_span_w')?.value || 1;
-      const climateSpanH = document.getElementById(
-        prefix + '_tile_span_h')?.value || 1;
-      html += climatePreviewSlots(
-        climatePreviewState, climateSpanW, climateSpanH,
-        currentClimateSlotConfig(tab),
-        currentClimateTargetLayouts(tab),
-        currentClimateGeometry(tab));
+      const climateSpanW = tileSpan('span_w');
+      const climateSpanH = tileSpan('span_h');
+      // Layout "with value" and half height: the value pair beside the
+      // disc; half height has no mini fields.
+      const climateHalf = Number(climateSpanH) === 0.5;
+      const climateValue = document.getElementById(prefix + '_climate_view')?.value === '1';
+      tileElem.classList.toggle('climate-header', climateValue && !climateHalf);
+      if (climateHalf || climateValue) {
+        html += '<div class="tile-value tile-switch-state">' +
+          unitTextHtml(climatePreviewHeaderText(climatePreviewState)) + '</div>';
+      }
+      if (!climateHalf) {
+        html += climatePreviewSlots(
+          climatePreviewState, climateSpanW, climateSpanH,
+          currentClimateSlotConfig(tab),
+          currentClimateTargetLayouts(tab),
+          currentClimateGeometry(tab),
+          climateValue);
+      }
     }
-    if (previewKind === 'cover') {
-      const value = coverPreviewState?.position !== null &&
-                    coverPreviewState?.position !== undefined
-        ? String(coverPreviewState.position) + '%' : '--%';
-      html += '<div class="tile-value tile-cover-value">' +
-        escapeHtml(coverPreviewStateText(coverPreviewState)) +
-        '<br>' + escapeHtml(value) + '</div>';
-    }
+    if (previewKind === 'cover') html += coverPreviewExtraHtml(coverPreviewState, halfHeight);
+    if (deviceKind) html += devicePreviewExtraHtml(deviceKind, devicePreviewState, halfHeight);
+    if (calendarTile) html += calendarPreviewExtraHtml(calendarTile);
     if (previewKind === 'binary_sensor') {
       html += '<div class="tile-value tile-binary-sensor-value ' + (Number(sensorValueFont) ? sensorValueClass : '') + '" id="' +
         tileId + '-value">' +
@@ -5861,7 +8534,7 @@ function syncTileRadiusControls(tabEl) {
         '</div>';
     }
 
-    if (isEditablePreview(previewKind)) html += '<div class="tile-value tile-editable-value ' + sensorValueClass + '">' + escapeHtml(editablePreviewText(iconEntity, previewKind)) + '</div>';
+    if (isEditablePreview(previewKind)) html += '<div class="tile-value tile-editable-value ' + sensorValueClass + '">' + editablePreviewHtml(iconEntity, previewKind) + '</div>';
 
     if (previewKind === 'sensor') {
       const entitySelect = document.getElementById(prefix + (isEnergyType ? '_energy_entity' : '_sensor_entity'));
@@ -5886,11 +8559,27 @@ function syncTileRadiusControls(tabEl) {
         Number(document.getElementById(prefix + '_clock_date_font')?.value || 20));
       const clockTimeFormat = document.getElementById(prefix + '_clock_time_format')?.value || '0';
       const clockDateFormat = document.getElementById(prefix + '_clock_date_format')?.value || '0';
-      if (flags & 1) html += '<div class="tile-clock-time" ' + getClockPreviewTextStyle(clockTimeFont, 40, '#fff') + '>' + getClockPreviewTime(clockTimeFormat) + '</div>';
-      if (flags & 2) html += '<div class="tile-clock-date" ' + getClockPreviewTextStyle(clockDateFont, 24, '#fff') + '>' + getClockPreviewDate(clockDateFormat) + '</div>';
+      const clockWeekday = Number(document.getElementById(prefix + '_clock_weekday')?.value || 0);
+      applyClockPreviewAlign(tileElem, document.getElementById(prefix + '_clock_align')?.value || 0);
+      let clockLines = '';
+      if (flags & 1) clockLines += '<div class="tile-clock-time" ' + getClockPreviewTextStyle(clockTimeFont, 40, panelRoleHex('text', '#fff')) + '>' + clockDigitsHtml(getClockPreviewTime(clockTimeFormat)) + '</div>';
+      if ((flags & 2) || clockWeekday) clockLines += '<div class="tile-clock-date" ' + getClockPreviewTextStyle(clockDateFont, 20, panelRoleHex('text', '#fff')) + '>' + clockDigitsHtml(getClockPreviewDate(clockDateFormat, clockWeekday, (flags & 2) !== 0)) + '</div>';
+      // The analog and the wall clock (grid-preview.js, layoutClockFacePreview).
+      const clockStyle = Number(document.getElementById(prefix + '_clock_style')?.value || 0);
+      tileElem.dataset.clockOptions = String(packClockDateOptions(clockDateFormat, clockWeekday, false,
+        document.getElementById(prefix + '_clock_align')?.value || 0, clockStyle));
+      if (clockStyle) {
+        const packed = packClockDateOptions(clockDateFormat, clockWeekday, false, 0, clockStyle,
+          document.getElementById(prefix + '_clock_dial')?.value || 0, document.getElementById(prefix + '_clock_hands')?.value || 0);
+        html += '<svg class="tile-clock-face" data-options="' + packed + '"></svg><div class="tile-clock-face-text">' + clockLines + '</div>';
+      } else {
+        html += clockLines;
+      }
     }
 
     if (previewKind === 'text') {
+      applyTextPreviewAlign(tileElem, packTextTileOptions(document.getElementById(prefix + '_text_align')?.value || 0,
+        document.getElementById(prefix + '_text_valign')?.value || 0));
       const textValue = document.getElementById(prefix + '_text_value')?.value || '';
       if (textValue) {
         const textFont = document.getElementById(prefix + '_text_value_font')?.value || '0';
@@ -5900,17 +8589,66 @@ function syncTileRadiusControls(tabEl) {
       }
     }
 
-    if (previewKind === 'switch' && switchStyle === '1') {
-      html += '<div class="tile-switch" id="' + tileId + '-switch"><div class="tile-switch-knob"></div></div>';
-    }
+    if (previewKind === 'switch') html += switchPreviewExtraHtml(switchStyle, halfHeight);
 
     html += getTileResizeHandlesHtml(type);
+    // A title or icon moves the clock down (clock/renderer.cpp).
+    if (type === '9') tileElem.classList.toggle('clock-has-header', !!(displayTitle || iconName));
     tileElem.innerHTML = html;
+    if (previewKind === 'weather') {
+      const iconRecord = typeof collectIconColorRecord === 'function' ? collectIconColorRecord(prefix) : '';
+      applyWeatherPreview(tileElem, applyWeatherSensorOverrides(parseWeatherPreviewPayload(
+        weatherEntity ? (sensorMetaCache.weatherValues?.[weatherEntity] ?? '') : ''),
+        document.getElementById(prefix + '_weather_temperature_sensor')?.value || '',
+        document.getElementById(prefix + '_weather_humidity_sensor')?.value || '',
+        sensorMetaCache.values, sensorMetaCache.units), {
+        col: Number(tileElem.dataset.col || 0),
+        span_w: tileSpan('span_w'),
+        span_h: tileSpan('span_h'),
+        sensor_display_mode: document.getElementById(prefix + '_weather_colored_icons')?.checked === false ? 1 : 0
+      }, iconName, previewIconColor(type, iconRecord, weatherEntity, sensorMetaCache, null, ''));
+    }
+    if (previewKind === 'media') {
+      applyMediaPreview(tileElem, parseMediaPreviewPayload(
+        mediaEntity ? (sensorMetaCache.mediaValues?.[mediaEntity] ?? '') : ''), {
+        sensor_entity: mediaEntity,
+        span_w: tileSpan('span_w'),
+        span_h: tileSpan('span_h')
+      }, iconName, mediaEntity ? (sensorMetaCache.names?.[mediaEntity] || '') : '');
+    }
+    if (previewKind === 'power_flow' && typeof applyPowerFlowPreview === 'function') {
+      applyPowerFlowPreview(tileElem, {
+        flow_entities: powerFlowRecordFromInputs(prefix),
+        key_code: powerFlowOptionsFromInputs(prefix),
+        span_w: tileSpan('span_w'),
+        span_h: tileSpan('span_h'),
+        title,
+        icon_name: iconInput?.value || ''
+      }, sensorMetaCache);
+    } else {
+      tileElem.classList.remove('power-flow-tile', 'power-flow-no-card');
+    }
     if (typeof applyTileRulesTint === 'function' && typeof collectIconColorRecord === 'function' &&
         typeof iconColorOwnEntity === 'function') {
       applyTileRulesTint(tileElem, type, collectIconColorRecord(prefix), iconColorOwnEntity(prefix, String(type)), sensorMetaCache);
     }
+    if (previewKind === 'media' && typeof collectIconColorRecord === 'function') {
+      applyMediaCoverTint(tileElem, collectIconColorRecord(prefix), sensorMetaCache.mediaCoverColors?.[mediaEntity] || '');
+      if (tileElem.dataset.neutralIdle === '1' && tileElem.dataset.surface !== 'jewel') {
+        setTileTintBackground(tileElem, '#FFFFFF', 0, true);
+      }
+    }
     applyIconDiscTint(tileElem);
+    if (previewKind === 'camera') {
+      applyCameraPicturePreview(tileElem, cameraPictureOptions(tab), halfHeight, {
+        col: Number(tileElem.dataset.col || 0),
+        span_w: tileSpan('span_w')});
+    }
+    if (previewKind === 'cover') applyCoverPreview(tileElem, coverPreviewState, halfHeight);
+    if (deviceKind) {
+      applyDevicePreview(tileElem, deviceKind, devicePreviewState, halfHeight, fanUpright,
+        {w: tileSpan('span_w'), h: tileSpan('span_h')});
+    }
     if (wasActive) tileElem.classList.add('active');
     if (typeWas !== type && wasActive) {
       tileElem.classList.add('active');
@@ -5919,13 +8657,38 @@ function syncTileRadiusControls(tabEl) {
     }
     if (type === '5') updateSwitchValuePreview(tab);
     updateLayoutFromInputs(tab);
-    applyCompactSensorPreview(tileElem, type, {span_w:Number(document.getElementById(prefix + '_tile_span_w')?.value || 1),
-      span_h:Number(document.getElementById(prefix + '_tile_span_h')?.value || 1)},
-      document.getElementById(prefix + '_sensor_display_mode')?.value || 0, sensorValueFont);
+    applyCompactSensorPreview(tileElem, type, sensorLookLayout(), previewDisplayMode, sensorValueFont);
+    // The analog and the wall clock place their face once the tile has its
+    // size and classes again (updateLayoutFromInputs, applyCompactSensorPreview):
+    // before them the tile measured 1 x 1 in the middle of its rebuild, and the
+    // resize observer saw no change at the end of the task (user 2026-10-12:
+    // a click on the clock shrank its face into the corner).
+    if (previewKind === 'clock' && typeof layoutClockFacePreview === 'function') layoutClockFacePreview(tileElem);
     if (previewKind === 'climate' &&
+        tileSpan('span_h') !== 0.5 &&
         typeof mountClimateMiniEditor === 'function') {
       mountClimateMiniEditor(tab);
       syncClimateSlotFields(tab);
+    }
+    // The automatic icon of the head follows what the preview draws.
+    if (typeof renderTileIconButton === 'function') renderTileIconButton(tab);
+    // A folder's tab and its page's head follow its tile's title and icon
+    // while typing (the panel names the folder after its tile; user
+    // 2026-10-14: they waited for the save, a folder not opened yet even for
+    // its page from the panel).
+    if (type === '4' && typeof updateFolderTabUi === 'function') {
+      const folder = Number(document.getElementById(prefix + '_navigate_target')?.value || tileElem.dataset.navigateTarget || 0);
+      if (folder > 0) updateFolderTabUi(folder, title.replace(/\s*\n\s*/g, ' '), iconInput?.value || '');
+    }
+    } finally {
+      globalThis.hometilesPreviewSurface = surfaceSaved;
+    }
+    // Its tint changed the surface: drawn again on it from the start.
+    const tileElem = currentTileIndex >= 0 ? document.getElementById(tab + '-tile-' + currentTileIndex) : null;
+    if (!globalThis.hometilesPreviewForcedSurface && surfaceDrawn !== null && surfaceDrawn !== 'jewel' &&
+        tileElem?.dataset.surface === 'jewel') {
+      globalThis.hometilesPreviewForcedSurface = 'jewel';
+      try { updateTilePreview(tab); } finally { delete globalThis.hometilesPreviewForcedSurface; }
     }
   }
 
@@ -5947,10 +8710,6 @@ function syncTileRadiusControls(tabEl) {
         document.getElementById(prefix + '_tile_icon').value = data.icon_name || '';
         const colorMeta = getTileTypeMeta(data.type || 0);
         setTileColorInputFromStored(tab, data.bg_color, colorMeta.defaultBg || '#2A2A2A');
-        if (isScreensaverTileTab(tab)) {
-          const opacity = document.getElementById('screensaver_tile_opacity');
-          if (opacity) opacity.value = String(data.background_opacity ?? 0);
-        }
         const colEl = document.getElementById(prefix + '_tile_col');
         const rowEl = document.getElementById(prefix + '_tile_row');
         const spanWEl = document.getElementById(prefix + '_tile_span_w');
@@ -5979,7 +8738,7 @@ function syncTileRadiusControls(tabEl) {
         }
         const meta = colorMeta;
         callTypeHandler(meta, 'load', prefix, data);
-        loadIconDiscFields(prefix, data);
+        syncIconDiscFields(prefix);
         refreshEntityOptionLists(prefix);
         syncGaugeUi(tab);
         const tileElem = document.getElementById(tab + '-tile-' + index);
@@ -6039,7 +8798,8 @@ function syncTileRadiusControls(tabEl) {
     const typeValue = typeEl ? String(typeEl.value) : '0';
     const meta = getTileTypeMeta(typeValue);
     const locked = !!meta.locked;
-    if (typeEl) typeEl.disabled = locked;
+    // Fixed types (Settings, Back) and a folder with tiles (applyFolderTypeLock).
+    if (typeEl) typeEl.disabled = locked || typeEl.dataset.folderLocked === '1';
     if (navSelect) navSelect.disabled = (!meta.fields || meta.fields !== 'navigate' || locked);
     if (noteEl) {
       if (typeValue === '7') noteEl.textContent = t('settingsTileFixed');
@@ -6056,15 +8816,15 @@ function syncTileRadiusControls(tabEl) {
     const spanWEl = document.getElementById(prefix + '_tile_span_w');
     const spanHEl = document.getElementById(prefix + '_tile_span_h');
     if (spanWEl) {
-      spanWEl.min = String(mediaType ? Math.min(MEDIA_TILE_MIN_SPAN, GRID_COLS) : 1);
-      spanWEl.max = String(mediaType ? Math.min(MEDIA_TILE_MAX_SPAN, GRID_COLS) : GRID_COLS);
+      spanWEl.min = String(mediaType ? Math.min(MEDIA_TILE_MIN_SPAN, placeCols(tab)) : 1);
+      spanWEl.max = String(mediaType ? Math.min(MEDIA_TILE_MAX_SPAN, placeCols(tab)) : placeCols(tab));
     }
     if (spanHEl) {
-      const availableRows = GRID_ROWS - firstAllowedGridRow(tab);
+      const availableRows = placeRows(tab) - firstAllowedGridRow(tab);
       spanHEl.min = String(mediaType ? Math.min(MEDIA_TILE_MIN_SPAN, availableRows) : 1);
       spanHEl.max = String(mediaType
         ? Math.min(MEDIA_TILE_MAX_SPAN, availableRows)
-        : GRID_ROWS);
+        : placeRows(tab));
     }
     document.querySelectorAll('#' + prefix + 'Settings .type-fields').forEach(f => f.classList.remove('show'));
     const meta = getTileTypeMeta(typeValue);
@@ -6083,12 +8843,65 @@ function syncTileRadiusControls(tabEl) {
     syncFolderPinControls(tab);
     syncTileSizePolicy(tab);
     syncIconDiscFields(tab);
+    placeTileEntityField(tab);
+    placeTileTypeParts(tab);
+    syncTileAdvancedCaption(tab);
+  }
+
+  // Type options marked data-tile-place (Power flow, user 2026-10-26) move
+  // to their place in the settings: "head" under Title and Icon, "top" at the
+  // start of the settings, "color" into Color. They return to their type
+  // fields when another type is shown. The shown type may also name the Auto
+  // title and icon of a tile without an entity of its own.
+  function placeTileTypeParts(tab) {
+    const places = ['head', 'top', 'color'];
+    for (const place of places) {
+      const slot = document.getElementById(tab + '_tile_' + place + '_slot');
+      for (const part of [...(slot?.children || [])]) document.getElementById(part.dataset.placeHome || '')?.append(part);
+    }
+    const fields = document.querySelector('#' + tab + 'Settings .type-fields.show');
+    for (const part of fields?.querySelectorAll(':scope > [data-tile-place]') || []) {
+      const slot = places.includes(part.dataset.tilePlace) && document.getElementById(tab + '_tile_' + part.dataset.tilePlace + '_slot');
+      if (!slot) continue;
+      part.dataset.placeHome = fields.id;
+      slot.append(part);
+    }
+    const typeAuto = (element, key, value) => {
+      if (!element) return;
+      if (value) {
+        element.dataset[key] = value;
+        element.dataset.typeAuto = '1';
+      } else if (element.dataset.typeAuto) {
+        delete element.dataset[key];
+        delete element.dataset.typeAuto;
+      }
+    };
+    typeAuto(document.getElementById(tab + '_tile_title_auto'), 'autoTitle', fields?.dataset.autoTitle || '');
+    typeAuto(document.getElementById(tab + '_tile_icon'), 'autoIcon', fields?.dataset.autoIcon || '');
+    if (typeof refreshTileIconButtons === 'function') refreshTileIconButtons(tab);
+  }
+
+  // "Advanced" only above options the type shows (user 2026-10-11): its
+  // visible fields, or the half-size note.
+  function syncTileAdvancedCaption(tab) {
+    const prefix = tab;
+    const caption = document.getElementById(prefix + '_tile_group_advanced');
+    if (!caption) return;
+    const note = document.getElementById(prefix + '_tile_size_note');
+    const fields = document.querySelector('#' + prefix + 'Settings .type-fields.show');
+    const shown = el => !el.hidden && el.type !== 'hidden' && !el.closest('.hidden, [hidden]') &&
+      (!el.isConnected || !el.offsetParent || el.getClientRects().length > 0);
+    const any = (note && !note.hidden) ||
+      !!fields && [...fields.querySelectorAll('input, select, textarea, button')].some(shown);
+    caption.classList.toggle('hidden', !any);
   }
 
   function syncTileSizePolicy(tab) {
     const typeEl = document.getElementById(tab + '_tile_type');
     if (!typeEl) return;
-    const h = Number(document.getElementById(tab + '_tile_span_h')?.value || 1);
+    // A page's tile is one cell (page-fields.js).
+    const h = typeof selectedPageTile === 'function' && selectedPageTile(tab)
+      ? 1 : Number(document.getElementById(tab + '_tile_span_h')?.value || 1);
     // Half a row high only suits the half-size types.
     const halfHeight = h < 1;
     // A new half-height tile may still take a larger type when it can grow.
@@ -6108,7 +8921,7 @@ function syncTileRadiusControls(tabEl) {
       if (input) input.step = '0.5';
     }
     const row = document.getElementById(tab + '_tile_row');
-    if (row) row.max = String(GRID_ROWS + (compact && h === 0.5 ? 0.5 : 0));
+    if (row) row.max = String(placeRows(tab) + (compact && h === 0.5 ? 0.5 : 0));
     const height = document.getElementById(tab + '_tile_span_h');
     if (height && compact) height.min = '0.5';
     const note = document.getElementById(tab + '_tile_size_note');
@@ -6120,6 +8933,8 @@ function syncTileRadiusControls(tabEl) {
   function showNotification(message, success = true) {
     const notification = document.getElementById('notification');
     if (!notification) return;
+    // The layout window keeps the editor's saves to itself (layout-window.js).
+    if (success && typeof layoutWindowOpen === 'function' && layoutWindowOpen()) return;
     // A single shared timer. Every call used to schedule its own, so the timeout
     // of an earlier message hid the next one long before its three seconds were
     // up - easy to hit because autosave reports on every field change.
@@ -6147,21 +8962,29 @@ function syncTileRadiusControls(tabEl) {
   function resetAllTypeFields(tab) {
     const metas = Object.values(TILE_TYPE_REGISTRY || {});
     metas.forEach(meta => callTypeHandler(meta, 'reset', tab));
-    resetIconDiscFields(tab);
   }
 
+  // A folder that still contains tiles keeps its type: the whole type list
+  // is greyed out (user 2026-10-12: choosing Empty deleted a whole folder
+  // with its tiles at once); it goes only by the Delete button after a
+  // question. applySpecialTileUiState keeps the lock.
   function applyFolderTypeLock(tab, locked) {
     const sel = document.getElementById(tab + '_tile_type');
-    if (sel) {
-      for (const opt of sel.options) {
-        // Keeping the folder and emptying or deleting it stay allowed; every
-        // other type is locked while the folder still contains tiles.
-        opt.disabled = locked && opt.value !== '4' && opt.value !== '0';
-      }
+    if (!sel) return;
+    sel.dataset.folderLocked = locked ? '1' : '';
+    sel.disabled = locked || !!getTileTypeMeta(sel.value).locked;
+    // Why it is grey, on hover (user 2026-10-12): on the field and its box,
+    // since a disabled field gets no pointer of its own in every browser.
+    const tip = locked ? t('folderTypeLocked') : '';
+    for (const el of [sel, sel.parentElement]) {
+      if (!el) continue;
+      if (tip) el.title = tip;
+      else el.removeAttribute('title');
     }
-    const hint = document.getElementById(tab + '_tile_type_hint');
-    if (hint) hint.classList.toggle('hidden', !locked);
   }
+
+  // Folders whose deletion was confirmed (tab:index): their save says so.
+  const confirmedFolderDeletes = new Set();
 
   function resetTile(tab) {
     if (currentTileIndex === -1) return;
@@ -6170,21 +8993,33 @@ function syncTileRadiusControls(tabEl) {
       showNotification(t('tileCannotDelete'), false);
       return;
     }
+    // A folder with tiles in it: the question names it, its tiles go too.
+    const stored = getTilesData(tab)?.[currentTileIndex];
+    if (Number(stored?.type) === 4 && stored.folder_empty === false) {
+      const name = stored.title || t('folderPrefix').trim();
+      if (!confirm(tf('deleteFolderConfirm', { name }))) return;
+      confirmedFolderDeletes.add(tab + ':' + currentTileIndex);
+    }
+    // A page's tile: its field (page-fields.js).
+    const pageSlot = tab === 'folder0' && Number(stored?.type) === 4
+      ? pageSlotIds().indexOf(Number(stored.navigate_target)) : -1;
     const prefix = tab;
     document.getElementById(prefix + '_tile_type').value = '0';
     document.getElementById(prefix + '_tile_title').value = '';
     document.getElementById(prefix + '_tile_icon').value = '';
     setTileColorInputFromStored(tab, 0, '#2A2A2A');
-    if (isScreensaverTileTab(tab)) {
-      const opacity = document.getElementById('screensaver_tile_opacity');
-      if (opacity) opacity.value = '0';
-    }
     resetAllTypeFields(tab);
     syncGaugeUi(tab);
     updateTileType(tab);
     updateTilePreview(tab);
     updateDraft(tab);
     scheduleAutoSave(tab);
+    // A deleted page leaves its field free and picked (user 2026-10-22: an
+    // empty selected tile stayed in it). The save keeps its own tile index.
+    if (pageSlot >= 0) {
+      layoutTiles(tab, getTilesData(tab));
+      selectPageField(pageSlot);
+    }
   }
 
   function deleteFolder(tab) {
@@ -6205,6 +9040,7 @@ function syncTileRadiusControls(tabEl) {
       .then(data => {
         if (data.success) {
           showNotification(t('folderDeleted'));
+          forgetFolderTabSessionFragment(folderId);
           setTimeout(() => location.reload(), 500);
         } else {
           showNotification(data.error || t('deleteFailed'), false);
@@ -6245,6 +9081,34 @@ function syncTileRadiusControls(tabEl) {
       });
   }
 
+  // A new folder's title and icon as the panel saved them ("Folder 17" and
+  // the folder icon, user 2026-10-22: its tab showed them, the tile had
+  // none): into the tile, a newer draft and the editor wherever still empty.
+  function fillFolderName(tab, index, data) {
+    const title = String(data.title || '');
+    const icon = String(data.icon_name || '');
+    const stored = getTilesData(tab)?.[index];
+    if (stored) {
+      if (!stored.title) stored.title = title;
+      if (!stored.icon_name) stored.icon_name = icon;
+    }
+    const draft = drafts[tab]?.[index];
+    if (draft) {
+      if (!draft.title) draft.title = title;
+      if (!draft.icon) draft.icon = icon;
+    }
+    if (currentTileTab === tab && currentTileIndex === index) {
+      const titleInput = document.getElementById(tab + '_tile_title');
+      if (titleInput && !titleInput.value) titleInput.value = title;
+      const iconInput = document.getElementById(tab + '_tile_icon');
+      if (iconInput && !iconInput.value) iconInput.value = icon;
+      if (typeof refreshTileIconButtons === 'function') refreshTileIconButtons(tab);
+      updateTilePreview(tab);
+    } else if (stored) {
+      renderTileFromData(tab, index, stored, sensorMetaCache);
+    }
+  }
+
   function saveTile(tab, silent = false, tileIndexOverride = null) {
     const tileIndex = tileIndexOverride !== null ? tileIndexOverride : currentTileIndex;
     if (tileIndex === -1) return;
@@ -6257,9 +9121,6 @@ function syncTileRadiusControls(tabEl) {
       queueSaveAfterFlight(tab, tileIndex, silent);
       return;
     }
-    const tiles = getTilesData(tab);
-    const previousTile = Array.isArray(tiles) ? tiles[tileIndex] : null;
-    const previousType = previousTile ? Number(previousTile.type) : NaN;
     const snapshot = getTileSnapshotForSave(tab, tileIndex);
     if (!snapshot) return;
     const formData = new FormData();
@@ -6276,6 +9137,9 @@ function syncTileRadiusControls(tabEl) {
     formData.append('span_w', layout.span_w);
     formData.append('span_h', layout.span_h);
     formData.append('type', snapshot.type || '0');
+    if ((snapshot.type || '0') === '0' && confirmedFolderDeletes.delete(tab + ':' + tileIndex)) {
+      formData.append('delete_folder', '1');
+    }
     formData.append('title', snapshot.title || '');
     formData.append('icon_name', snapshot.icon || '');
     if (snapshotBgColorIsDefault(snapshot)) {
@@ -6289,6 +9153,11 @@ function syncTileRadiusControls(tabEl) {
       formData.append(key, value);
     }
     applySnapshotToTileData(tab, tileIndex, snapshot);
+    // The layout window keeps the editor's places to itself (layout-window.js).
+    if (typeof layoutWindowOpen === 'function' && layoutWindowOpen()) {
+      clearDraft(tab, tileIndex);
+      return;
+    }
     const requestId = ++saveRequestSeq;
     const draftRev = Number(snapshot._rev || 0);
     markLatestSaveRequest(tab, tileIndex, requestId);
@@ -6299,6 +9168,13 @@ function syncTileRadiusControls(tabEl) {
         if (!isLatestSaveRequest(tab, tileIndex, requestId)) return;
         if (data.success) {
           if (!silent) showNotification(t('tileSaved'));
+          // A new tile's stable ID from the panel: its places are kept by it
+          // (the layout window looked a new folder's up without it).
+          if (data.view_id !== undefined && tilesData[tab] && tilesData[tab][tileIndex] &&
+              Number(tilesData[tab][tileIndex].type || 0) !== 0) {
+            tilesData[tab][tileIndex].view_id = Number(data.view_id) || 0;
+          }
+          if (typeValue === '4' && data.title !== undefined) fillFolderName(tab, tileIndex, data);
           const currentDraft = drafts[tab] && drafts[tab][tileIndex];
           if (currentDraft && currentDraft._dirty && Number(currentDraft._rev || 0) !== draftRev) {
             queueSaveAfterFlight(tab, tileIndex, true);
@@ -6311,6 +9187,11 @@ function syncTileRadiusControls(tabEl) {
               ? data.navigate_target
               : (snapshot.navigate_target || '0'));
             snapshot.navigate_target = resolvedNavTarget;
+            // The tile knows its folder at once (user 2026-10-12: a new folder
+            // went into a page slot only after a few clicks; an autosave
+            // draws nothing again).
+            const tileEl = document.getElementById(tab + '-tile-' + tileIndex);
+            if (tileEl) tileEl.dataset.navigateTarget = resolvedNavTarget;
             if (tilesData[tab] && tilesData[tab][tileIndex]) {
               tilesData[tab][tileIndex].navigate_target = parseInt(resolvedNavTarget, 10) || 0;
               tilesData[tab][tileIndex].folder_pin_enabled =
@@ -6320,8 +9201,8 @@ function syncTileRadiusControls(tabEl) {
             }
             syncFolderPinControls(tab);
             const navTargetNum = parseInt(resolvedNavTarget, 10);
-            const titleVal = snapshot.title || '';
-            const iconVal = snapshot.icon || '';
+            const titleVal = tilesData[tab]?.[tileIndex]?.title || snapshot.title || '';
+            const iconVal = tilesData[tab]?.[tileIndex]?.icon_name || snapshot.icon || '';
             ensureFolderTabUi(navTargetNum, titleVal, iconVal).then(ok => {
               restoreCurrentTileSelectionUi();
               if (!ok) {
@@ -6330,7 +9211,12 @@ function syncTileRadiusControls(tabEl) {
               }
             });
           }
-          if (previousType === 4 && typeValue === '0') {
+          // A deleted folder's tab goes (user 2026-10-22: it stayed). The
+          // editor showed the tile empty before this save, so the panel says
+          // which folder went; its kept tab markup goes too (IDs come back).
+          const deletedFolder = Number(data.folder_deleted) || 0;
+          if (deletedFolder > 0) {
+            forgetFolderTabSessionFragment(deletedFolder);
             persistSelectedTileState();
             setTimeout(() => location.reload(), 400);
           }
@@ -6402,6 +9288,30 @@ function syncTileRadiusControls(tabEl) {
     };
   }
 
+  // Whether the Settings tile is hidden, and the parked tile then: the
+  // import restores both (issue #70). The page holds them in the Home tab's
+  // parking slot, rendered from the device config.
+  // The Settings tile as the panel stores it (/api/layouts settings), like
+  // every other tile (user 2026-10-22: the export took the Web Admin's own
+  // picture of it, a place of the shown layout beside the panel's stored
+  // ones): hidden or not, and the parked tile's look, size and classic place.
+  function exportSettingsTileState(layoutData) {
+    const settings = layoutData?.success ? layoutData.settings : null;
+    if (!settings || typeof settings.hidden !== 'boolean') return undefined;
+    if (!settings.hidden) return { hidden: false };
+    const tile = settings.tile || {};
+    return {
+      hidden: true,
+      title: String(tile.title || ''),
+      icon_name: String(tile.icon_name || ''),
+      bg_color: Number(tile.bg_color || 0),
+      col: Number(tile.col || 0),
+      row: Number(tile.row || 0),
+      span_w: Number(tile.span_w || 1),
+      span_h: Number(tile.span_h || 1)
+    };
+  }
+
   async function exportTilesConfig() {
     try {
       const foldersRequest = fetch('api/folders').then(async res => {
@@ -6421,8 +9331,9 @@ function syncTileRadiusControls(tabEl) {
         if (!res.ok || !data?.success) throw new Error('Screensaver config export failed');
         return data;
       });
+      // The classic places, like the folders' (screensaver_places.h).
       const screensaverGridRequest = fetch(
-        'api/tiles?folder=' + encodeURIComponent(SCREENSAVER_FOLDER_ID)
+        'api/tiles?folder=' + encodeURIComponent(SCREENSAVER_FOLDER_ID) + '&layout=classic'
       ).then(async res => {
         const data = await res.json();
         if (!res.ok || !Array.isArray(data)) throw new Error('Screensaver grid export failed');
@@ -6436,9 +9347,13 @@ function syncTileRadiusControls(tabEl) {
       const [folders, screensaverData, screensaverGrid] = await Promise.all([
         foldersRequest, screensaverConfigRequest, screensaverGridRequest
       ]);
+      // The tiles with their classic places whatever layout is shown; the
+      // other layouts' places come with the layout file (tile_layouts.h).
+      const layoutsRequest = fetch('api/layouts', {cache: 'no-store'})
+        .then(res => res.ok ? res.json() : null).catch(() => null);
       const tilesLists = await Promise.all(folders.map(async folder => {
         const response = await fetch(
-          'api/tiles?folder=' + encodeURIComponent(folder.id));
+          'api/tiles?folder=' + encodeURIComponent(folder.id) + '&layout=classic');
         const data = await response.json();
         if (!response.ok || !Array.isArray(data)) {
           throw new Error('Folder grid export failed');
@@ -6456,12 +9371,27 @@ function syncTileRadiusControls(tabEl) {
         grids[String(folder.id)] =
           Array.isArray(tilesLists[idx]) ? tilesLists[idx] : [];
       });
+      const layoutData = await layoutsRequest;
 
       const payload = {
         version: 3,
         exported_at: new Date().toISOString(),
         folders: folders,
         grids: grids,
+        settings_tile: exportSettingsTileState(layoutData),
+        // Every layout goes with the tiles (user 2026-10-21): the bar and
+        // upright places with the pages, the screensaver clock and where
+        // Settings is parked per layout. Only a panel with the same screen
+        // takes them back.
+        layouts: layoutData?.success ? {
+          screen_width: LAYOUTS.classic.screenW,
+          screen_height: LAYOUTS.classic.screenH,
+          active: layoutData.stored,
+          places: layoutData.places,
+          clock: layoutData.clock,
+          settings_parked: layoutData.settings?.parked,
+          parked_settings_view: layoutData.settings?.tile?.view_id
+        } : undefined,
         screensaver: {
           version: 2,
           config: buildScreensaverExportConfig(screensaverData),
@@ -6489,19 +9419,67 @@ function syncTileRadiusControls(tabEl) {
     input.click();
   }
 
+  // The import's progress under its buttons, like the firmware update's
+  // (ota.js): a line and a bar that stay until the import ends; the end and
+  // an error stay readable. Every tile written or cleared and every layout
+  // saved is a step; the total is counted before anything is written.
+  let importProgress = null;
+
+  function setImportProgress(message, phase = 'idle', tone = '', percent = null) {
+    const status = document.getElementById('tile_import_status');
+    const progress = document.getElementById('tile_import_progress');
+    const bar = document.getElementById('tile_import_progress_bar');
+    if (status) {
+      status.textContent = message || '';
+      status.classList.remove('error', 'success');
+      if (tone === 'error' || tone === 'success') status.classList.add(tone);
+    }
+    if (progress) {
+      progress.classList.toggle('is-hidden', phase === 'idle');
+      progress.setAttribute('aria-hidden', phase === 'idle' ? 'true' : 'false');
+    }
+    if (bar) bar.style.width = (phase === 'done' ? 100 : Math.max(0, Math.min(100, percent || 0))) + '%';
+    for (const id of ['tile_export_btn', 'tile_import_btn']) {
+      const button = document.getElementById(id);
+      if (button) button.disabled = phase === 'busy';
+    }
+  }
+
+  function showImportStep() {
+    if (!importProgress) return;
+    const {done, total} = importProgress;
+    setImportProgress(t('importProgress').replace('{done}', done).replace('{total}', total), 'busy', '',
+                      total ? (done * 100) / total : 0);
+  }
+
+  // One step done; a step the count did not foresee (a folder the export
+  // shares with the panel) makes the total grow with it instead of passing it.
+  function importStep() {
+    if (!importProgress) return;
+    importProgress.done++;
+    if (importProgress.done > importProgress.total) importProgress.total = importProgress.done;
+    showImportStep();
+  }
+
   function importTilesConfig(tab, files) {
     if (!files || !files.length) return;
     const file = files[0];
     const reader = new FileReader();
     reader.onload = async () => {
+      let payload = null;
       try {
-        const payload = JSON.parse(reader.result);
-        await importTilesPayload(payload);
+        payload = JSON.parse(reader.result);
       } catch (e) {
         showNotification(t('importInvalidJson'), false);
+        setImportProgress(t('importInvalidJson'), 'idle', 'error');
+        return;
       }
+      await importTilesPayload(payload);
     };
-    reader.onerror = () => showNotification(t('importFailed'), false);
+    reader.onerror = () => {
+      showNotification(t('importFailed'), false);
+      setImportProgress(t('importFailed'), 'idle', 'error');
+    };
     reader.readAsText(file);
   }
 
@@ -6521,20 +9499,23 @@ function syncTileRadiusControls(tabEl) {
   }
 
   async function fetchTilesForImport(folderId) {
-    const res = await fetch('api/tiles?folder=' + encodeURIComponent(folderId));
+    const res = await fetch('api/tiles?folder=' + encodeURIComponent(folderId) + '&layout=classic');
     if (!res.ok) throw new Error('Tile fetch failed');
     const data = await res.json();
     return Array.isArray(data) ? data : [];
   }
 
   function buildEmptyImportTile(index) {
+    // Entries behind the classic cells start over at the first cell, like the
+    // firmware's defaults (grid_slots.h): every place lies on the grid.
+    const cell = index % (GRID_COLS * GRID_ROWS);
     return {
       type: 0,
       title: '',
       icon_name: '',
       bg_color: 0,
-      col: index % GRID_COLS,
-      row: Math.floor(index / GRID_COLS),
+      col: cell % GRID_COLS,
+      row: Math.floor(cell / GRID_COLS),
       span_w: 1,
       span_h: 1
     };
@@ -6546,6 +9527,9 @@ function syncTileRadiusControls(tabEl) {
       const sourceId = parseInt(sourceFolder && sourceFolder.id, 10);
       const sourceParentId = parseInt(sourceFolder && sourceFolder.parent_id, 10);
       if (isNaN(sourceId) || sourceId === 0 || isNaN(sourceParentId)) return;
+      // A folder its folder tile already mapped keeps that exact target; two
+      // folders with the same name and icon would otherwise share one.
+      if (sourceToTarget[sourceId] !== undefined) return;
       const targetParentId = sourceToTarget[sourceParentId];
       if (targetParentId === undefined) return;
       const sourceName = normalizeImportFolderName(sourceFolder.name);
@@ -6563,35 +9547,286 @@ function syncTileRadiusControls(tabEl) {
     return changed;
   }
 
-  async function replaceFolderGridForImport(folderId, sourceTiles, systemType, sourceToTarget = null) {
-    const currentTiles = await fetchTilesForImport(folderId);
-    const sourceList = Array.isArray(sourceTiles) ? sourceTiles.slice(0, GRID_COLS * GRID_ROWS) : [];
-    const currentSystemIndex = currentTiles.findIndex(tile => Number(tile && tile.type) === systemType);
-    const sourceSystemTile = sourceList.find(tile => Number(tile && tile.type) === systemType) || null;
-
-    for (let i = 0; i < (GRID_COLS * GRID_ROWS); i++) {
-      if (i === currentSystemIndex) continue;
-      await postTile(folderId, i, buildEmptyImportTile(i), sourceToTarget);
+  // The type postTile sends: old exports stored folder, Settings and Back
+  // tiles as a navigate tile with a kind.
+  function importTileType(tile) {
+    const type = Number(tile && tile.type);
+    if (isNaN(type)) return 0;
+    if (type === 4 && tile.navigate_kind !== undefined && tile.navigate_kind !== null) {
+      const kind = Number(tile.navigate_kind);
+      if (kind === 1) return 7;
+      if (kind === 2) return 8;
     }
+    return type;
+  }
 
-    if (currentSystemIndex >= 0 && sourceSystemTile) {
-      await postTile(folderId, currentSystemIndex, sourceSystemTile, sourceToTarget);
-    }
+  // A tile as the import messages name it: its title, else its type.
+  function importTileName(tile) {
+    const title = String(tile?.title || '').replace(/\s+/g, ' ').trim();
+    if (title) return title;
+    const type = importTileType(tile);
+    const option = document.querySelector('select[id$="_tile_type"] option[value="' + type + '"]');
+    return option ? option.textContent.trim() : String(type);
+  }
 
-    const availableIndices = [];
-    for (let i = 0; i < (GRID_COLS * GRID_ROWS); i++) {
-      if (i === currentSystemIndex) continue;
-      availableIndices.push(i);
-    }
-
-    const nonSystemTiles = sourceList.filter(tile => Number(tile && tile.type) !== systemType);
-    for (let i = 0; i < nonSystemTiles.length && i < availableIndices.length; i++) {
-      await postTile(folderId, availableIndices[i], nonSystemTiles[i] || {}, sourceToTarget);
+  class TileImportError extends Error {
+    constructor(message, kind, tile, folderName) {
+      super(message);
+      this.kind = kind;
+      this.tile = tile;
+      this.folderName = folderName;
     }
   }
 
+  // One Home or folder grid of an import, planned before anything is
+  // written: every tile where postTile will place it, and where the
+  // target's system tile (Settings in Home, Back in a folder) ends up. A
+  // system tile in the export takes its exported place. Without one (an
+  // export with the Settings tile hidden) the target's own stays where it
+  // is, or moves to the nearest free place when an imported tile needs its
+  // cell (issue #70). A tile that cannot be placed is returned as the
+  // conflict, as the server would refuse it (tile_geometry::supported,
+  // placementOverlaps). The places are the classic layout's, checked on the
+  // stored grid whatever layout the panel shows (a 7 x 5 export against the
+  // head bar's 6 x 4 stopped every import, 2026-10-21).
+  function planImportGrid(sourceTiles, systemType, targetSystem, tab) {
+    const tileCount = TILES_PER_GRID;
+    const occupied = Array.from({ length: GRID_ROWS * 2 }, () => Array(GRID_COLS * 2).fill(false));
+    const cells = (layout, mark) => {
+      for (let y = layout.row * 2; y < (layout.row + layout.span_h) * 2; y++) {
+        for (let x = layout.col * 2; x < (layout.col + layout.span_w) * 2; x++) {
+          if (!mark && occupied[y][x]) return false;
+          if (mark) occupied[y][x] = true;
+        }
+      }
+      return true;
+    };
+    const fits = (type, layout) => supportedTileLayout(type, layout) &&
+      layout.col + layout.span_w <= GRID_COLS && layout.row + layout.span_h <= GRID_ROWS &&
+      cells(layout, false);
+
+    // A tile from the classic storage (the layout window's) takes no room:
+    // it keeps a valid placeholder place, the server leaves it out of the
+    // overlap checks (layout_hidden).
+    const stored = entry => !!entry.tile.layout_hidden;
+    const placeholder = entry => {
+      const layout = entry.layout;
+      if (layout.col + layout.span_w > GRID_COLS) layout.col = Math.max(0, GRID_COLS - layout.span_w);
+      if (layout.row + layout.span_h > GRID_ROWS) layout.row = Math.max(0, GRID_ROWS - layout.span_h);
+    };
+
+    const entries = [];
+    let sourceSystem = null;
+    (Array.isArray(sourceTiles) ? sourceTiles : []).forEach((tile, index) => {
+      const type = importTileType(tile);
+      if (!type) return;
+      const entry = { tile, type, layout: normalizeTileLayout({ ...tile, type }, index, tab, true) };
+      if (type === systemType && !sourceSystem) sourceSystem = entry;
+      else entries.push(entry);
+    });
+    // Settings belongs to Home, Back to folders; one of each.
+    const misplaced = entries.find(entry => entry.type === 7 || entry.type === 8);
+    if (misplaced) return { conflict: misplaced.tile };
+    if (entries.length + (sourceSystem || targetSystem ? 1 : 0) > tileCount) {
+      return { conflict: entries[entries.length - 1].tile };
+    }
+
+    // An exported system tile replaces the target's; a target without one
+    // (Settings hidden there) keeps it hidden and the place stays free.
+    const placeSystem = !!(sourceSystem && targetSystem);
+    if (placeSystem && stored(sourceSystem)) {
+      placeholder(sourceSystem);
+    } else if (placeSystem) {
+      if (!fits(systemType, sourceSystem.layout)) return { conflict: sourceSystem.tile };
+      cells(sourceSystem.layout, true);
+    }
+    for (const entry of entries) {
+      if (stored(entry)) {
+        placeholder(entry);
+        continue;
+      }
+      if (!fits(entry.type, entry.layout)) return { conflict: entry.tile };
+      cells(entry.layout, true);
+    }
+    const tiles = entries.map(entry => ({ ...entry.tile, ...entry.layout }));
+    if (placeSystem) return { tiles, system: { ...sourceSystem.tile, ...sourceSystem.layout }, systemExported: true };
+    if (!targetSystem) return { tiles, system: null };
+
+    const current = normalizeTileLayout(targetSystem, 0, tab, true);
+    if (fits(systemType, current)) return { tiles, system: null };
+    let best = null;
+    for (let row = 0; row + current.span_h <= GRID_ROWS; row += 0.5) {
+      for (let col = 0; col + current.span_w <= GRID_COLS; col += 0.5) {
+        const layout = { ...current, col, row };
+        const distance = Math.abs(col - current.col) + Math.abs(row - current.row);
+        if ((!best || distance < best.distance) && fits(systemType, layout)) best = { layout, distance };
+      }
+    }
+    if (!best) return { conflict: targetSystem };
+    return { tiles, system: { ...targetSystem, ...best.layout } };
+  }
+
+  // Writes a planned grid over its current tiles: the old tiles go first
+  // so no imported tile meets one of them, then the system tile takes its
+  // place, then the imported tiles. Empty cells are not written. A folder
+  // tile maps its exported folder to the one the server created for it.
+  // Where each exported tile landed ({source, view, target, index}), so the
+  // other layouts' places follow their tiles (restoreImportLayouts).
+  let importedSlots = [];
+
+  async function applyImportGrid(folderId, currentTiles, plan, systemType, folderName, sourceToTarget = null,
+                                 sourceFolderId = null) {
+    const tileCount = TILES_PER_GRID;
+    const systemIndex = currentTiles.findIndex(tile => importTileType(tile) === systemType);
+    const post = async (index, tile) => {
+      try {
+        return await postTile(folderId, index, tile, sourceToTarget);
+      } catch (e) {
+        throw new TileImportError(e.message, 'stopped', tile, folderName);
+      }
+    };
+    for (let i = 0; i < tileCount; i++) {
+      if (i !== systemIndex && importTileType(currentTiles[i]) !== 0) {
+        await post(i, buildEmptyImportTile(i));
+      }
+    }
+    const note = (tile, index) => {
+      if (sourceFolderId !== null && Number(tile.view_id) > 0) {
+        importedSlots.push({source: sourceFolderId, view: Number(tile.view_id), target: folderId, index});
+      }
+    };
+    if (systemIndex >= 0 && plan.system) {
+      await post(systemIndex, plan.system);
+      if (plan.systemExported) note(plan.system, systemIndex);
+    }
+    const freeIndices = [];
+    for (let i = 0; i < tileCount; i++) {
+      if (i !== systemIndex) freeIndices.push(i);
+    }
+    for (let i = 0; i < plan.tiles.length; i++) {
+      const tile = plan.tiles[i];
+      const data = await post(freeIndices[i], tile);
+      note(tile, freeIndices[i]);
+      const sourceTarget = Number(tile.navigate_target);
+      const target = Number(data && data.navigate_target);
+      if (sourceToTarget && importTileType(tile) === 4 && sourceTarget > 0 && target > 0 &&
+          sourceToTarget[sourceTarget] === undefined) {
+        sourceToTarget[sourceTarget] = target;
+      }
+    }
+  }
+
+  // Hides or shows the Settings tile through the access settings save, which
+  // keeps the PIN and the swipe gesture as they are; a shown tile takes the
+  // exported place, a hidden one the exported parked tile.
+  async function setSettingsTileHiddenForImport(hidden, snapshot, target, folderName) {
+    const saved = typeof saveSettingsAccess === 'function' && typeof readSettingsAccessState === 'function'
+      ? await saveSettingsAccess(null, target, snapshot, { ...readSettingsAccessState(), tileHidden: hidden }, false)
+      : false;
+    if (!saved) {
+      throw new TileImportError('Settings tile visibility not saved', 'stopped',
+                                { type: 7, title: snapshot?.title || '' }, folderName);
+    }
+  }
+
+  // A folder created by the import gets its Back tile in the first free
+  // cell, the top-left one of an empty grid (TileConfig::ensureBackTile).
+  const NEW_FOLDER_BACK_TILE = { type: 8, title: '', icon_name: 'arrow-left', col: 0, row: 0, span_w: 1, span_h: 1 };
+
+  async function replaceFolderGridForImport(folderId, sourceTiles, systemType, folderName, sourceToTarget = null,
+                                           sourceFolderId = null) {
+    const currentTiles = await fetchTilesForImport(folderId);
+    const targetSystem = currentTiles.find(tile => importTileType(tile) === systemType) || null;
+    const plan = planImportGrid(sourceTiles, systemType, targetSystem, tabByFolder[folderId] || '');
+    if (plan.conflict) throw new TileImportError('Import layout conflict', 'stopped', plan.conflict, folderName);
+    await applyImportGrid(folderId, currentTiles, plan, systemType, folderName, sourceToTarget, sourceFolderId);
+  }
+
+  // Every layout of an export from a panel with the same screen comes back
+  // with its tiles (user 2026-10-21: all three together). The classic places
+  // came with the tiles; the bar and upright places go to the imported tiles
+  // (their new IDs) and the screensaver's (its slot keys, screensaver_places.h),
+  // with the pages, the screensaver clock and where Settings is parked.
+  // False when the panel refused a layout (its reason in the log).
+  async function restoreImportLayouts(layouts, sourceToTarget, screensaverTiles) {
+    if (!layouts || typeof layouts !== 'object') return true;
+    if (Number(layouts.screen_width) !== LAYOUTS.classic.screenW ||
+        Number(layouts.screen_height) !== LAYOUTS.classic.screenH) return true;
+    const tiles = {};
+    for (const target of new Set(importedSlots.map(slot => slot.target))) {
+      tiles[target] = await fetchTilesForImport(target);
+    }
+    const screensaverKeys = {};
+    for (const entry of screensaverTiles || []) screensaverKeys[entry.sourceIndex + 1] = entry.targetIndex + 1;
+    // A page whose folder did not come along leaves its slot free.
+    const pages = Array.isArray(layouts.places?.pages)
+      ? layouts.places.pages.map(id => (Number(id) > 0 ? sourceToTarget[Number(id)] ?? 0 : 0))
+      : null;
+    const parked = Array.isArray(layouts.settings_parked) ? layouts.settings_parked : [];
+    // The Settings tile parked off Home keeps its places in the other
+    // layouts (handleGetLayouts settings.tile), as the panel's parked tile.
+    const parkedView = Number(layouts.parked_settings_view) || 0;
+    let targetParkedView = 0;
+    if (parkedView) {
+      const res = await fetch('api/layouts', {cache: 'no-store'}).catch(() => null);
+      const data = res && res.ok ? await res.json().catch(() => null) : null;
+      targetParkedView = Number(data?.settings?.tile?.view_id) || 0;
+    }
+    let ok = true;
+    for (const [layoutIndex, key] of ['classic', 'bar', 'portrait'].entries()) {
+      if (!LAYOUTS[key]?.available) continue;
+      const request = {layout: key};
+      if (typeof parked[layoutIndex] === 'boolean') request.settings_parked = parked[layoutIndex];
+      const places = key !== 'classic' ? layouts.places?.[key] : null;
+      if (places && typeof places === 'object') {
+        const folders = {};
+        for (const slot of importedSlots) {
+          const place = places[String(slot.source)]?.[String(slot.view)];
+          const view = tiles[slot.target]?.[slot.index]?.view_id;
+          if (!Array.isArray(place) || !view) continue;
+          (folders[slot.target] = folders[slot.target] || {})[view] = place;
+        }
+        const screensaverPlaces = places[String(SCREENSAVER_FOLDER_ID)];
+        if (screensaverTiles && screensaverPlaces && typeof screensaverPlaces === 'object') {
+          const saver = folders[SCREENSAVER_FOLDER_ID] = {};
+          for (const [sourceKey, place] of Object.entries(screensaverPlaces)) {
+            if (screensaverKeys[sourceKey] && Array.isArray(place)) saver[screensaverKeys[sourceKey]] = place;
+          }
+        }
+        // A cell a shown tile took while Settings was parked stays that
+        // tile's: the parked one's place there yields.
+        const parkedPlace = places['0']?.[String(parkedView)];
+        if (targetParkedView && Array.isArray(parkedPlace) && parkedPlace.length === 4) {
+          const onScreen = p => p[0] >= 0 && p[1] >= 0 && p[0] + p[2] <= LAYOUTS[key].cols && p[1] + p[3] <= LAYOUTS[key].rows;
+          const overlaps = p => p[0] < parkedPlace[0] + parkedPlace[2] && parkedPlace[0] < p[0] + p[2] &&
+            p[1] < parkedPlace[1] + parkedPlace[3] && parkedPlace[1] < p[1] + p[3];
+          const taken = onScreen(parkedPlace) && Object.values(folders[0] || {}).some(p => onScreen(p) && overlaps(p));
+          if (!taken) (folders[0] = folders[0] || {})[targetParkedView] = parkedPlace;
+        }
+        if (Object.keys(folders).length) request.folders = folders;
+      }
+      // The pages belong to both bar layouts: the first one stores them.
+      // Pages have no PIN (an export carries none).
+      if (key === 'bar' && pages) {
+        request.pages = pages;
+        request.unlock = true;
+      }
+      const clock = key !== 'classic' ? layouts.clock?.[key] : null;
+      if (Array.isArray(clock) && clock.length === 4) request.clock = clock;
+      if (Object.keys(request).length === 1) continue;
+      const res = await fetch('api/layouts', {method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(request)}).catch(() => null);
+      const data = res ? await res.json().catch(() => ({})) : {};
+      importStep();
+      if (res && res.ok && data.success) continue;
+      console.error('Import layout ' + key + ' not restored:', data.error || (res ? 'HTTP ' + res.status : 'no answer'));
+      ok = false;
+    }
+    return ok;
+  }
+
   function prepareScreensaverTilesForImport(sourceTiles, sourceLayout) {
-    const tileCount = GRID_COLS * GRID_ROWS;
+    const tileCount = TILES_PER_GRID;
     const sourceCols = Number(sourceLayout?.grid_cols || 0);
     const sourceRows = Number(sourceLayout?.grid_rows || 0);
     const sameLayout = sourceCols === GRID_COLS && sourceRows === GRID_ROWS;
@@ -6602,6 +9837,7 @@ function syncTileRadiusControls(tabEl) {
     if (sameLayout) {
       return sourceEntries.slice(0, tileCount).map(entry => ({
         targetIndex: entry.sourceIndex,
+        sourceIndex: entry.sourceIndex,
         tile: entry.tile
       }));
     }
@@ -6613,7 +9849,9 @@ function syncTileRadiusControls(tabEl) {
     const occupied = Array.from({ length: GRID_ROWS * 2 }, () => Array(GRID_COLS * 2).fill(false));
     const prepared = [];
     for (const entry of sourceEntries) {
-      if (prepared.length >= tileCount) throw new Error('Screensaver grid does not fit target device');
+      if (prepared.length >= tileCount) {
+        throw new TileImportError('Screensaver grid does not fit', 'conflict', entry.tile, t('importScreensaver'));
+      }
       const tile = entry.tile;
       const mediaTile = Number(tile.type) === MEDIA_TILE_TYPE;
       const half = value => Math.round(Number(value || 1) * 2) / 2;
@@ -6650,41 +9888,55 @@ function syncTileRadiusControls(tabEl) {
           if (!best || score < best.score) best = { row, col, score };
         }
       }
-      if (!best) throw new Error('Screensaver grid does not fit target device');
+      if (!best) {
+        throw new TileImportError('Screensaver grid does not fit', 'conflict', tile, t('importScreensaver'));
+      }
       for (let y = best.row * 2; y < (best.row + spanH) * 2; y++) {
         for (let x = best.col * 2; x < (best.col + spanW) * 2; x++) occupied[y][x] = true;
       }
       prepared.push({
         targetIndex: prepared.length,
+        sourceIndex: entry.sourceIndex,
         tile: { ...tile, col: best.col, row: best.row, span_w: spanW, span_h: spanH }
       });
     }
     return prepared;
   }
 
-  async function replaceScreensaverGridForImport(sourceTiles, sourceLayout = null) {
-    const folderId = SCREENSAVER_FOLDER_ID;
-    const currentTiles = await fetchTilesForImport(folderId);
-    const tileCount = GRID_COLS * GRID_ROWS;
+  // The screensaver grid as the import writes it, checked before anything
+  // is written like the Home and folder grids.
+  function planScreensaverImport(sourceTiles, sourceLayout) {
     const preparedTiles = prepareScreensaverTilesForImport(sourceTiles, sourceLayout);
     const supportedTypes = new Set([1, 2, 5, 14, 20, 21, 22, 23, MEDIA_TILE_TYPE]);
     for (const entry of preparedTiles) {
       if (!supportedTypes.has(Number(entry.tile.type || 0))) {
-        throw new Error('Unsupported screensaver tile type');
+        throw new TileImportError('Unsupported screensaver tile type', 'conflict', entry.tile, t('importScreensaver'));
       }
     }
+    return preparedTiles;
+  }
+
+  async function replaceScreensaverGridForImport(preparedTiles, currentTiles) {
+    const folderId = SCREENSAVER_FOLDER_ID;
+    const tileCount = TILES_PER_GRID;
+    const post = async (index, tile) => {
+      try {
+        await postTile(folderId, index, tile);
+      } catch (e) {
+        throw new TileImportError(e.message, 'stopped', tile, t('importScreensaver'));
+      }
+    };
 
     // Remove the existing tiles first so the imported positions do not fail on
     // temporary overlaps with the old grid.
     for (let i = 0; i < tileCount; i++) {
       if (Number(currentTiles[i]?.type || 0) !== 0) {
-        await postTile(folderId, i, buildEmptyImportTile(i));
+        await post(i, buildEmptyImportTile(i));
       }
     }
 
     for (const entry of preparedTiles) {
-      const tile = entry.tile;
-      await postTile(folderId, entry.targetIndex, tile);
+      await post(entry.targetIndex, entry.tile);
     }
   }
 
@@ -6704,6 +9956,7 @@ function syncTileRadiusControls(tabEl) {
     try {
       if (!payload || typeof payload !== 'object') {
         showNotification(t('importInvalidJson'), false);
+        setImportProgress(t('importInvalidJson'), 'idle', 'error');
         return;
       }
       const grids = (payload.grids && typeof payload.grids === 'object') ? payload.grids : {};
@@ -6714,25 +9967,113 @@ function syncTileRadiusControls(tabEl) {
       }
       if (!Object.keys(grids).length) {
         showNotification(t('importInvalidJson'), false);
+        setImportProgress(t('importInvalidJson'), 'idle', 'error');
         return;
       }
 
-      showNotification(t('importRunning'));
-
-      const sourceFolders = Array.isArray(payload.folders) ? payload.folders : [{ id: 0, parent_id: 0, name: 'Home', icon_name: '' }];
-      const sourceToTarget = { 0: 0 };
-
-      if (Array.isArray(grids['0'])) {
-        await replaceFolderGridForImport(0, grids['0'], 7, sourceToTarget);
+      // Tiles from the classic storage go back into it, with their spot
+      // beside the screen when the export came from the same screen.
+      const layoutsBlock = payload.layouts && typeof payload.layouts === 'object' ? payload.layouts : null;
+      const sameScreen = !!layoutsBlock && Number(layoutsBlock.screen_width) === LAYOUTS.classic.screenW &&
+        Number(layoutsBlock.screen_height) === LAYOUTS.classic.screenH;
+      const storageSpots = sameScreen ? layoutsBlock.places?.classic_parked || {} : {};
+      for (const [folder, tiles] of Object.entries(grids)) {
+        if (!Array.isArray(tiles)) continue;
+        for (const tile of tiles) {
+          const spot = tile && tile.layout_hidden ? storageSpots[folder]?.[String(tile.view_id)] : null;
+          if (Array.isArray(spot) && spot.length === 4) tile.layout_spot = spot;
+        }
       }
 
+      const sourceFolders = Array.isArray(payload.folders) ? payload.folders : [{ id: 0, parent_id: 0, name: 'Home', icon_name: '' }];
+      const folderName = folderId => {
+        const folder = sourceFolders.find(entry => Number(entry && entry.id) === Number(folderId));
+        return String(folder?.name || '') || String(folderId);
+      };
+      const sourceFolderIds = sourceFolders
+        .map(folder => parseInt(folder && folder.id, 10))
+        .filter(folderId => !isNaN(folderId) && folderId !== 0 && Array.isArray(grids[String(folderId)]));
+      // Versions 1 and 2 had no screensaver block and stay importable
+      // unchanged. Alternative flat field names are accepted as well, in case an
+      // intermediate state of this export function was used.
+      const screensaverBlock = payload.screensaver && typeof payload.screensaver === 'object'
+        ? payload.screensaver
+        : null;
+      const screensaverConfig = screensaverBlock?.config || payload.screensaver_config;
+      const screensaverGrid = screensaverBlock?.grid || payload.screensaver_grid;
+
+      // The Settings tile follows the export (issue #70): hidden there is
+      // hidden here, shown there comes back at its exported place. Exports
+      // without the flag tell it by their Home grid; a Settings tile in the
+      // grid always means shown.
+      const homeSource = Array.isArray(grids['0']) ? grids['0'] : null;
+      const sourceSettings = homeSource ? homeSource.find(tile => importTileType(tile) === 7) || null : null;
+      const exportedSettings = payload.settings_tile && typeof payload.settings_tile === 'object'
+        ? payload.settings_tile : null;
+      const settingsHidden = !!homeSource && !sourceSettings;
+      const parkedSettings = settingsHidden && exportedSettings?.hidden === true ? exportedSettings : null;
+
+      // The whole layout is checked before anything is written: Home with
+      // the Settings tile where the export has it, every folder against the
+      // Back tile a new folder gets (Home replaces every folder), and the
+      // screensaver grid. A tile that does not fit stops the import here.
+      let homeTiles = homeSource ? await fetchTilesForImport(0) : null;
+      const targetSettings = homeTiles ? homeTiles.find(tile => importTileType(tile) === 7) || null : null;
+      const homePlan = homeSource
+        ? planImportGrid(homeSource, 7, settingsHidden ? null : (targetSettings || { type: 7 }), tabByFolder[0] || '')
+        : null;
+      if (homePlan?.conflict) throw new TileImportError('Import layout conflict', 'conflict', homePlan.conflict, folderName(0));
+      // The steps: Home's old tiles cleared and its new ones written, every
+      // folder's tiles (a new folder has only its Back tile), the screensaver's
+      // old and new tiles, and one per layout restored at the end.
+      let steps = 3;
+      if (homePlan) {
+        steps += homePlan.tiles.length + (homePlan.system ? 1 : 0) +
+          homeTiles.filter(tile => ![0, 7].includes(importTileType(tile))).length;
+      }
+      for (const folderId of sourceFolderIds) {
+        const plan = planImportGrid(grids[String(folderId)], 8, NEW_FOLDER_BACK_TILE, '');
+        if (plan.conflict) throw new TileImportError('Import layout conflict', 'conflict', plan.conflict, folderName(folderId));
+        steps += plan.tiles.length + (plan.system ? 1 : 0);
+      }
+      const screensaverTiles = Array.isArray(screensaverGrid)
+        ? planScreensaverImport(screensaverGrid, screensaverBlock?.source_layout || null)
+        : null;
+      const screensaverCurrent = screensaverTiles ? await fetchTilesForImport(SCREENSAVER_FOLDER_ID) : [];
+      if (screensaverTiles) {
+        steps += screensaverTiles.length + screensaverCurrent.filter(tile => Number(tile?.type || 0) !== 0).length;
+      }
+
+      showNotification(t('importRunning'));
+      importProgress = {done: 0, total: steps};
+      showImportStep();
+      importedSlots = [];
+
+      const sourceToTarget = { 0: 0 };
+      if (homePlan) {
+        // Hiding first frees the Settings tile's cell for the imported tiles;
+        // a hidden one takes the exported parked tile.
+        if (settingsHidden && (targetSettings || parkedSettings)) {
+          await setSettingsTileHiddenForImport(true, parkedSettings, null, folderName(0));
+          if (targetSettings) homeTiles = await fetchTilesForImport(0);
+        }
+        await applyImportGrid(0, homeTiles, homePlan, 7, folderName(0), sourceToTarget, 0);
+        if (!settingsHidden && !targetSettings) {
+          await setSettingsTileHiddenForImport(
+            false, homePlan.system, { col: homePlan.system.col, row: homePlan.system.row }, folderName(0));
+          const index = (await fetchTilesForImport(0)).findIndex(tile => importTileType(tile) === 7);
+          if (index >= 0 && Number(homePlan.system.view_id) > 0) {
+            importedSlots.push({source: 0, view: Number(homePlan.system.view_id), target: 0, index});
+          }
+        }
+      }
+
+      // A folder tile names the folder the server created for it; exports
+      // without folder targets match folders by name and icon.
       let targetFolders = await fetchFoldersForImport();
       updateFolderImportMap(sourceFolders, targetFolders, sourceToTarget);
 
-      const pendingFolderIds = sourceFolders
-        .map(folder => parseInt(folder && folder.id, 10))
-        .filter(folderId => !isNaN(folderId) && folderId !== 0 && Array.isArray(grids[String(folderId)]));
-
+      const pendingFolderIds = sourceFolderIds.slice();
       let progressed = true;
       while (pendingFolderIds.length && progressed) {
         progressed = false;
@@ -6743,40 +10084,47 @@ function syncTileRadiusControls(tabEl) {
             i++;
             continue;
           }
-          await replaceFolderGridForImport(targetFolderId, grids[String(sourceFolderId)], 8, sourceToTarget);
+          await replaceFolderGridForImport(
+            targetFolderId, grids[String(sourceFolderId)], 8, folderName(sourceFolderId), sourceToTarget,
+            sourceFolderId);
           pendingFolderIds.splice(i, 1);
           progressed = true;
           targetFolders = await fetchFoldersForImport();
           updateFolderImportMap(sourceFolders, targetFolders, sourceToTarget);
         }
       }
-
+      // A folder no folder tile of the export leads to cannot be reached on
+      // the device either; it stays out instead of failing the import.
       if (pendingFolderIds.length) {
-        throw new Error('Folder mapping failed');
+        console.warn('Import skipped unreachable folders:', pendingFolderIds);
       }
 
-      // Versions 1 and 2 had no screensaver block and stay importable
-      // unchanged. Alternative flat field names are accepted as well, in case an
-      // intermediate state of this export function was used.
-      const screensaverBlock = payload.screensaver && typeof payload.screensaver === 'object'
-        ? payload.screensaver
-        : null;
-      const screensaverConfig = screensaverBlock?.config || payload.screensaver_config;
-      const screensaverGrid = screensaverBlock?.grid || payload.screensaver_grid;
       if (screensaverConfig && typeof screensaverConfig === 'object') {
         await importScreensaverConfig(screensaverConfig);
       }
-      if (Array.isArray(screensaverGrid)) {
-        await replaceScreensaverGridForImport(
-          screensaverGrid, screensaverBlock?.source_layout || null);
+      if (screensaverTiles) {
+        await replaceScreensaverGridForImport(screensaverTiles, screensaverCurrent);
+      }
+      // The other layouts last: they carry the screensaver's places too.
+      if (!await restoreImportLayouts(payload.layouts, sourceToTarget, screensaverTiles)) {
+        throw new Error('Import layouts not restored');
       }
 
       try { localStorage.removeItem('tileDrafts'); } catch (e) {}
+      importProgress = null;
+      setImportProgress(t('importComplete'), 'done', 'success');
       showNotification(t('importComplete'));
       setTimeout(() => location.reload(), 600);
     } catch (e) {
       console.error('Tile import failed:', e);
-      showNotification(t('importFailed'), false);
+      importProgress = null;
+      let message = t('importFailed');
+      if (e instanceof TileImportError) {
+        message = t(e.kind === 'conflict' ? 'importConflict' : 'importStopped')
+          .replace('{tile}', importTileName(e.tile)).replace('{folder}', e.folderName);
+      }
+      showNotification(message, false);
+      setImportProgress(message, 'idle', 'error');
     }
   }
 
@@ -6792,6 +10140,15 @@ function syncTileRadiusControls(tabEl) {
     fd.append('folder', folderId);
     fd.append('index', index);
     fd.append('type', safeType);
+    // An import replaces the grid on purpose (it asked before).
+    if (safeType === 0) fd.append('delete_folder', '1');
+    // The export's places are the classic layout's (tile_layouts.h); a tile
+    // from its storage has none there, only its spot beside the screen.
+    fd.append('layout', 'classic');
+    if (tile.layout_hidden) {
+      fd.append('layout_hidden', '1');
+      if (Array.isArray(tile.layout_spot)) fd.append('layout_spot', tile.layout_spot.join(','));
+    }
     fd.append('title', tile.title || '');
     fd.append('icon_name', tile.icon_name || '');
     if (tile.icon_disc !== undefined && tile.icon_disc !== null) {
@@ -6806,7 +10163,7 @@ function syncTileRadiusControls(tabEl) {
     } else {
       fd.append('bg_color_default', '1');
     }
-    const layout = normalizeTileLayout({ ...tile, type: safeType }, index, tabByFolder[folderId] || '');
+    const layout = normalizeTileLayout({ ...tile, type: safeType }, index, tabByFolder[folderId] || '', true);
     fd.append('col', layout.col);
     fd.append('row', layout.row);
     fd.append('span_w', layout.span_w);
@@ -6889,6 +10246,9 @@ function syncTileRadiusControls(tabEl) {
         ? tile.switch_style
         : (tile.sensor_decimals === 1 ? 1 : 0);
       fd.append('switch_style', style);
+      // The bar upright (bar_orientation.h); older exports have none.
+      fd.append('bar_orientation', Number(tile.bar_orientation) === 1 ? '1' : '0');
+      fd.append('sensor_value_font', tile.sensor_value_font ?? 0);
       if (tile.popup_open_mode !== undefined && tile.popup_open_mode !== null) {
         fd.append('popup_open_mode', tile.popup_open_mode);
       }
@@ -6897,6 +10257,7 @@ function syncTileRadiusControls(tabEl) {
     } else if (safeType === 10) {
       fd.append('text_value', tile.text_value || tile.scene_alias || tile.key_macro || '');
       fd.append('text_value_font', tile.text_value_font || tile.sensor_value_font || '0');
+      fd.append('text_options', (tile.sensor_gauge_max !== undefined && tile.sensor_gauge_max !== null) ? tile.sensor_gauge_max : 100);
       fd.append('tile_border', Number(tile.sensor_display_mode) === 1 ? '0' : '1');
     } else if (safeType === 9) {
       fd.append('tile_border', Number(tile.sensor_display_mode) === 1 ? '0' : '1');
@@ -6908,6 +10269,9 @@ function syncTileRadiusControls(tabEl) {
       fd.append('clock_date_format', (tile.sensor_gauge_max !== undefined && tile.sensor_gauge_max !== null) ? tile.sensor_gauge_max : 0);
     } else if (safeType === 12) {
       fd.append('weather_entity', tile.sensor_entity || tile.weather_entity || '');
+      fd.append('weather_temperature_sensor', tile.weather_temperature_sensor || '');
+      fd.append('weather_humidity_sensor', tile.weather_humidity_sensor || '');
+      fd.append('weather_colored_icons', Number(tile.sensor_display_mode) === 1 ? '0' : '1');
       if (tile.popup_open_mode !== undefined && tile.popup_open_mode !== null) {
         fd.append('popup_open_mode', tile.popup_open_mode);
       }
@@ -6925,8 +10289,16 @@ function syncTileRadiusControls(tabEl) {
       if (tile.sensor_value_y_offset !== undefined && tile.sensor_value_y_offset !== null && String(tile.sensor_value_y_offset).length > 0) {
         fd.append('sensor_value_y_offset', tile.sensor_value_y_offset);
       }
+      // The bars below the header (2); the screensaver shows the value alone.
+      const screensaverEnergy = Number(folderId) === Number(SCREENSAVER_FOLDER_ID);
+      fd.append('sensor_display_mode', !screensaverEnergy && Number(tile.sensor_display_mode) === 2 ? '2' : '0');
+    } else if (safeType === 28) {
+      fd.append('flow_entities', tile.flow_entities || '');
+      const bits = Number(tile.key_code) || 0;
+      for (const [name, bit] of POWER_FLOW_OPTIONS) fd.append(name, (bits & bit) ? '1' : '0');
     } else if (safeType === MEDIA_TILE_TYPE) {
       fd.append('media_entity', tile.sensor_entity || tile.media_entity || '');
+      fd.append('media_layout', Number(tile.sensor_display_mode) === 1 ? '1' : '0');
     } else if (safeType === 17) {
       fd.append('climate_entity', tile.sensor_entity || tile.climate_entity || '');
       fd.append(
@@ -6948,8 +10320,36 @@ function syncTileRadiusControls(tabEl) {
       if (tile.popup_open_mode !== undefined && tile.popup_open_mode !== null) {
         fd.append('popup_open_mode', tile.popup_open_mode);
       }
+    } else if (safeType === 27) {
+      // The calendars, view and first day of the week (types/calendar/web.cpp).
+      const calendars = calendarEntitiesOf(tile.sensor_entity || tile.calendar_entities || '');
+      CALENDAR_FIELDS.forEach((field, i) => fd.append(field, calendars[i] || ''));
+      fd.append('calendar_view', String(Number(tile.sensor_display_mode) || 0));
+      fd.append('calendar_week_start', String(tile.sensor_decimals ?? 255));
+      if (tile.popup_open_mode !== undefined && tile.popup_open_mode !== null) {
+        fd.append('popup_open_mode', tile.popup_open_mode);
+      }
+    } else if (safeType === 24 || safeType === 25 || safeType === 26 || safeType === 29) {
+      const kind = devicePreviewKind(safeType);
+      fd.append(kind + '_entity', tile.sensor_entity || tile[kind + '_entity'] || '');
+      if (safeType === 26) fd.append('bar_orientation', Number(tile.bar_orientation) === 1 ? '1' : '0');
+      if (safeType === 29) {
+        fd.append('vacuum_layout', Number(tile.sensor_display_mode) === 1 ? '1' : '0');
+        fd.append('vacuum_map', tile.vacuum_map || '');
+        fd.append('vacuum_every', String(Math.max(3, Math.min(60, Number(tile.image_slideshow_sec) || 5))));
+      }
+      if (tile.popup_open_mode !== undefined && tile.popup_open_mode !== null) {
+        fd.append('popup_open_mode', tile.popup_open_mode);
+      }
     } else if (safeType === 18) {
       fd.append('camera_entity', tile.sensor_entity || tile.camera_entity || '');
+      const picture = cameraPictureOptionsOf(tile);
+      fd.append('camera_display', picture.picture ? '1' : '0');
+      fd.append('camera_fit', picture.fit);
+      fd.append('camera_every', String(picture.every));
+      fd.append('camera_transparency', String(picture.transparency));
+      fd.append('camera_head', picture.head);
+      fd.append('camera_tap', picture.tap);
     } else if (safeType === 16) {
       fd.append('animation_file', tile.animation_file || tile.scene_alias || '');
       fd.append('animation_fps', tile.animation_fps || tile.image_slideshow_sec || '10');
@@ -6964,10 +10364,14 @@ function syncTileRadiusControls(tabEl) {
     }
 
     const res = await fetch('api/tiles', { method: 'POST', body: fd });
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
     if (!data.success) {
-      throw new Error('Tile speichern fehlgeschlagen');
+      // The server's English reason stays in the log (importTilesPayload);
+      // the page names the tile and folder in the user's language.
+      throw new Error('Tile save failed: ' + (data.error || ('HTTP ' + res.status)));
     }
+    importStep();
+    return data;
   }
 
   function rgbToHex(rgb) {
@@ -6994,12 +10398,17 @@ function syncTileRadiusControls(tabEl) {
   // Tiles without their own color follow the global default tile color. The
   // preview paints them through one root variable, so a change of that color
   // repaints loaded, cached and lazily inserted grids at once.
-  function tileBackgroundCss(meta, isDefault, hex, opacity = null) {
+  // The card is --tile-card: the global tile color in the dark theme, the
+  // light card in the light one (tileDefaultBgColor); a black tile shows the
+  // light theme's screen color (tileBgColorOrDefault).
+  function tileBackgroundCss(meta, isDefault, hex, opacity = null, typeValue = null) {
     const shared = !!isDefault && !!meta?.sharedBg;
-    const sharedCss = 'var(--tile-default-bg, #2A2A2A)';
-    if (opacity === null || opacity === undefined) return shared ? sharedCss : hex;
-    if (shared) {
-      return 'color-mix(in srgb, ' + sharedCss + ' ' +
+    const black = !shared && /^#0{6}$/.test(String(hex));
+    if (black && !isDefault && opacity === null && tileTypeBlackIsTransparent(typeValue)) return 'transparent';
+    const cardCss = shared ? 'var(--tile-card, #2A2A2A)' : black ? 'var(--pv-black-tile, #000000)' : hex;
+    if (opacity === null || opacity === undefined) return cardCss;
+    if (shared || black) {
+      return 'color-mix(in srgb, ' + cardCss + ' ' +
         (opacity * 100 / 255).toFixed(2) + '%, transparent)';
     }
     return hex + opacity.toString(16).padStart(2, '0');
@@ -7013,7 +10422,7 @@ function syncTileRadiusControls(tabEl) {
   // Channels (0..255) of a computed CSS color, or null when it is fully
   // transparent or unknown. Chrome reports color-mix() backgrounds (screensaver
   // tiles with an opacity) as color(srgb r g b / a) with 0..1 channels.
-  function cssColorChannels(value) {
+  function cssColorMatch(value) {
     const text = String(value || '').trim();
     const srgb = text.match(/^color\(srgb\s+([\d.eE+-]+)\s+([\d.eE+-]+)\s+([\d.eE+-]+)(?:\s*\/\s*([\d.]+%?))?/);
     const rgb = text.match(/^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)(?:[\s,/]+([\d.]+%?))?/);
@@ -7021,71 +10430,547 @@ function syncTileRadiusControls(tabEl) {
     if (!match) return null;
     const alpha = match[4] === undefined ? 1
       : match[4].endsWith('%') ? Number(match[4].slice(0, -1)) / 100 : Number(match[4]);
-    if (!(alpha > 0)) return null;
+    return { match, srgb: !!srgb, alpha };
+  }
+  function cssColorChannels(value) {
+    const parsed = cssColorMatch(value);
+    if (!parsed || !(parsed.alpha > 0)) return null;
     return [1, 2, 3].map(i => {
-      const v = Number(match[i]) * (srgb ? 255 : 1);
+      const v = Number(parsed.match[i]) * (parsed.srgb ? 255 : 1);
       return Math.max(0, Math.min(255, Math.round(v)));
     });
   }
+  // The alpha (0..1) of a computed CSS color; 0 when unknown.
+  function cssColorAlpha(value) {
+    const parsed = cssColorMatch(value);
+    return parsed && parsed.alpha > 0 ? Math.min(1, parsed.alpha) : 0;
+  }
+  // Mirrors src/ui/shared/tone_color.h: the circle and the controls sit a
+  // fixed step of perceived lightness (OKLCH L) above the card in the icon's
+  // hue (white icons: the tile's own color, lighter); a dark icon is shown
+  // lighter in its own hue.
+  function toneToLinear(v) {
+    v /= 255;
+    return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  }
+  function toneToSrgb(v) {
+    if (v <= 0) return 0;
+    if (v >= 1) return 255;
+    return Math.floor((v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055) * 255 + 0.5);
+  }
+  function toneOklch(rgb) {
+    const [r, g, b] = rgb.map(toneToLinear);
+    const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+    const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+    const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+    const A = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s;
+    const B = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s;
+    return { L: 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s, C: Math.hypot(A, B), h: Math.atan2(B, A) };
+  }
+  function toneLinear(L, C, h) {
+    const A = C * Math.cos(h), B = C * Math.sin(h);
+    const l = (L + 0.3963377774 * A + 0.2158037573 * B) ** 3;
+    const m = (L - 0.1055613458 * A - 0.0638541728 * B) ** 3;
+    const s = (L - 0.0894841775 * A - 1.2914855480 * B) ** 3;
+    return [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+      -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+      -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s];
+  }
+  function toneRgb(L, C, h) {
+    L = Math.min(1, Math.max(0, L));
+    const fits = c => toneLinear(L, c, h).every(v => v >= -0.0005 && v <= 1.0005);
+    if (!fits(C)) {
+      let lo = 0, hi = C;
+      for (let i = 0; i < 16; i++) { const mid = (lo + hi) / 2; if (fits(mid)) lo = mid; else hi = mid; }
+      C = lo;
+    }
+    return toneLinear(L, C, h).map(toneToSrgb);
+  }
+  function toneBlend(under, over, opa) {
+    return under.map((v, i) => Math.floor((v * (255 - opa) + over[i] * opa + 127) / 255));
+  }
+  // tone_color::fill(): what the circle and the controls draw. Opaque in
+  // exactly their steps: 0.06 L at the default 25 %, controls at least 0.03;
+  // the circle keeps 55 % of the icon's chroma. On a see-through card
+  // (screensaver tiles below full Tile opacity) a veil calibrated to land on
+  // the step, the controls at least opacity 32.
+  function toneFill(card, icon, tinted, percent, seeThrough) {
+    percent = Math.min(100, Math.max(0, percent));
+    const base = toneOklch(card), seed = toneOklch(icon);
+    const lift = step => tinted ? toneRgb(base.L + toneStep(step), seed.C * 0.55, seed.h)
+      : toneRgb(base.L + toneStep(step), base.C, base.h);
+    const discStep = percent * 0.0024;
+    if (!seeThrough) {
+      const control = lift(Math.max(discStep, 0.03));
+      const disc = !percent ? card.slice() : discStep >= 0.03 ? control : lift(discStep);
+      return { discColor: disc, controlColor: control, discOpa: percent ? 255 : 0, controlOpa: 255, disc, control, tinted };
+    }
+    const discOpa = Math.floor((percent * 255 + 50) / 100);
+    const controlOpa = Math.max(discOpa, 32);
+    const target = lift(discOpa > 32 ? discStep : 0.03);
+    const color = card.map((under, i) => {
+      const delta = (target[i] - under) * 255;
+      return Math.min(255, Math.max(0, under + Math.trunc((delta + (delta >= 0 ? 1 : -1) * Math.floor(controlOpa / 2)) / controlOpa)));
+    });
+    return {
+      discColor: color, controlColor: color, discOpa, controlOpa,
+      disc: toneBlend(card, color, discOpa), control: toneBlend(card, color, controlOpa), tinted,
+    };
+  }
+  // tone_color::readable_icon(): unchanged while at least 0.22 L above the
+  // circle the icon gets with the default settings (tile color #1A1A1A, tile
+  // color From icon 20 % like tile_tint::background, Circle strength 25 %),
+  // else lighter in its own hue. The global tile color and the Circle
+  // strength never change an icon's color.
+  function toneReadableIcon(icon) {
+    const tinted = icon[0] !== icon[1] || icon[1] !== icon[2];
+    // The light theme shows every colored icon in its own color, on every
+    // surface (tone_color::readable_icon).
+    if (panelThemeLight() && tinted) return icon;
+    if (panelLight()) {
+      // The icon's own color, like Home Assistant; only an icon without a
+      // color (white, almost white, the text color) takes the icon grey.
+      const seed = toneOklch(icon);
+      const text = toneHex(icon) === panelRoleHex('text', '#1a1a1a').toLowerCase();
+      return text || (seed.L > 0.95 && (!tinted || seed.C < 0.08)) ? (panelRole('icon') || icon) : icon;
+    }
+    const linear = v => { const c = v / 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+    const contrast = c => 1.05 / (0.2126 * linear(c[0]) + 0.7152 * linear(c[1]) + 0.0722 * linear(c[2]) + 0.05);
+    let card = [26, 26, 26];
+    if (tinted) {
+      card = card.map((v, i) => Math.floor((v * 80 + icon[i] * 20 + 50) / 100));
+      for (let i = 0; i < 40 && contrast(card) < 4.5; i++) card = card.map(v => Math.floor((v * 95 + 50) / 100));
+    }
+    const base = toneOklch(card), seed = toneOklch(icon);
+    const circle = tinted ? toneRgb(base.L + 0.06, seed.C * 0.55, seed.h) : toneRgb(base.L + 0.06, base.C, base.h);
+    const minimum = toneOklch(circle).L + 0.22;
+    return seed.L >= minimum ? icon : toneRgb(minimum, seed.C, seed.h);
+  }
+  function toneHex(rgb) {
+    return '#' + rgb.map(v => v.toString(16).padStart(2, '0')).join('');
+  }
+  // The panel's theme (html[data-panel-theme], ui_theme.h) and its roles
+  // (--pv-*, written from ui_theme.h by web_admin_styles.cpp; --pvd-* and
+  // --pvl-* keep the dark and the light table).
+  // tile_surface (tile_icon_disc.h): a tile in its own color follows that
+  // color's lightness; in the light theme a tile's Design shows the dark
+  // design (Weather, Media while it plays, Design Dark, tinted tiles with the
+  // global option). While withSurface() runs, panelLight() and panelRole()
+  // answer for that surface (globalThis.hometilesPreviewSurface: 0 dark,
+  // 1 light, 2 dark with the light greys (ui_theme::kDarkTinted), unset the
+  // page's theme; each function reads it by itself).
+  function panelThemeLight() {
+    return typeof document !== 'undefined' && document.documentElement?.dataset?.panelTheme === 'light';
+  }
+  function panelLight() {
+    const surface = globalThis.hometilesPreviewSurface;
+    if (surface === 0 || surface === 1 || surface === 2) return surface === 1;
+    return typeof document !== 'undefined' && document.documentElement?.dataset?.panelTheme === 'light';
+  }
+  function withSurface(surface, run) {
+    const saved = globalThis.hometilesPreviewSurface;
+    if (surface === 0 || surface === 1 || surface === 2) globalThis.hometilesPreviewSurface = surface;
+    try { return run(); } finally { globalThis.hometilesPreviewSurface = saved; }
+  }
+  // The role table a surface reads a role from: 'd' dark, 'l' light, '' the
+  // page's. Surface 2 (ui_theme::kDarkTinted) has its own greys ('j').
+  function surfaceRoleTable(theme, name, pageLight) {
+    // Surface 2 (ui_theme::kDarkTinted): the dark roles, its own lighter greys.
+    if (theme === 2) {
+      const grey = ['icon-off', 'icon-inactive', 'icon-rest', 'icon-unavailable'].includes(name);
+      return grey ? 'j' : (pageLight ? 'd' : '');
+    }
+    if ((theme === 0 || theme === 1) && (theme === 1) !== pageLight) return theme === 1 ? 'l' : 'd';
+    return '';
+  }
+  function panelVar(name, fallback) {
+    if (typeof document === 'undefined' || typeof getComputedStyle !== 'function') return fallback;
+    const value = String(getComputedStyle(document.documentElement).getPropertyValue(name) || '').trim();
+    return value || fallback;
+  }
+  function panelRole(name) {
+    const surface = globalThis.hometilesPreviewSurface;
+    const pageLight = typeof document !== 'undefined' && document.documentElement?.dataset?.panelTheme === 'light';
+    const table = surfaceRoleTable(surface, name, pageLight);
+    const prefix = table ? '--pv' + table + '-' : '--pv-';
+    const hex = panelVar(prefix + name, '');
+    return /^#[0-9a-f]{6}$/i.test(hex) ? [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16)) : null;
+  }
+  // The roles a surface overrides on its tile (the preview's CSS reads them).
+  const SURFACE_ROLES = ['screen', 'card', 'text', 'icon', 'icon-off', 'icon-inactive', 'icon-rest',
+    'text-secondary', 'text-soft', 'icon-unavailable', 'text-rgb'];
+  function surfaceTheme(surface) {
+    if (surface === 'jewel') return 2;
+    return surface === 'light' ? 1 : surface === 'dark' ? 0 : -1;
+  }
+  // tone_color::light_surface(): text, icons and circles on a color above
+  // --pv-light-surface (OKLCH L) follow the light theme's rules.
+  function toneLightSurface(rgb) {
+    const limit = Number(panelVar('--pv-light-surface', '0.72'));
+    return toneOklch(rgb).L > (Number.isFinite(limit) ? limit : 0.72);
+  }
+  // The filled tile of the light theme (ui_theme kJewel*, --pv-jewel-*).
+  function jewelVar(name, fallback) {
+    const value = Number(panelVar('--pv-jewel-' + name, String(fallback)));
+    return Number.isFinite(value) ? value : fallback;
+  }
+  // tone_color::jewel_card(): the card below its icon's own lightness, in its
+  // hue, with chroma up to the strength's cap.
+  // tone_color::jewel_idle_card(): a filled tile without a color.
+  function toneJewelIdleCard() {
+    return toneRgb(jewelVar('idle', 0.59), 0, 0);
+  }
+  function toneJewelCard(icon, strength) {
+    if (toneNoColor(icon)) return toneRgb(jewelVar('neutral', 0.63), 0, 0);
+    const seed = toneOklch(icon);
+    const L = Math.max(jewelVar('min', 0.42), Math.min(jewelVar('max', 0.68), seed.L - jewelVar('below', 0.18)));
+    const cap = jewelVar('chroma', 0.1) * (strength || 20) / 20;
+    return toneRgb(L, Math.min(seed.C * jewelVar('card-share', 0.85), cap), seed.h);
+  }
+  // tone_color::jewel_fill(): circle and controls one step above the card.
+  function toneJewelFill(card, icon, glowPct, strength) {
+    const base = toneOklch(card), seed = toneOklch(icon);
+    const cap = jewelVar('chroma', 0.1) * jewelVar('circle-cap', 1.3) * (strength || 20) / 20;
+    const C = toneNoColor(icon) ? 0 : Math.min(seed.C * jewelVar('circle-share', 0.75), cap);
+    const step = jewelVar('step', 0.05) * glowPct / 25;
+    const control = Math.max(step, 0.03);
+    const disc = glowPct ? toneRgb(base.L + step, C, seed.h) : card.slice();
+    return {discColor: disc, controlColor: toneRgb(base.L + control, C, seed.h), discOpa: glowPct ? 255 : 0,
+      controlOpa: 255, disc, control: toneRgb(base.L + control, C, seed.h), tinted: true};
+  }
+  // tile_icon_colors::fills(): "Ausfuellen" (user 2026-10-11, the one tile
+  // color option), also a former "From cover" or rule "Tint tile"; the fixed
+  // strength (tile_icon_colors::kTintDefault) when filled, 0 without.
+  function tileFillOf(iconColors) {
+    if (!iconColors || typeof parseIconColorRecord !== 'function') return 0;
+    const parsed = parseIconColorRecord(iconColors);
+    return Number(parsed.fill || 0) > 0 || Number(parsed.cover?.tile || 0) > 0 || Number(parsed.source?.tile || 0) > 0
+      ? ICON_FILL_DEFAULT : 0;
+  }
+  // tileTypeKeepsOwnColor() (tile_config.h): only Clock, Text and Pixel
+  // animation keep an own color; every other tile takes its color from its
+  // icon.
+  const KEEPS_OWN_COLOR_TYPES = ['9', '10', '16'];
+  function tileTypeKeepsOwnColor(typeValue) { return KEEPS_OWN_COLOR_TYPES.includes(String(typeValue ?? '0')); }
+  // tileTransparent() (tile_config.h): a Clock or Text tile in black has no
+  // card and no line ("Transparent", user 2026-10-12).
+  function tileTypeBlackIsTransparent(typeValue) { return ['9', '10'].includes(String(typeValue ?? '0')); }
+  // tileFills() (tile_config.h): "Fill" of a tile, never on the tiles that
+  // keep an own color.
+  function tileFills(typeValue, iconColors) { return tileTypeKeepsOwnColor(typeValue) ? 0 : tileFillOf(iconColors); }
+  // tileHasOwnColor() (tile_config.h).
+  function tileHasOwnColor(bgValue, iconColors, typeValue) {
+    return tileTypeKeepsOwnColor(typeValue) && tileBgValueIsSet(bgValue) && !tileBgFollowsDefault(bgValue);
+  }
+  // tile_surface_of() (tile_renderer.cpp): a tile in its own color follows
+  // its lightness; every other tile, and the screensaver, keeps the theme.
+  function tileSurfaceOf(tab, previewKind, bgValue, iconColors, typeValue) {
+    if (typeof isScreensaverTileTab === 'function' && isScreensaverTileTab(tab)) {
+      // The screensaver's own design (screensaver_config.h theme): Dark or
+      // Light for all its tiles, Automatic follows the panel.
+      const theme = document.getElementById('screensaverGrid')?.dataset.ssTheme;
+      return theme === '0' ? 'dark' : theme === '1' ? 'light' : '';
+    }
+    if (!tileHasOwnColor(bgValue, iconColors, typeValue)) return '';
+    const own = Number(bgValue) & 0xFFFFFF;
+    if (!own) return '';
+    return toneLightSurface([(own >> 16) & 0xFF, (own >> 8) & 0xFF, own & 0xFF]) ? 'light' : 'dark';
+  }
+  // tile_surface_rule_of() (tile_renderer.cpp): in the light theme a tile with
+  // "Ausfuellen" is filled from the start; a rule row with its own "Fuellen"
+  // changes a tile between the white and the filled look.
+  function tileFollowsTint(tab, previewKind, bgValue, iconColors, typeValue) {
+    if (typeof isScreensaverTileTab === 'function' && isScreensaverTileTab(tab)) return false;
+    const rows = typeof iconColorRowsFill === 'function' && iconColorRowsFill(iconColors);
+    return panelThemeLight() && (tileFills(typeValue, iconColors) > 0 || rows) &&
+      !tileHasOwnColor(bgValue, iconColors, typeValue);
+  }
+  // ui_surface_style frame_line(): a solid line, on the theme's plain card a
+  // fixed neutral (light #DDDDDD, dark #292929), on any other card that card
+  // a little darker on the light theme's screen (36 of black) and a little
+  // lighter on the dark one (lv_color_mix 23 of white). user 2026-10-11.
+  function applyFrameLine(el) {
+    if (!el?.style?.setProperty || typeof getComputedStyle !== 'function') return;
+    const card = cssColorChannels(getComputedStyle(el).backgroundColor);
+    if (!card) return;
+    // The plain card of either theme keeps that theme's fixed line.
+    let line;
+    if (card.every(v => v === 255)) line = [221, 221, 221];
+    else if (card.every(v => v === 26)) line = [41, 41, 41];
+    else if (!panelThemeLight()) line = card.map(v => Math.floor((255 * 23 + v * 232) * 0x8081 / 0x800000));
+    // frame_line_shown(): a filled card of the light theme (white words)
+    // draws no line (user 2026-10-11, b391).
+    else if (!toneLightSurface(card)) {
+      el.style.setProperty('--tile-border-tint', 'transparent');
+      return;
+    }
+    else line = card.map(v => Math.floor((v * 219) * 0x8081 / 0x800000));
+    el.style.setProperty('--tile-border-tint', 'rgb(' + line.join(',') + ')');
+  }
+  // Marks a tile with its surface: the other theme's roles on it (CSS) and,
+  // for the dark design, its card.
+  function applyTileSurface(el, surface) {
+    if (!el) return;
+    if (surface) el.dataset.surface = surface;
+    else delete el.dataset.surface;
+    const theme = surfaceTheme(surface);
+    const pageLight = panelThemeLight();
+    for (const name of SURFACE_ROLES) {
+      const table = surfaceRoleTable(theme, name, pageLight);
+      if (table) el.style.setProperty('--pv-' + name, 'var(--pv' + table + '-' + name + ')');
+      else el.style.removeProperty('--pv-' + name);
+    }
+    // A screensaver tile in the other design paints that theme's card
+    // (tileBackgroundCss uses --tile-card).
+    const saverCard = el.closest?.('.screensaver-tile-grid') && (theme === 0 || theme === 1)
+      ? (theme === 0 ? 'var(--tile-default-bg)' : 'var(--pvl-card)') : '';
+    if (saverCard) el.style.setProperty('--tile-card', saverCard);
+    else el.style.removeProperty('--tile-card');
+
+  }
+  // ui_theme::unavailable_icon(): the light theme's one unavailable grey for
+  // every domain, the dark theme each type's own `darkGrey`.
+  function unavailableIconHex(darkGrey) {
+    return panelThemeLight() ? panelRoleHex('icon-unavailable', '#BDBDBD') : darkGrey;
+  }
+  // tone_color::no_color(): white, almost white or grey-white.
+  function toneNoColor(rgb) {
+    const seed = toneOklch(rgb);
+    const hue = rgb[0] !== rgb[1] || rgb[1] !== rgb[2];
+    return seed.L > 0.9 && (!hue || seed.C < 0.08);
+  }
+  // tone_color::light_accent(): a light's color as Home Assistant shows it,
+  // in both themes (#130).
+  function toneLightAccent(rgb) {
+    return toneHaLightColor(rgb);
+  }
+  // switch_state_icon_color() (tile_renderer.cpp): a light's color as Home
+  // Assistant shows it, in both themes (#130), white light in its light grey.
+  function toneLightShown(hex) {
+    if (!/^#[0-9a-f]{6}$/i.test(String(hex))) return hex;
+    const rgb = [1, 3, 5].map(i => parseInt(String(hex).slice(i, i + 2), 16));
+    return toneHex(toneHaLightColor(rgb)).toUpperCase();
+  }
+  // tone_color::ha_light_color(): a light's color as Home Assistant shows
+  // it: an HSV saturation below 0.4 raised to 0.4, white (below 0.1) a grey
+  // of value 225.
+  function toneHaLightColor(rgb) {
+    const [r, g, b] = rgb.map(v => v / 255);
+    const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+    let sat = max > 0 ? d / max : 0, value = max;
+    if (sat >= 0.4 || max <= 0) return rgb;
+    let hue = 0;
+    if (d > 0) {
+      if (max === r) hue = ((g - b) / d) % 6;
+      else if (max === g) hue = (b - r) / d + 2;
+      else hue = (r - g) / d + 4;
+      hue *= 60;
+      if (hue < 0) hue += 360;
+    }
+    if (sat < 0.1) value = 225 / 255;
+    else sat = 0.4;
+    const channel = n => {
+      const k = (n + hue / 60) % 6;
+      const m = Math.max(0, Math.min(1, k, 4 - k));
+      return Math.floor((value - value * sat * m) * 255 + 0.5);
+    };
+    return [channel(5), channel(3), channel(1)];
+  }
+  // tone_color::notch_on(): a handle line, the card's color on a light fill.
+  function toneNotchOn(fill, card) {
+    return toneLightSurface(fill) ? card : [255, 255, 255];
+  }
+  // tone_color::mark_on(): dark on a light surface (the dark theme keeps its
+  // card cut-out there), white on a dark one.
+  function toneMarkOn(surface, cutout) {
+    if (toneLightSurface(surface)) return panelLight() ? (panelRole('text') || [26, 26, 26]) : cutout;
+    return [255, 255, 255];
+  }
+  function panelRoleHex(name, fallback) {
+    const rgb = panelRole(name);
+    return rgb ? toneHex(rgb) : fallback;
+  }
+  // tone_color::lifted(): the light theme steps down by --pv-light-step of
+  // the dark step.
+  function toneStep(step) {
+    if (!panelLight()) return step;
+    const scale = Number(panelVar('--pv-light-step', '0.833333'));
+    return -step * (Number.isFinite(scale) ? scale : 5 / 6);
+  }
+  // Default tile color "From icon" strength (tile_icon_colors::kTintDefault).
+  const ICON_FILL_DEFAULT = 20;
+  // A PIN-protected Folder or Settings tile shows a lock in its icon
+  // (navigate renderer, icon_lock_mark.h); without an own icon the lock is
+  // the icon. Folders follow their target's stored PIN (data-folder-pin-enabled),
+  // Settings the stored Settings PIN.
+  function previewTileLocked(typeValue, tileElem) {
+    if (String(typeValue) === '7') {
+      return document.getElementById('folder0_settings_pin_enabled')?.dataset.pinConfigured === '1';
+    }
+    return String(typeValue) === '4' && tileElem?.dataset.folderPinEnabled === '1';
+  }
+  const PREVIEW_LOCK_MARK = '<span class="tile-icon-lock mdi mdi-lock" aria-hidden="true"></span>';
+
   function applyIconDiscTint(tileElem) {
-    const icon = tileElem?.querySelector(':scope > .tile-icon');
+    if (!tileElem) return;
+    // The tile's surface rules (tile_surface) while its colors are computed.
+    const surfaceSaved = globalThis.hometilesPreviewSurface;
+    const surfaceMode = typeof surfaceTheme === 'function' ? surfaceTheme(tileElem.dataset?.surface || '') : -1;
+    // 0 dark, 1 light, 2 a filled tile (ui_theme::kDarkTinted): its rules everywhere.
+    if (surfaceMode >= 0) globalThis.hometilesPreviewSurface = surfaceMode;
+    try {
+    // Cut-outs in the card's color (the Media play glyph,
+    // tile_icon_disc::refresh_cutouts) follow the card after every tint.
+    const cutCard = typeof getComputedStyle === 'function'
+      ? cssColorChannels(getComputedStyle(tileElem).backgroundColor) : null;
+    if (cutCard && tileElem.style?.setProperty) tileElem.style.setProperty('--tile-cut', toneHex(cutCard));
+    const icon = tileElem.querySelector(':scope > .tile-icon');
     if (!icon) return;
     const glow = tileElem.dataset.iconGlow !== '0';
+    // The color the icon was given (tile_icon_disc::icon_color): a shown
+    // readability lift is remembered, a new color from the editor replaces it.
+    const current = cssColorChannels(getComputedStyle(icon).color);
+    const currentHex = current ? toneHex(current) : '';
+    const given = icon.dataset.toneShown && icon.dataset.toneShown === currentHex && icon.dataset.toneGiven
+      ? icon.dataset.toneGiven.slice(1).match(/../g).map(v => parseInt(v, 16))
+      : current;
+    const givenHex = given ? toneHex(given) : '';
     // Mirrors tile_icon_source.cpp on_icon_color(): with Tile color "From
-    // icon color" the tile takes the color the icon shows; grey and white
+    // icon color" the tile takes the color the icon was given; grey and white
     // icons (off, default) keep the untinted background (tile_tint::choose).
     const fill = Number(tileElem.dataset.iconFill || 0);
-    if (fill && tileElem.dataset.ruleTint !== '1' && typeof tileTintBackground === 'function' &&
-        typeof tileTintChoice === 'function') {
-      const iconRgb = cssColorChannels(getComputedStyle(icon).color);
-      const choice = iconRgb
-        ? tileTintChoice(false, '', 0, fill, '#' + iconRgb.map(v => v.toString(16).padStart(2, '0')).join(''))
-        : null;
+    if (fill && typeof tileTintBackground === 'function' && typeof tileTintChoice === 'function') {
+      let choice = given ? tileTintChoice(false, '', 0, fill, givenHex) : null;
+      // An icon without a color (white, almost white light) never tints the
+      // card (tile_icon_source without_white).
+      if (choice && toneNoColor(given)) choice = null;
+      // White light fills in the neutral grey (tile_icon_source with_white):
+      // the light theme's filled tiles, every tile of the dark theme (#130).
+      if (!choice && given && (tileElem.dataset.followTint === '1' || !panelThemeLight()) && toneNoColor(given) &&
+          toneOklch(given).L <= 0.95) {
+        choice = { color: givenHex.toUpperCase(), percent: fill };
+      }
       if (choice) {
-        const base = String(getComputedStyle(document.documentElement).getPropertyValue('--tile-default-bg') || '').trim();
-        tileElem.style.background = tileTintBackground(base || '#1A1A1A', choice.color, choice.percent);
+        setTileTintBackground(tileElem, choice.color, choice.percent);
+      } else if (tileElem.dataset.neutralIdle === '1') {
+        setTileTintBackground(tileElem, '#FFFFFF', 0, true);
       } else if (tileElem.dataset.baseBg !== undefined) {
         tileElem.style.background = tileElem.dataset.baseBg;
       }
+      // The surface may have changed with the tint (tile_surface::change).
+      const nowMode = surfaceTheme(tileElem.dataset?.surface || '');
+      globalThis.hometilesPreviewSurface = nowMode >= 0 ? nowMode : undefined;
     }
     // An unset Icon color field of the edited tile shows the color the icon
     // has now (the entity's own color, e.g. a light or a detected Binary
     // sensor); only picking a color stores a fixed one.
     if (typeof currentTileTab === 'string' && tileElem.id === currentTileTab + '-tile-' + currentTileIndex) {
       const input = document.getElementById(currentTileTab + '_tile_icon_color');
-      const shown = cssColorChannels(getComputedStyle(icon).color);
-      if (input && input.dataset.unset === '1' && shown) {
-        input.value = '#' + shown.map(v => v.toString(16).padStart(2, '0')).join('');
-      }
+      if (input && input.dataset.unset === '1' && given) input.value = givenHex;
     }
-    // Mirrors tile_icon_disc::contrast_step_for()/scaled_opa(): discs are
-    // subtler on dark tiles (8 % instead of 15 % at luma <= 0.08) in 4 steps.
-    const bg = cssColorChannels(getComputedStyle(tileElem).backgroundColor);
-    const iconRgb = cssColorChannels(getComputedStyle(icon).color);
-    const tinted = glow && iconDiscTinted(getComputedStyle(icon).color);
+    const tinted = glow && !!given && iconDiscTinted('rgb(' + given.join(',') + ')');
     icon.classList.toggle('tile-icon-tinted', tinted);
-    // Mirrors ui_surface_style::border_hint(): a glowing icon gives the tile
-    // outline its hue halfway to white (lv_color_mix(white, icon, 128)) at the
-    // hairline's 20 %, mostly the tile with a hint of the icon.
-    if (tinted && iconRgb) {
-      const hint = iconRgb.map(v => Math.floor(((255 * 128 + v * 127) * 0x8081) / 0x800000));
-      tileElem.style.setProperty('--tile-border-tint', 'rgba(' + hint.join(',') + ',0.20)');
-    } else {
-      tileElem.style.removeProperty('--tile-border-tint');
-    }
-    const luma = bg ? (0.2126 * bg[0] + 0.7152 * bg[1] + 0.0722 * bg[2]) / 255 : 1;
-    const step = Math.floor(Math.min(1, Math.max(0, (luma - 0.08) / 0.17)) * 3 + 0.5);
-    const scaled = full => Math.floor((full * (24 + 7 * step) + 22) / 45);
-    // Global Glow strength (icon_glow.h, 0..100 %): the glowing disc at that
-    // percentage and the white disc scaled with it (38 at 25 %), both scaled
-    // like the device.
+    // The frame line follows the card (ui_surface_style frame_line).
+    applyFrameLine(tileElem);
+    // Global Circle strength (icon_glow.h, 0..100 %).
     const glowRaw = String(getComputedStyle(document.documentElement).getPropertyValue('--icon-glow-pct')).trim();
     const glowValue = glowRaw === '' ? 25 : Number(glowRaw);
     const glowPct = Math.min(100, Math.max(0, Number.isFinite(glowValue) ? glowValue : 25));
-    const neutralOpa = Math.floor((38 * glowPct + 12) / 25);
-    tileElem.style.setProperty('--icon-disc-opa', (scaled(neutralOpa) / 255).toFixed(3));
-    const glowOpa = Math.floor((glowPct * 255 + 50) / 100);
-    tileElem.style.setProperty('--icon-disc-glow', (scaled(glowOpa) * 100 / 255).toFixed(1) + '%');
+    const background = getComputedStyle(tileElem).backgroundColor;
+    const card = cssColorChannels(background) || [0, 0, 0];
+    // Screensaver tiles below full Tile opacity let the wallpaper through.
+    const seeThrough = cssColorAlpha(background) < 1;
+    // "Circle in icon color" shows the circle of the tile color "From icon"
+    // on a Global or Custom tile too (tile_icon_disc::circle_card): computed
+    // for the card From icon would give at its default strength.
+    let circleCard = card;
+    if (tinted && !(fill > 0) && !seeThrough && typeof tileTintBackground === 'function') {
+      // The tile's card (a screensaver tile in the other design has its own).
+      const base = String(getComputedStyle(tileElem).getPropertyValue('--tile-card') || '').trim();
+      const familyHex = tileTintBackground(base || '#1A1A1A', givenHex, ICON_FILL_DEFAULT);
+      circleCard = [1, 3, 5].map(i => parseInt(familyHex.slice(i, i + 2), 16));
+    }
+    let tone = toneFill(circleCard, given || [255, 255, 255], tinted, glowPct, seeThrough);
+    // The light theme's tile circle (tone_color::tile_fill, lab 2026-10-10):
+    // the shown icon color at --pv-light-circle of the Circle strength over
+    // the card itself; controls at least 10 %.
+    const lightCircle = panelLight() && !seeThrough;
+    if (lightCircle) {
+      const shown = toneReadableIcon(given || [255, 255, 255]);
+      const picked = tinted || !iconDiscTinted('rgb(' + shown.join(',') + ')') ? shown : (panelRole('icon') || shown);
+      // tone_color::circle_source(): a white light's grey takes the neutral #BDBDBD.
+      const over = toneNoColor(picked) ? [189, 189, 189] : picked;
+      const share = Number(panelVar('--pv-light-circle', '0.8'));
+      const amount = glowPct * (Number.isFinite(share) ? share : 0.8) / 100;
+      const blendOver = value => toneBlend(card, over, Math.round(Math.min(1, value) * 255));
+      const disc = glowPct ? blendOver(amount) : card.slice();
+      const control = blendOver(Math.max(amount, 0.1));
+      tone = { discColor: disc, controlColor: control, discOpa: glowPct ? 255 : 0, controlOpa: 255, disc, control, tinted };
+    }
+    // A filled tile of the light theme (tone_color::jewel_fill): one step
+    // above its card in the icon's hue.
+    if (tinted && !seeThrough && tileElem.dataset.surface === 'jewel' && typeof toneJewelFill === 'function') {
+      tone = toneJewelFill(card, given, glowPct, Number(tileElem.dataset.jewelStrength) || 20);
+    }
+    const rgba = (color, opa) => 'rgba(' + color.join(',') + ',' + (opa / 255).toFixed(3) + ')';
+    tileElem.style.setProperty('--icon-disc-bg', rgba(tone.discColor, tone.discOpa));
+    // Mirrors icon_lock_mark::behind(): the lock's rim takes the circle over
+    // the card.
+    const discAlpha = tone.discOpa / 255;
+    const lockRim = card.map((c, i) => Math.round(c * (1 - discAlpha) + tone.discColor[i] * discAlpha));
+    tileElem.style.setProperty('--icon-lock-rim', 'rgb(' + lockRim.join(',') + ')');
+    // Mirrors tile_icon_source::refresh_controls(): tile controls (the
+    // Climate target pill, Media buttons, the Switch bar) take the circle's
+    // color whenever it is tinted, in every tile color; else the neutral step.
+    const controls = tinted || lightCircle ? tone : toneFill(card, given || [255, 255, 255], false, glowPct, seeThrough);
+    tileElem.style.setProperty('--control-fill', rgba(controls.controlColor, controls.controlOpa));
+    // A Sensor look with a color bar (admin-look.js): every place in the
+    // colors this tile gives an icon of that color, the steps above for
+    // another icon color.
+    tileElem.sensorLookTones = rgb => {
+      const placeTinted = glow && iconDiscTinted('rgb(' + rgb.join(',') + ')');
+      let placeCircle = card;
+      if (placeTinted && !(fill > 0) && !seeThrough && typeof tileTintBackground === 'function') {
+        const base = String(getComputedStyle(tileElem).getPropertyValue('--tile-card') || '').trim();
+        const familyHex = tileTintBackground(base || '#1A1A1A', toneHex(rgb), ICON_FILL_DEFAULT);
+        placeCircle = [1, 3, 5].map(i => parseInt(familyHex.slice(i, i + 2), 16));
+      }
+      let placeTone = toneFill(placeCircle, rgb, placeTinted, glowPct, seeThrough);
+      if (lightCircle) {
+        const shown = toneReadableIcon(rgb);
+        const picked = placeTinted || !iconDiscTinted('rgb(' + shown.join(',') + ')') ? shown : (panelRole('icon') || shown);
+        const over = toneNoColor(picked) ? [189, 189, 189] : picked;
+        const share = Number(panelVar('--pv-light-circle', '0.8'));
+        const amount = glowPct * (Number.isFinite(share) ? share : 0.8) / 100;
+        placeTone = { controlColor: toneBlend(card, over, Math.round(Math.min(1, Math.max(amount, 0.1)) * 255)), controlOpa: 255 };
+      }
+      if (placeTinted && !seeThrough && tileElem.dataset.surface === 'jewel' && typeof toneJewelFill === 'function') {
+        placeTone = toneJewelFill(card, rgb, glowPct, Number(tileElem.dataset.jewelStrength) || 20);
+      }
+      const placeControls = placeTinted || lightCircle ? placeTone : toneFill(card, rgb, false, glowPct, seeThrough);
+      return { lit: toneHex(toneReadableIcon(rgb)), off: rgba(placeControls.controlColor, placeControls.controlOpa) };
+    };
+    tileElem.style.setProperty('--icon-shown', given ? toneHex(toneReadableIcon(given)) : 'currentColor');
+    if (typeof renderSensorLookPreview === 'function') renderSensorLookPreview(tileElem);
+    // The icon, readable like on the device (the same with every tile color,
+    // Circle strength and circle option).
+    if (!given) return;
+    const readable = toneReadableIcon(given);
+    const readableHex = toneHex(readable);
+    if (readableHex === givenHex) {
+      if (icon.dataset.toneShown) {
+        delete icon.dataset.toneShown;
+        delete icon.dataset.toneGiven;
+        icon.style.color = givenHex;
+      }
+    } else {
+      icon.dataset.toneGiven = givenHex;
+      icon.dataset.toneShown = readableHex;
+      icon.style.color = readableHex;
+    }
+    } finally {
+      globalThis.hometilesPreviewSurface = surfaceSaved;
+    }
   }
   // Mirrors tileBgColorFollowsDefault(): an unset color and the built-in
   // default grey (stored explicitly by older editors) follow the global
@@ -7103,59 +10988,80 @@ function syncTileRadiusControls(tabEl) {
     const text = String(hex || '').trim();
     return /^#[0-9a-f]{6}$/i.test(text) && isDefaultTileGrey(parseInt(text.slice(1), 16));
   }
-  // Tile color is one choice, like the device (tile_tint::choose): Global
-  // follows the global tile color (stored as the default marker), Custom keeps
-  // the picked color, From icon color tints the tile with the color the icon
-  // shows (the icon colors' hidden "fill" checkbox). Only tiles with icon
-  // colors offer From icon color. Nothing else switches the choice.
+  // The color of a tile without an icon (Clock, Text, Pixel animation):
+  // Global is the theme's card (stored as the default marker), Custom keeps
+  // the picked color; on Clock and Text black is Transparent. A clicked
+  // choice holds while editing (data-color-mode): dragging the Custom picker
+  // over black must not jump to Transparent (user 2026-10-12); a loaded
+  // tile's choice follows its stored color.
   function tileColorMode(tab) {
-    if (document.getElementById(tab + '_tile_icon_fill')?.checked) return 'icon';
-    return document.getElementById(tab + '_tile_color')?.dataset.bgColorDefault === '0' ? 'custom' : 'global';
+    const input = document.getElementById(tab + '_tile_color');
+    if (input?.dataset.bgColorDefault !== '0') return 'global';
+    if (input.dataset.colorMode === 'custom' || input.dataset.colorMode === 'transparent') return input.dataset.colorMode;
+    const type = document.getElementById(tab + '_tile_type')?.value || '0';
+    return tileTypeBlackIsTransparent(type) && /^#0{6}$/.test(String(input.value)) ? 'transparent' : 'custom';
   }
+  // user 2026-10-11: a tile with an icon offers only "Fill" (its icon's
+  // color); Clock, Text and Pixel animation keep Global or a Custom color.
   function syncTileColorMode(tab) {
     const typeValue = document.getElementById(tab + '_tile_type')?.value || '0';
-    const iconOffered = typeof tileTypeHasIconColors === 'function' && tileTypeHasIconColors(typeValue);
+    const keepsOwn = tileTypeKeepsOwnColor(typeValue);
+    const iconOffered = !keepsOwn && typeof tileTypeHasIconColors === 'function' && tileTypeHasIconColors(typeValue);
     const fill = document.getElementById(tab + '_tile_icon_fill');
     if (fill?.checked && !iconOffered) fill.checked = false;
+    const input = document.getElementById(tab + '_tile_color');
+    if (input && !keepsOwn) input.dataset.bgColorDefault = '1';
     const mode = tileColorMode(tab);
-    document.getElementById(tab + '_tile_color_modes')?.querySelectorAll('[data-tile-color-mode]').forEach(button => {
+    const modes = document.getElementById(tab + '_tile_color_modes');
+    modes?.querySelectorAll('[data-tile-color-mode]').forEach(button => {
       const active = button.dataset.tileColorMode === mode;
       button.classList.toggle('active', active);
       button.setAttribute('aria-pressed', active ? 'true' : 'false');
-      if (button.dataset.tileColorMode === 'icon') button.classList.toggle('hidden', !iconOffered);
     });
-    document.getElementById(tab + '_tile_color_row')?.classList.toggle('color-hidden', mode !== 'custom');
-    document.getElementById(tab + '_tile_icon_fill_row')?.classList.toggle('hidden', mode !== 'icon');
-    const strength = document.getElementById(tab + '_tile_icon_fill_strength');
-    const output = document.getElementById(tab + '_tile_icon_fill_strength_value');
-    if (strength && output) output.textContent = strength.value + ' %';
+    modes?.classList.toggle('hidden', !keepsOwn);
+    modes?.previousElementSibling?.classList?.toggle('hidden', !keepsOwn);
+    modes?.querySelector('[data-tile-color-mode="transparent"]')?.classList.toggle('hidden', !tileTypeBlackIsTransparent(typeValue));
+    document.getElementById(tab + '_tile_color_row')?.classList.toggle('color-hidden', !keepsOwn || mode !== 'custom');
+    document.getElementById(tab + '_tile_icon_fill_row')?.classList.toggle('hidden', !iconOffered);
+    if (typeof fitChoiceRows === 'function') fitChoiceRows(tab);
   }
   function setTileColorMode(tab, mode) {
     const input = document.getElementById(tab + '_tile_color');
     if (!input) return;
+    // Only Clock, Text and Pixel animation have a tile color choice; a tile
+    // with an icon takes its color from the icon (no hidden picker opens).
+    if (!tileTypeKeepsOwnColor(document.getElementById(tab + '_tile_type')?.value || '0')) return;
     const before = tileColorMode(tab);
     // Leaving Custom remembers its color for a later return.
     if (before === 'custom' && mode !== 'custom') input.dataset.customColor = input.value;
-    const fill = document.getElementById(tab + '_tile_icon_fill');
-    if (fill) fill.checked = mode === 'icon';
     const remembered = input.dataset.customColor || '';
+    if (mode === 'custom' || mode === 'transparent') input.dataset.colorMode = mode;
     if (mode === 'custom') {
       if (before !== 'custom' && remembered) input.value = remembered;
+      // From Transparent a color to start from (black would stay Transparent).
+      else if (before === 'transparent') input.value = '#333333';
+      input.dataset.bgColorDefault = '0';
+    } else if (mode === 'transparent') {
+      input.value = '#000000';
       input.dataset.bgColorDefault = '0';
     } else {
+      delete input.dataset.colorMode;
       const type = document.getElementById(tab + '_tile_type')?.value || '0';
       input.value = getTileTypeMeta(type).defaultBg || '#1A1A1A';
       input.dataset.bgColorDefault = '1';
     }
     syncTileColorMode(tab);
-    // The rules hide "Tint tile" while the tile follows the icon.
-    if (typeof syncIconColorFields === 'function') syncIconColorFields(tab);
     updateTilePreview(tab);
     updateDraft(tab);
     scheduleAutoSave(tab);
-    // A first Custom opens the color picker right away.
+    // A first Custom opens the color picker right away. The color row was
+    // display:none until syncTileColorMode above, and Chrome anchors the
+    // picker to the input's box from the last layout without running one:
+    // with no box yet it opened in the top left corner of the window. Reading
+    // the input's rect lays the row out first.
     if (mode === 'custom' && before !== 'custom' && !remembered) {
       try {
+        input.getBoundingClientRect();
         if (typeof input.showPicker === 'function') input.showPicker();
       } catch (_) {}
     }
@@ -7186,14 +11092,21 @@ function syncTileRadiusControls(tabEl) {
   }
   // Icon color of a preview tile: the per-tile rule or fixed icon color
   // (resolveIconColorRecord, same result as the firmware), else `fallback`.
-  function previewIconColor(typeValue, record, entity, meta, binaryState, fallback) {
+  // `out`, when given, receives the matching state line's own "Fuellen"
+  // (`fill`: 1, 0, or -1 when "Ausfuellen" decides).
+  // `out.icon`: the matching stop's or line's own icon ('' without one).
+  function previewIconColor(typeValue, record, entity, meta, binaryState, fallback, out = null) {
+    if (out) {
+      out.fill = -1;
+      out.icon = '';
+    }
     if (!record || typeof tileTypeHasIconColors !== 'function' ||
         !tileTypeHasIconColors(typeValue)) return fallback;
     const type = String(typeValue ?? '0');
     // Rules that color the icon win (tile_icon_source::refresh_card).
     const layer = typeof iconColorRecordSource === 'function' ? iconColorRecordSource(record) : null;
-    if (layer && layer.enabled && layer.icon && typeof iconColorLayerColor === 'function') {
-      const color = iconColorLayerColor(record, layer, entity, meta, type);
+    if (layer && layer.enabled && iconColorRuleColorsIcon(layer) && typeof iconColorLayerColor === 'function') {
+      const color = iconColorLayerColor(record, layer, entity, meta, type, out);
       if (color) return color;
     }
     // Only the Sensor family colors its icon from its own state; every other
@@ -7202,25 +11115,33 @@ function syncTileRadiusControls(tabEl) {
       typeof iconColorOwnStateColorsIcon === 'function' && iconColorOwnStateColorsIcon(record);
     if (!ownRules) return resolveIconColorRecord(record, '', null) || fallback;
     const rule = iconColorRuleState(typeValue, entity, meta, binaryState);
-    return (rule && resolveIconColorRecord(record, rule.state, rule.display)) || fallback;
+    return (rule && resolveIconColorRecord(record, rule.state, rule.display, true, out)) || fallback;
+  }
+  // The row fill a preview tile shows (tile_icon_disc::rule_fill): 'on',
+  // 'off' or '' when "Ausfuellen" decides.
+  function setPreviewRuleFill(el, out) {
+    if (!el) return;
+    if (out?.fill === 1) el.dataset.ruleFill = 'on';
+    else if (out?.fill === 0) el.dataset.ruleFill = 'off';
+    else delete el.dataset.ruleFill;
   }
   // Tints a preview tile like tile_icon_source.cpp ("Tint tile" rules): the
   // tint replaces the tile color and starts from the global default tile
   // color, never from an own tile color.
   function applyTileRulesTint(el, typeValue, record, ownEntity, meta) {
     if (!el) return;
-    // The icon color's "Tint tile" option follows the icon (applyIconDiscTint)
-    // from this untinted background, unless a rule tint wins.
+    // A tile with "Fill" follows its icon (applyIconDiscTint) from this
+    // untinted background; rules color only the icon (user 2026-10-11).
     el.dataset.baseBg = el.style.background || '';
-    const fill = record && typeof parseIconColorRecord === 'function' ? parseIconColorRecord(record).fill : 0;
+    // The matching rule row's own "Fuellen" decides (tile_icon_disc::shown_fill):
+    // on fills at "Fill" or the default strength, off keeps the plain card,
+    // also on a tile filled from the start (kNeutralIdle).
+    const ownFill = tileFills(typeValue, record);
+    const rule = el.dataset.ruleFill || '';
+    const fill = rule === 'off' ? 0 : rule === 'on' ? (ownFill || ICON_FILL_DEFAULT) : ownFill;
     if (fill) el.dataset.iconFill = String(fill);
     else delete el.dataset.iconFill;
-    const tint = record && typeof iconColorTilePreviewTint === 'function'
-      ? iconColorTilePreviewTint(String(typeValue ?? '0'), record, ownEntity, meta) : null;
-    el.dataset.ruleTint = tint ? '1' : '0';
-    if (!tint) return;
-    const base = String(getComputedStyle(document.documentElement).getPropertyValue('--tile-default-bg') || '').trim();
-    el.style.background = tileTintBackground(base || '#1A1A1A', tint.color, tint.percent);
+    if (rule === 'off') delete el.dataset.neutralIdle;
   }
   function snapshotBgColorIsDefault(snapshot) {
     return String(snapshot?.bg_color_default || '0') === '1' ||
@@ -7237,6 +11158,7 @@ function syncTileRadiusControls(tabEl) {
     input.value = follows ? (fallback || '#2A2A2A') : tileBgToHex(value, fallback || '#2A2A2A');
     input.dataset.bgColorDefault = follows ? '1' : '0';
     delete input.dataset.customColor;
+    delete input.dataset.colorMode;
     syncTileColorMode(tab);
   }
   function setTileColorInputFromSnapshot(tab, snapshot) {
@@ -7247,6 +11169,7 @@ function syncTileRadiusControls(tabEl) {
     input.value = isDefault ? (meta.defaultBg || '#2A2A2A') : (snapshot?.color || meta.defaultBg || '#2A2A2A');
     input.dataset.bgColorDefault = isDefault ? '1' : '0';
     delete input.dataset.customColor;
+    delete input.dataset.colorMode;
     syncTileColorMode(tab);
   }
   // Picking a color selects Tile color Custom. Rules are never switched off:
@@ -7263,6 +11186,7 @@ function syncTileRadiusControls(tabEl) {
   function resetTileColor(tab) {
     const input = document.getElementById(tab + '_tile_color');
     if (!input) return;
+    delete input.dataset.colorMode;
     const typeValue = document.getElementById(tab + '_tile_type')?.value || '0';
     const meta = getTileTypeMeta(typeValue);
     input.value = meta.defaultBg || '#2A2A2A';
@@ -7270,18 +11194,45 @@ function syncTileRadiusControls(tabEl) {
     const fill = document.getElementById(tab + '_tile_icon_fill');
     if (fill) fill.checked = false;
     syncTileColorMode(tab);
-    if (isScreensaverTileTab(tab)) {
-      const opacity = document.getElementById('screensaver_tile_opacity');
-      if (opacity) opacity.value = String(SCREENSAVER_TILE_DEFAULT_OPACITY);
-    }
     updateTilePreview(tab);
     updateDraft(tab);
     scheduleAutoSave(tab);
   }
 
-  function renderTileFromData(tab, index, tile, sensorMeta) {
+  // `forcedSurface`: the second pass of a tile whose tint changed its surface
+  // (tile_surface::change), drawn from the start with that surface.
+  function renderTileFromData(tab, index, tile, sensorMeta, forcedSurface) {
     const el = document.getElementById(tab + '-tile-' + index);
     if (!el) return;
+    // A page's folder tile is one cell in its field (page-fields.js).
+    if (typeof pageFieldOfTile === 'function' && pageFieldOfTile(tab, tile)) tile = {...tile, span_w: 1, span_h: 1};
+    // The whole tile draws with its surface's rules (tile_surface).
+    const surfaceType = String(tile?.type ?? '0');
+    const surfaceKind = getTileTypeMeta(surfaceType).preview || '';
+    // A Camera tile's head over its picture (picture.h head_over_picture).
+    const cameraHead = surfaceKind === 'camera'
+      ? cameraHeadSurface(cameraPictureOptionsOf(tile), Number(tile?.span_h) === 0.5) : '';
+    const surface = forcedSurface || (cameraHead ? (cameraHead === 'auto' ? '' : cameraHead)
+      : surfaceType === '0' || typeof tileSurfaceOf !== 'function' ? ''
+      : tileSurfaceOf(tab, surfaceKind, tile?.bg_color, tile?.icon_colors, surfaceType));
+    if (surfaceType !== '0' && !cameraHead && typeof tileFollowsTint === 'function' &&
+        tileFollowsTint(tab, surfaceKind, tile?.bg_color, tile?.icon_colors, surfaceType)) {
+      el.dataset.followTint = '1';
+    } else {
+      delete el.dataset.followTint;
+    }
+    // A tile with "Fill" shows the neutral grey without a tint (kNeutralIdle);
+    // a Switch tile (type 5) only fills while on (tile_surface_rule_of, #130).
+    if (el.dataset.followTint === '1' && tileFillOf(tile?.icon_colors) > 0 && surfaceType !== '5') {
+      el.dataset.neutralIdle = '1';
+    } else {
+      delete el.dataset.neutralIdle;
+    }
+    const surfaceSaved = globalThis.hometilesPreviewSurface;
+    const surfaceMode = typeof surfaceTheme === 'function' ? surfaceTheme(surface) : -1;
+    // 0 dark, 1 light, 2 a filled tile (ui_theme::kDarkTinted): its rules everywhere.
+    if (surfaceMode >= 0) globalThis.hometilesPreviewSurface = surfaceMode;
+    try {
     const metaValues = sensorMeta?.values || {};
     const metaUnits = sensorMeta?.units || {};
     const metaIcons = sensorMeta?.icons || {};
@@ -7298,36 +11249,46 @@ function syncTileRadiusControls(tabEl) {
     }
     let cls = ['tile'];
     if (meta.css) cls.push(meta.css);
-    if (typeValue === '5' && tile.switch_style === 1) cls.push('switch-toggle');
     if (typeValue === '0' && (!meta.css || meta.css !== 'empty')) cls.push('empty');
-    el.className = cls.join(' ');
+    resetTileClasses(el, cls);
+    if (typeValue === '5') {
+      applySwitchPreviewLayout(el, tile.switch_style, Number(tile.span_h) === 0.5, Number(tile.bar_orientation) === 1);
+    }
     el.dataset.type = typeValue;
-    el.dataset.iconDisc = ['1', '2'].includes(String(tile?.icon_disc)) ? String(tile.icon_disc) : '0';
-    el.dataset.iconGlow = ['0', 'false'].includes(String(tile?.icon_glow)) ? '0' : '1';
+    // Every circle shows, in its icon's color (user 2026-10-11: no circle options).
+    el.dataset.iconDisc = '0';
+    el.dataset.iconGlow = '1';
     el.classList.toggle('tile-border-hidden', ['8','9','10'].includes(typeValue) && Number(tile.sensor_display_mode) === 1);
     applyCompactSensorPreview(el, typeValue, tile, tile.sensor_display_mode, tile.sensor_value_font);
-    if (typeValue === '4') el.dataset.navigateTarget = String(tile.navigate_target || 0);
-    else delete el.dataset.navigateTarget;
+    if (typeValue === '4') {
+      el.dataset.navigateTarget = String(tile.navigate_target || 0);
+      el.dataset.folderPinEnabled = tile.folder_pin_enabled === true ? '1' : '0';
+    } else {
+      delete el.dataset.navigateTarget;
+      delete el.dataset.folderPinEnabled;
+    }
+    delete el.dataset.bgOpacity;
     if (typeValue === '0') el.style.background = 'transparent';
     else {
-      const isDefaultBg = tileBgFollowsDefault(tile.bg_color);
+      // A tile with an icon takes its color from the icon: no own color.
+      const isDefaultBg = tileBgFollowsDefault(tile.bg_color) || !tileTypeKeepsOwnColor(typeValue);
       const bg = tileBackgroundCss(meta, isDefaultBg,
-        tileBgToHex(tile.bg_color, meta.defaultBg || '#353535'));
+        tileBgToHex(tile.bg_color, meta.defaultBg || '#353535'), null, typeValue);
+      el.classList.toggle('tile-transparent', bg === 'transparent');
       if (isScreensaverTileTab(tab)) {
-        const opacity = clampInt(tile.background_opacity, 0, 255,
-                                 SCREENSAVER_TILE_DEFAULT_OPACITY);
+        // One opacity for every screensaver tile (screensaver footer).
+        const opacity = screensaverTileOpacity();
         el.style.background = tileBackgroundCss(meta, isDefaultBg,
           tileBgToHex(tile.bg_color, meta.defaultBg || '#353535'), opacity);
+        el.dataset.bgOpacity = String(opacity);
+        // A fully transparent card casts no shadow (apply_slot_tile_shadows).
+        el.classList.toggle('screensaver-bg-clear', opacity === 0);
       } else {
-        el.style.background = bg;
-      }
-      el.style.removeProperty('--switch-knob-color');
-      el.style.removeProperty('--switch-on-color');
-      if (typeValue === '5' && tile.switch_style === 1) {
-        el.style.setProperty('--switch-knob-color', bg);
-        el.style.setProperty('--switch-on-color', '#3B82F6');
+        el.style.background = cameraHead ? cameraHeadBackground(cameraHead) : bg;
       }
     }
+    if (typeof applyTileSurface === 'function') applyTileSurface(el, surface);
+    if (typeValue !== '0') applyFrameLine(el);
     const sensorValueClass = getSensorValueFontClass(tile.sensor_value_font);
     if (typeValue === '0') {
       el.innerHTML = '';
@@ -7340,9 +11301,9 @@ function syncTileRadiusControls(tabEl) {
                           previewKind === 'switch' ||
                           previewKind === 'weather' || previewKind === 'media' ||
                           previewKind === 'climate' || previewKind === 'cover' ||
-                          previewKind === 'camera')
+                          previewKind === 'device' || previewKind === 'camera')
         ? (tile.sensor_entity || '')
-        : (typeValue === '2' ? (sensorMeta?.sceneEntities?.[tile.scene_alias] || '') : '');
+        : (typeValue === '2' ? sceneEntityOf(tile.scene_alias, sensorMeta?.sceneEntities) : '');
       const rawIcon = tile.icon_name || '';
       let iconName = resolveIconName(
         rawIcon,
@@ -7370,6 +11331,17 @@ function syncTileRadiusControls(tabEl) {
           iconName = coverPreviewIcon(coverPreviewState, iconName);
         }
       }
+      const deviceKind = previewKind === 'device' ? devicePreviewKind(typeValue) : '';
+      let devicePreviewState = null;
+      if (deviceKind) {
+        devicePreviewState = parseDevicePreviewPayload(deviceDetailPayload(tile.sensor_entity || '', sensorMeta));
+        if (!normalizeMdiIconName(rawIcon) && !isExplicitlyDisabledValue(rawIcon)) {
+          iconName = devicePreviewIcon(deviceKind, devicePreviewState, '', iconName);
+        }
+      }
+      if (previewKind === 'calendar' && !normalizeMdiIconName(rawIcon) && !isExplicitlyDisabledValue(rawIcon)) {
+        iconName = 'calendar';
+      }
       let binarySensorPreviewState = null;
       if (previewKind === 'binary_sensor') {
         binarySensorPreviewState = parseBinarySensorPreviewPayload(
@@ -7378,20 +11350,36 @@ function syncTileRadiusControls(tabEl) {
           rawIcon, tile.sensor_entity || '', binarySensorPreviewState,
           metaIcons);
       }
+      if (previewKind === 'media') {
+        iconName = mediaPreviewIcon(parseMediaPreviewPayload(
+          tile.sensor_entity ? (sensorMeta?.mediaValues?.[tile.sensor_entity] ?? '') : ''), iconName);
+      }
 
       let html = '';
+      const locked = typeof previewTileLocked === 'function' && previewTileLocked(typeValue, el);
+      const lockIsIcon = locked && !iconName;
+      if (lockIsIcon) iconName = 'lock';
 
+      delete el.dataset.ruleFill;
       if (iconName) {
+        const ruleFill = {};
         const iconColor = previewIconColor(typeValue, tile.icon_colors, tile.sensor_entity || '',
           sensorMeta, binarySensorPreviewState, previewKind === 'climate'
             ? climatePreviewColor(climatePreviewState)
             : (previewKind === 'cover'
               ? coverPreviewColor(coverPreviewState)
-              : (previewKind === 'binary_sensor'
-                ? binarySensorPreviewColor(binarySensorPreviewState)
-                : '')));
+              : (deviceKind
+                ? devicePreviewColor(deviceKind, devicePreviewState)
+                : (previewKind === 'binary_sensor'
+                  ? binarySensorPreviewColor(binarySensorPreviewState)
+                  : (previewKind === 'calendar' ? calendarPreviewIconColor(tile) : '')))), ruleFill);
+        if (typeof setPreviewRuleFill === 'function') setPreviewRuleFill(el, ruleFill);
+        // A matching rule shows its own icon (tile_rule_icon.h); weather
+        // icons keep their own.
+        if (ruleFill.icon && previewKind !== 'weather' && !lockIsIcon) iconName = ruleFill.icon;
         const iconStyle = iconColor ? ' style="color:' + escapeHtml(iconColor) + '"' : '';
-        html += '<i class="mdi mdi-' + escapeHtml(iconName) + ' tile-icon"' + iconStyle + '></i>';
+        html += '<i class="mdi mdi-' + escapeHtml(iconName) + ' tile-icon"' + iconStyle + '>' +
+          (locked && !lockIsIcon ? PREVIEW_LOCK_MARK : '') + '</i>';
       }
 
       let displayTitle = tile.title || '';
@@ -7399,18 +11387,13 @@ function syncTileRadiusControls(tabEl) {
         displayTitle = metaNames[tile.sensor_entity] ||
           titleFromEntity(tile.sensor_entity);
       }
+      if (previewKind === 'calendar') displayTitle = calendarPreviewTitle(tile, displayTitle, sensorMeta);
       if (displayTitle.length) {
         html += '<div class="tile-title" id="' + tab + '-tile-' + index + '-title">' +
           tileTitleHtml(displayTitle) + '</div>';
       }
       applyTileAriaLabel(el, displayTitle, typeValue);
 
-      if (previewKind === 'weather') {
-        html += '<div class="tile-ghost-icon"><i class="mdi mdi-weather-partly-cloudy"></i></div>';
-      }
-      if (previewKind === 'media') {
-        html += '<div class="tile-ghost-icon"><i class="mdi mdi-music"></i></div>';
-      }
 
       if (previewKind === 'sensor') {
         let value = '--';
@@ -7422,39 +11405,53 @@ function syncTileRadiusControls(tabEl) {
           '</div>';
       }
       if (previewKind === 'climate') {
-        html += climatePreviewSlots(
-          climatePreviewState,
-          tile.span_w || 1,
-          tile.span_h || 1,
-          decodeClimateSlotConfig(tile.sensor_gauge_min || 0),
-          decodeClimateTargetLayouts(tile.sensor_gauge_max || 0),
-          tile.climate_geometry || tile.scene_alias || '');
+        // Layout "with value" and half height: the value pair beside the
+        // disc; half height has no mini fields.
+        const climateHalf = Number(tile.span_h) === 0.5;
+        const climateValue = Number(tile.sensor_display_mode) === 1;
+        el.classList.toggle('climate-header', climateValue && !climateHalf);
+        if (climateHalf || climateValue) {
+          html += '<div class="tile-value tile-switch-state">' +
+            unitTextHtml(climatePreviewHeaderText(climatePreviewState)) + '</div>';
+        }
+        if (!climateHalf) {
+          html += climatePreviewSlots(
+            climatePreviewState,
+            tile.span_w || 1,
+            tile.span_h || 1,
+            decodeClimateSlotConfig(tile.sensor_gauge_min || 0),
+            decodeClimateTargetLayouts(tile.sensor_gauge_max || 0),
+            tile.climate_geometry || tile.scene_alias || '',
+            climateValue);
+        }
       }
-      if (previewKind === 'cover') {
-        const value = coverPreviewState?.position !== null &&
-                      coverPreviewState?.position !== undefined
-          ? String(coverPreviewState.position) + '%' : '--%';
-        html += '<div class="tile-value tile-cover-value">' +
-          escapeHtml(coverPreviewStateText(coverPreviewState)) +
-          '<br>' + escapeHtml(value) + '</div>';
-      }
+      if (previewKind === 'cover') html += coverPreviewExtraHtml(coverPreviewState, Number(tile.span_h) === 0.5);
+      if (deviceKind) html += devicePreviewExtraHtml(deviceKind, devicePreviewState, Number(tile.span_h) === 0.5);
+      if (previewKind === 'calendar') html += calendarPreviewExtraHtml(tile, sensorMeta);
       if (previewKind === 'binary_sensor') {
         html += '<div class="tile-value tile-binary-sensor-value ' + (Number(tile.sensor_value_font) ? sensorValueClass : '') + '" id="' +
           tab + '-tile-' + index + '-value">' +
           escapeHtml(binarySensorPreviewStateText(binarySensorPreviewState)) +
           '</div>';
       }
-      if (isEditablePreview(previewKind)) html += '<div class="tile-value tile-editable-value ' + sensorValueClass + '">' + escapeHtml(editablePreviewText(iconEntity, previewKind, sensorMeta)) + '</div>';
+      if (isEditablePreview(previewKind)) html += '<div class="tile-value tile-editable-value ' + sensorValueClass + '">' + editablePreviewHtml(iconEntity, previewKind, sensorMeta) + '</div>';
       if (previewKind === 'clock') {
         const flags = normalizeClockFlags(tile.sensor_decimals);
         const clockTimeFont = tile.key_code || 40;
         const clockDateFont = Math.min(72, Number(tile.key_modifier || 20));
         const clockTimeFormat = (tile.sensor_gauge_min !== undefined) ? tile.sensor_gauge_min : 0;
-        const clockDateFormat = (tile.sensor_gauge_max !== undefined) ? tile.sensor_gauge_max : 0;
-        if (flags & 1) html += '<div class="tile-clock-time" ' + getClockPreviewTextStyle(clockTimeFont, 40, '#fff') + '>' + getClockPreviewTime(clockTimeFormat) + '</div>';
-        if (flags & 2) html += '<div class="tile-clock-date" ' + getClockPreviewTextStyle(clockDateFont, 24, '#fff') + '>' + getClockPreviewDate(clockDateFormat) + '</div>';
+        const clockDate = clockDateOptions(tile.sensor_gauge_max !== undefined ? tile.sensor_gauge_max : 0);
+        applyClockPreviewAlign(el, clockDate.align);
+        let clockLines = '';
+        if (flags & 1) clockLines += '<div class="tile-clock-time" ' + getClockPreviewTextStyle(clockTimeFont, 40, panelRoleHex('text', '#fff')) + '>' + clockDigitsHtml(getClockPreviewTime(clockTimeFormat)) + '</div>';
+        if ((flags & 2) || clockDate.weekday) clockLines += '<div class="tile-clock-date" ' + getClockPreviewTextStyle(clockDateFont, 20, panelRoleHex('text', '#fff')) + '>' + clockDigitsHtml(getClockPreviewDate(clockDate.format, clockDate.weekday, (flags & 2) !== 0)) + '</div>';
+        // The analog and the wall clock: a face and the lines beside or below
+        // it (layoutClockFacePreview, after the tile has its size).
+        html += clockDate.style ? '<svg class="tile-clock-face" data-options="' + Number(tile.sensor_gauge_max || 0) + '"></svg>'
+          + '<div class="tile-clock-face-text">' + clockLines + '</div>' : clockLines;
       }
       if (previewKind === 'text') {
+        applyTextPreviewAlign(el, tile.sensor_gauge_max);
         const textValue = tile.text_value || tile.scene_alias || tile.key_macro || '';
         if (textValue) {
           const textClass = getSensorValueFontClass(tile.sensor_value_font);
@@ -7462,21 +11459,71 @@ function syncTileRadiusControls(tabEl) {
             escapeHtml(textValue) + '</div>';
         }
       }
-      if (previewKind === 'switch' && tile.switch_style === 1) {
-        html += '<div class="tile-switch" id="' + tab + '-tile-' + index + '-switch"><div class="tile-switch-knob"></div></div>';
-      }
+      if (previewKind === 'switch') html += switchPreviewExtraHtml(tile.switch_style, Number(tile.span_h) === 0.5);
       html += getTileResizeHandlesHtml(typeValue);
+      // A media tile's shown artwork survives the re-render; applyMediaPreview
+      // keeps it when it is still the same picture.
+      const keptCover = previewKind === 'media'
+        ? el.querySelector(':scope > .media-preview-cover:not([hidden])') : null;
       el.innerHTML = html;
+      if (keptCover) el.appendChild(keptCover);
+      if (previewKind === 'weather') {
+        applyWeatherPreview(el, applyWeatherSensorOverrides(parseWeatherPreviewPayload(
+          tile.sensor_entity ? (sensorMeta?.weatherValues?.[tile.sensor_entity] ?? '') : ''),
+          tile.weather_temperature_sensor || '', tile.weather_humidity_sensor || '', metaValues, metaUnits),
+          tile, iconName, previewIconColor(typeValue, tile.icon_colors, tile.sensor_entity || '', sensorMeta, null, ''));
+      }
+      if (previewKind === 'media') {
+        applyMediaPreview(el, parseMediaPreviewPayload(
+          tile.sensor_entity ? (sensorMeta?.mediaValues?.[tile.sensor_entity] ?? '') : ''),
+          tile, iconName, tile.sensor_entity ? (metaNames[tile.sensor_entity] || '') : '');
+      }
+      if (previewKind === 'power_flow' && typeof applyPowerFlowPreview === 'function') {
+        applyPowerFlowPreview(el, tile, sensorMeta);
+      } else {
+        el.classList.remove('power-flow-tile', 'power-flow-no-card');
+      }
       if (typeof applyTileRulesTint === 'function') {
         applyTileRulesTint(el, typeValue, tile.icon_colors, tile.sensor_entity || '', sensorMeta);
       }
+      if (previewKind === 'media') {
+        applyMediaCoverTint(el, tile.icon_colors, sensorMeta?.mediaCoverColors?.[tile.sensor_entity || ''] || '');
+        if (el.dataset.neutralIdle === '1' && el.dataset.surface !== 'jewel') setTileTintBackground(el, '#FFFFFF', 0, true);
+      }
       applyIconDiscTint(el);
-      if (typeValue === '9') fitCompactClockPreview(el);
+      if (previewKind === 'camera') {
+        applyCameraPicturePreview(el, cameraPictureOptionsOf(tile), Number(tile.span_h) === 0.5, tile);
+      }
+      if (previewKind === 'cover') {
+        applyCoverPreview(el, coverPreviewState, Number(tile.span_h) === 0.5);
+        // The header classes need the bar class set above (switch-tall).
+        applyCompactSensorPreview(el, typeValue, tile, tile.sensor_display_mode, tile.sensor_value_font);
+      }
+      if (deviceKind) {
+        applyDevicePreview(el, deviceKind, devicePreviewState, Number(tile.span_h) === 0.5,
+          Number(tile.bar_orientation) === 1, {w: Number(tile.span_w) || 1, h: Number(tile.span_h) || 1});
+        applyCompactSensorPreview(el, typeValue, tile, tile.sensor_display_mode, tile.sensor_value_font);
+      }
+      if (typeValue === '9') {
+        // A title or icon moves the clock down (clock/renderer.cpp).
+        el.classList.toggle('clock-has-header', !!(displayTitle || iconName));
+        fitCompactClockPreview(el);
+        el.dataset.clockOptions = String(Number(tile.sensor_gauge_max || 0));
+        layoutClockFacePreview(el);
+      }
     }
     if (currentTileTab === tab && currentTileIndex === index) el.classList.add('active');
     if (typeValue === '5' && tile.sensor_entity) {
       const state = parseSwitchPayload(metaValues[tile.sensor_entity] ?? '');
-      applySwitchPreviewState(el, state);
+      applySwitchPreviewState(el, state, tile.sensor_entity);
+    }
+    } finally {
+      globalThis.hometilesPreviewSurface = surfaceSaved;
+    }
+    // Its tint changed the surface: drawn again on it from the start.
+    if (!forcedSurface && el.dataset.surface === 'jewel' && surface !== 'jewel') {
+      renderTileFromData(tab, index, tile, sensorMeta, 'jewel');
+      return;
     }
   }
 
@@ -7510,7 +11557,11 @@ function syncTileRadiusControls(tabEl) {
 
   function loadSensorValues(
       refreshTiles = false, forceMetaFetch = false, tabsOverride = null) {
-    if (dragSource || resizeState) {
+    // The layout window's tiles are not the panel's: values only.
+    if (typeof layoutWindowOpen === 'function' && layoutWindowOpen()) refreshTiles = false;
+    // A Settings move to or from the parking slot shows ahead of the device
+    // (previewSettingsTileTransfer); stored tile data would draw it back.
+    if (dragSource || resizeState || settingsTileTransfersInFlight) {
       queueDeferredSensorRefresh(refreshTiles);
       return Promise.resolve(false);
     }
@@ -7532,7 +11583,7 @@ function syncTileRadiusControls(tabEl) {
       // A refresh may have started shortly before the drag and only arrive
       // during it. In that case it must not overwrite the local preview with the
       // old device state.
-      if (dragSource || resizeState) {
+      if (dragSource || resizeState || settingsTileTransfersInFlight) {
         queueDeferredSensorRefresh(refreshTiles);
         return;
       }
@@ -7547,7 +11598,9 @@ function syncTileRadiusControls(tabEl) {
       });
       if (currentTileIndex !== -1 && currentTileTab) {
         restoreCurrentTileSelectionUi();
-      } else if (!isScreensaverTileTab(currentTileTab)) {
+      } else if (!isScreensaverTileTab(currentTileTab) && !pageFieldPicked()) {
+        // A picked free page field is a selection too (user 2026-10-22: every
+        // refresh jumped back to the last tile).
         restoreSelectedTileState();
       }
       return true;
@@ -7585,7 +11638,13 @@ function syncTileRadiusControls(tabEl) {
 
   function createDragPreview(tile) {
     const clone = tile.cloneNode(true);
+    // No second element with the tile's id (getElementById, selection).
+    clone.removeAttribute('id');
     const rect = tile.getBoundingClientRect();
+    // The tile's own display: a forced block dropped the flex centering of
+    // Folder, Settings and Switch tiles, so the drag image showed icon and
+    // disc at the top left (user 2026-10-02).
+    const display = getComputedStyle(tile).display;
     clone.style.position = 'absolute';
     clone.style.top = '-9999px';
     clone.style.left = '-9999px';
@@ -7596,7 +11655,7 @@ function syncTileRadiusControls(tabEl) {
     clone.style.boxShadow = '0 10px 30px rgba(0,0,0,0.35)';
     clone.style.backgroundClip = 'padding-box';
     clone.style.clipPath = 'inset(0 round 11px)';
-    clone.style.display = 'block';
+    clone.style.display = display === 'none' ? 'block' : display;
     document.body.appendChild(clone);
     return clone;
   }
@@ -7679,7 +11738,7 @@ function syncTileRadiusControls(tabEl) {
 
   function getTileGridMetrics(tab) {
     const grid = getTileGrid(tab);
-    return getGridElementMetrics(grid, GRID_COLS, GRID_ROWS);
+    return getGridElementMetrics(grid, placeCols(tab), placeRows(tab));
   }
 
   function getRawGridCellFromPointer(tab, clientX, clientY, sizeStep = null) {
@@ -7700,17 +11759,35 @@ function syncTileRadiusControls(tabEl) {
     if (col < 0) col = 0;
     const firstRow = firstAllowedGridRow(tab);
     if (row < firstRow) row = firstRow;
-    if (col >= GRID_COLS) col = GRID_COLS - unit;
-    if (row >= GRID_ROWS) row = GRID_ROWS - unit;
+    if (col >= placeCols(tab)) col = placeCols(tab) - unit;
+    if (row >= placeRows(tab)) row = placeRows(tab) - unit;
     return { col, row };
   }
 
   function getGridCellFromPointer(tab, clientX, clientY) {
+    if (dragSource && dragSource.tab === tab && dragSource.dropOffset) {
+      // The drop spot is the half cell nearest to the drag image's top-left
+      // corner, so it always lies under the dragged tile; the half cell under
+      // the pointer put it up to a half cell off (user 2026-10-02).
+      const metrics = getTileGridMetrics(tab);
+      if (!metrics) return null;
+      const halfX = (metrics.cellW + metrics.gapX) / 2;
+      const halfY = (metrics.cellH + metrics.gapY) / 2;
+      const left = clientX - dragSource.dropOffset.x - metrics.rect.left - metrics.padLeft;
+      const top = clientY - dragSource.dropOffset.y - metrics.rect.top - metrics.padTop;
+      if (!isFinite(left) || !isFinite(top) || !(halfX > 0) || !(halfY > 0)) return null;
+      const layout = getDragSourceLayout();
+      return {
+        col: Math.max(0, Math.min(placeCols(tab) - (layout?.span_w || 0.5), Math.round(left / halfX) / 2)),
+        row: Math.max(firstAllowedGridRow(tab),
+                      Math.min(placeRows(tab) - (layout?.span_h || 0.5), Math.round(top / halfY) / 2))
+      };
+    }
     const rawCell = getRawGridCellFromPointer(tab, clientX, clientY);
     if (!rawCell) return null;
     if (!dragSource || dragSource.tab !== tab) return rawCell;
-    const anchorCol = clampHalf(dragSource.grabCellCol, 0, GRID_COLS - 1, 0);
-    const anchorRow = clampHalf(dragSource.grabCellRow, 0, GRID_ROWS - 1, 0);
+    const anchorCol = clampHalf(dragSource.grabCellCol, 0, placeCols(tab) - 1, 0);
+    const anchorRow = clampHalf(dragSource.grabCellRow, 0, placeRows(tab) - 1, 0);
     return {
       col: rawCell.col - anchorCol,
       row: rawCell.row - anchorRow
@@ -7730,6 +11807,17 @@ function syncTileRadiusControls(tabEl) {
       getTileLayoutFromData(dragSource.tab, dragSource.index);
   }
 
+  // The pointer's offset from the tile's grid corner, measured in the grid
+  // frame (getTileGridMetrics) that the drop spot is snapped in.
+  function getDragLayoutOffset(tab, layout, clientX, clientY) {
+    const metrics = getTileGridMetrics(tab);
+    if (!metrics || !layout) return null;
+    return {
+      x: clientX - metrics.rect.left - metrics.padLeft - layout.col * (metrics.cellW + metrics.gapX),
+      y: clientY - metrics.rect.top - metrics.padTop - layout.row * (metrics.cellH + metrics.gapY)
+    };
+  }
+
   function getDragAnchorCell(tab, layout, clientX, clientY) {
     const rawCell = getRawGridCellFromPointer(tab, clientX, clientY);
     if (!layout || !rawCell) return { col: 0, row: 0 };
@@ -7739,23 +11827,14 @@ function syncTileRadiusControls(tabEl) {
     return { col, row };
   }
 
-  function getDragAnchorOffset(tab, layout, grabCellCol, grabCellRow, tileRect) {
-    const metrics = getTileGridMetrics(tab);
-    const rect = tileRect || { width: 0, height: 0 };
-    if (!layout || !metrics) {
-      return {
-        x: Math.max(0, (rect.width / 2) || 0),
-        y: Math.max(0, (rect.height / 2) || 0)
-      };
-    }
-    const unit = 0.5;
-    const x = (grabCellCol * (metrics.cellW + metrics.gapX)) + ((metrics.cellW + metrics.gapX) * unit - metrics.gapX) / 2;
-    const y = (grabCellRow * (metrics.cellH + metrics.gapY)) + ((metrics.cellH + metrics.gapY) * unit - metrics.gapY) / 2;
-    const maxX = Math.max(0, rect.width - 1);
-    const maxY = Math.max(0, rect.height - 1);
+  // Where the pointer took the tile: the drag image stays exactly under the
+  // pointer. Centering it on the grabbed half cell moved it by up to a quarter
+  // tile (user 2026-10-02: a dragged tile sat slightly off).
+  function getDragGrabOffset(tileRect, clientX, clientY) {
+    const rect = tileRect || { left: 0, top: 0, width: 0, height: 0 };
     return {
-      x: Math.max(0, Math.min(maxX, x)),
-      y: Math.max(0, Math.min(maxY, y))
+      x: Math.max(0, Math.min(Math.max(0, rect.width - 1), clientX - rect.left)),
+      y: Math.max(0, Math.min(Math.max(0, rect.height - 1), clientY - rect.top))
     };
   }
 
@@ -7771,7 +11850,7 @@ function syncTileRadiusControls(tabEl) {
 
   function captureLayoutSnapshot(tab) {
     const tiles = getTilesData(tab);
-    const count = Math.max(Array.isArray(tiles) ? tiles.length : 0, GRID_COLS * GRID_ROWS);
+    const count = Math.max(Array.isArray(tiles) ? tiles.length : 0, TILES_PER_GRID);
     const snapshot = [];
     for (let i = 0; i < count; i++) {
       const layout = getTileElementLayout(tab, i) || getTileLayoutFromData(tab, i);
@@ -7805,7 +11884,7 @@ function syncTileRadiusControls(tabEl) {
     dragSource.previewKey = '';
     for (let i = 0; i < dragSource.baseLayouts.length; i++) {
       const tile = Array.isArray(tiles) ? tiles[i] : null;
-      if (!tile || Number(tile.type || 0) === 0) continue;
+      if (!tileTakesRoom(tile)) continue;
       const el = document.getElementById(tab + '-tile-' + i);
       const layout = dragSource.baseLayouts[i];
       if (!el || !layout) continue;
@@ -7819,7 +11898,7 @@ function syncTileRadiusControls(tabEl) {
     const tiles = getTilesData(tab);
     for (let i = 0; i < previewResult.layouts.length; i++) {
       const tile = Array.isArray(tiles) ? tiles[i] : null;
-      if (!tile || Number(tile.type || 0) === 0) continue;
+      if (!tileTakesRoom(tile)) continue;
       const el = document.getElementById(tab + '-tile-' + i);
       if (!el) continue;
 
@@ -7887,11 +11966,11 @@ function syncTileRadiusControls(tabEl) {
       getTileLayoutFromData(tab, tileIndex));
     const active = new Set();
     tiles.forEach((tile, tileIndex) => {
-      if (tile && Number(tile.type || 0) !== 0) active.add(tileIndex);
+      if (tileTakesRoom(tile)) active.add(tileIndex);
     });
     return canPlaceGridLayout(
       layouts, active, index, candidateLayout,
-      GRID_COLS, GRID_ROWS, firstAllowedGridRow(tab));
+      placeCols(tab), placeRows(tab), firstAllowedGridRow(tab));
   }
 
   function canPlaceHiddenSettingsLayout(tab, candidateLayout) {
@@ -7903,7 +11982,8 @@ function syncTileRadiusControls(tabEl) {
     const active = new Set();
     document.querySelectorAll('#tab-tiles-' + tab + ' .tile').forEach(tile => {
       const index = Number(tile.dataset.index);
-      if (!Number.isInteger(index) || Number(tile.dataset.type || 0) === 0) return;
+      if (!Number.isInteger(index) || Number(tile.dataset.type || 0) === 0 ||
+          tile.classList.contains('tile-unplaced') || tile.classList.contains('page-field-tile')) return;
       const layout = getTileElementLayout(tab, index);
       if (!layout) return;
       layouts[index] = layout;
@@ -7911,7 +11991,7 @@ function syncTileRadiusControls(tabEl) {
     });
     return canPlaceGridLayout(
       layouts, active, -1, candidateLayout,
-      GRID_COLS, GRID_ROWS, firstAllowedGridRow(tab));
+      placeCols(tab), placeRows(tab), firstAllowedGridRow(tab));
   }
 
   function manhattanDistance(colA, rowA, colB, rowB) {
@@ -7943,7 +12023,7 @@ function syncTileRadiusControls(tabEl) {
   function buildPlacementCandidates(
       tab, spanW, spanH, preferredCol, preferredRow) {
     return buildGridPlacementCandidates(
-      GRID_COLS, GRID_ROWS, firstAllowedGridRow(tab),
+      placeCols(tab), placeRows(tab), firstAllowedGridRow(tab),
       spanW, spanH, preferredCol, preferredRow);
   }
 
@@ -8048,12 +12128,12 @@ function syncTileRadiusControls(tabEl) {
 
     const active = new Set();
     tiles.forEach((tile, index) => {
-      if (tile && Number(tile.type || 0) !== 0) active.add(index);
+      if (tileTakesRoom(tile)) active.add(index);
     });
     return simulateGridReorderLayouts(
       baseLayouts, active, fromIdx,
       targetCol, targetRow,
-      GRID_COLS, GRID_ROWS, firstAllowedGridRow(tab), tiles.map(tile => tile?.type));
+      placeCols(tab), placeRows(tab), firstAllowedGridRow(tab), tiles.map(tile => tile?.type));
   }
 
   function clearDragPlaceholder() {
@@ -8141,8 +12221,12 @@ function syncTileRadiusControls(tabEl) {
       if (slots && html) slots.outerHTML = html;
     }
     const data = getTilesData(tab)?.[resizeState?.index];
+    // A Switch tile gains or loses its bar between half and full height.
+    const isSwitch = Number(data?.type) === 5;
+    if (isSwitch) prepareSwitchResizePreview(preview, data, layout);
     applyCompactSensorPreview(preview, data?.type, layout, data?.sensor_display_mode, data?.sensor_value_font);
     placeholder.replaceChildren(preview);
+    if (isSwitch) finishSwitchResizePreview(preview, data);
   }
 
   function updateResizePlaceholder(tab, layout, valid) {
@@ -8175,18 +12259,18 @@ function syncTileRadiusControls(tabEl) {
       ? tiles[currentTileIndex] : null;
     const typeValue = document.getElementById(tab + '_tile_type')?.value ?? tile?.type ?? 0;
     const isMedia = Number(typeValue) === MEDIA_TILE_TYPE;
-    const minW = isMedia ? Math.min(MEDIA_TILE_MIN_SPAN, GRID_COLS) : 1;
+    const minW = isMedia ? Math.min(MEDIA_TILE_MIN_SPAN, placeCols(tab)) : 1;
     const unit = 0.5;
     const snap = clampHalf;
     const rawCell = getRawGridCellFromPointer(tab, clientX, clientY, unit);
     if (!rawCell) return null;
-    const minH = isMedia ? Math.min(MEDIA_TILE_MIN_SPAN, GRID_ROWS) : (supportsHalfSize(typeValue) ? 0.5 : 1);
+    const minH = isMedia ? Math.min(MEDIA_TILE_MIN_SPAN, placeRows(tab)) : (supportsHalfSize(typeValue) ? 0.5 : 1);
     const maxW = isMedia
-      ? Math.min(MEDIA_TILE_MAX_SPAN, GRID_COLS - layout.col)
-      : GRID_COLS - layout.col;
+      ? Math.min(MEDIA_TILE_MAX_SPAN, placeCols(tab) - layout.col)
+      : placeCols(tab) - layout.col;
     const maxH = isMedia
-      ? Math.min(MEDIA_TILE_MAX_SPAN, GRID_ROWS - layout.row)
-      : GRID_ROWS - layout.row;
+      ? Math.min(MEDIA_TILE_MAX_SPAN, placeRows(tab) - layout.row)
+      : placeRows(tab) - layout.row;
     if (String(direction || '').includes('s')) {
       spanH = snap(rawCell.row - layout.row + unit, minH, maxH, layout.span_h);
     }
@@ -8308,6 +12392,9 @@ function syncTileRadiusControls(tabEl) {
     tile.classList.add('resizing');
     tile.draggable = false;
     document.body.classList.add('tile-resize-active');
+    // The hidden card's target shows at once: before the first pointer move
+    // the tile was simply gone (user 2026-10-02).
+    updateResizePlaceholder(tab, layout, true);
     window.addEventListener('pointermove', handleTileResizeMove);
     window.addEventListener('pointerup', handleTileResizeEnd);
     window.addEventListener('pointercancel', handleTileResizeCancel);
@@ -8319,12 +12406,12 @@ function syncTileRadiusControls(tabEl) {
     const placeholder = ensureDragPlaceholder(tab);
     if (!sourceLayout || !placeholder) return;
 
-    const targetCol = clampHalf(col, 0, GRID_COLS - 0.5, sourceLayout.col);
-    const targetRow = clampHalf(row, firstAllowedGridRow(tab), GRID_ROWS - 0.5, sourceLayout.row);
-    const fits = (targetCol + sourceLayout.span_w <= GRID_COLS) &&
-                 (targetRow + sourceLayout.span_h <= GRID_ROWS);
-    const spanW = Math.max(1, Math.min(sourceLayout.span_w, GRID_COLS - targetCol));
-    const spanH = Math.max(0.5, Math.min(sourceLayout.span_h, GRID_ROWS - targetRow));
+    const targetCol = clampHalf(col, 0, placeCols(tab) - 0.5, sourceLayout.col);
+    const targetRow = clampHalf(row, firstAllowedGridRow(tab), placeRows(tab) - 0.5, sourceLayout.row);
+    const fits = (targetCol + sourceLayout.span_w <= placeCols(tab)) &&
+                 (targetRow + sourceLayout.span_h <= placeRows(tab));
+    const spanW = Math.max(1, Math.min(sourceLayout.span_w, placeCols(tab) - targetCol));
+    const spanH = Math.max(0.5, Math.min(sourceLayout.span_h, placeRows(tab) - targetRow));
 
     placeholder.classList.toggle('invalid', !fits);
     placeholder.classList.add('show');
@@ -8333,14 +12420,16 @@ function syncTileRadiusControls(tabEl) {
 
   function handleGridDragMove(tab, e) {
     if (!dragSource || dragSource.tab !== tab) return;
+    // Over one of Home's page fields or its Settings field (page-fields.js).
+    if (typeof pageFieldDrag === 'function' && pageFieldDrag(tab, e, false)) return;
     const cell = getGridCellFromPointer(tab, e.clientX, e.clientY);
     if (!cell) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
     const sourceLayout = getDragSourceLayout();
     if (!sourceLayout) return;
-    const targetCol = clampHalf(cell.col, 0, GRID_COLS - 0.5, sourceLayout.col);
-    const targetRow = clampHalf(cell.row, firstAllowedGridRow(tab), GRID_ROWS - 0.5, sourceLayout.row);
+    const targetCol = clampHalf(cell.col, 0, placeCols(tab) - 0.5, sourceLayout.col);
+    const targetRow = clampHalf(cell.row, firstAllowedGridRow(tab), placeRows(tab) - 0.5, sourceLayout.row);
     updateDragPlaceholder(tab, targetCol, targetRow);
 
     if (dragSource.kind === 'hidden-settings') {
@@ -8353,6 +12442,12 @@ function syncTileRadiusControls(tabEl) {
       const valid = canPlaceHiddenSettingsLayout(tab, candidate);
       ensureDragPlaceholder(tab)?.classList.toggle('invalid', !valid);
       dragSource.hiddenTarget = valid ? candidate : null;
+      return;
+    }
+    // A page taken out of its field (page-fields.js) onto Home's screen.
+    if (dragSource.kind === 'page-slot') {
+      const candidate = {col: targetCol, row: targetRow, span_w: sourceLayout.span_w, span_h: sourceLayout.span_h};
+      ensureDragPlaceholder(tab)?.classList.toggle('invalid', !canPlacePageTile(candidate));
       return;
     }
 
@@ -8381,6 +12476,7 @@ function syncTileRadiusControls(tabEl) {
 
   function handleGridDrop(tab, e) {
     if (!dragSource || dragSource.tab !== tab) return;
+    if (typeof pageFieldDrag === 'function' && pageFieldDrag(tab, e, true)) return;
     const sourceLayout = getDragSourceLayout();
     const cell = getGridCellFromPointer(tab, e.clientX, e.clientY);
     clearDragPlaceholder();
@@ -8388,10 +12484,10 @@ function syncTileRadiusControls(tabEl) {
 
     e.preventDefault();
     e.stopPropagation();
-    const targetCol = clampHalf(cell.col, 0, GRID_COLS - 0.5, sourceLayout.col);
-    const targetRow = clampHalf(cell.row, firstAllowedGridRow(tab), GRID_ROWS - 0.5, sourceLayout.row);
-    const fits = (targetCol + sourceLayout.span_w <= GRID_COLS) &&
-                 (targetRow + sourceLayout.span_h <= GRID_ROWS);
+    const targetCol = clampHalf(cell.col, 0, placeCols(tab) - 0.5, sourceLayout.col);
+    const targetRow = clampHalf(cell.row, firstAllowedGridRow(tab), placeRows(tab) - 0.5, sourceLayout.row);
+    const fits = (targetCol + sourceLayout.span_w <= placeCols(tab)) &&
+                 (targetRow + sourceLayout.span_h <= placeRows(tab));
 
     if (dragSource.kind === 'hidden-settings') {
       const candidate = {
@@ -8406,6 +12502,15 @@ function syncTileRadiusControls(tabEl) {
       }
       dragSource.dropCommitted = true;
       restoreHiddenSettingsTile(candidate.col, candidate.row);
+      return;
+    }
+    if (dragSource.kind === 'page-slot') {
+      const candidate = {col: targetCol, row: targetRow, span_w: sourceLayout.span_w, span_h: sourceLayout.span_h};
+      if (!fits || !canPlacePageTile(candidate)) {
+        showNotification(t('tileDoesNotFit'), false);
+        return;
+      }
+      dropPageOnGrid(candidate);
       return;
     }
 
@@ -8451,7 +12556,7 @@ function syncTileRadiusControls(tabEl) {
     for (let i = 0; i < tiles.length; i++) {
       const tile = tiles[i];
       const layout = previewResult.layouts[i];
-      if (!tile || Number(tile.type || 0) === 0 || !layout) continue;
+      if (!tileTakesRoom(tile) || !layout) continue;
       const changed = tile.col !== layout.col || tile.row !== layout.row;
       tile.col = layout.col;
       tile.row = layout.row;
@@ -8525,6 +12630,23 @@ function syncTileRadiusControls(tabEl) {
     });
   }
 
+  // Chrome keeps :hover where a drag started until the pointer moves again:
+  // the tile or free slot that lands there after the drop showed its dashed
+  // hover ring at the dragged tile's old place (user 2026-10-13). The rings
+  // wait for the pointer's next real move or press (admin.css).
+  document.addEventListener('dragend', event => {
+    const x = event.clientX, y = event.clientY;
+    document.body.classList.add('tile-hover-stale');
+    const settle = next => {
+      if (next.type === 'pointermove' && Math.abs(next.clientX - x) < 3 && Math.abs(next.clientY - y) < 3) return;
+      document.body.classList.remove('tile-hover-stale');
+      document.removeEventListener('pointermove', settle, true);
+      document.removeEventListener('pointerdown', settle, true);
+    };
+    document.addEventListener('pointermove', settle, true);
+    document.addEventListener('pointerdown', settle, true);
+  }, true);
+
   function enableTileDrag(tab) {
     const grid = getTileGrid(tab);
     const tiles = grid ? grid.querySelectorAll(':scope > .tile') : [];
@@ -8541,7 +12663,7 @@ function syncTileRadiusControls(tabEl) {
         const layout = getTileElementLayout(tab, tileIndex) ||
                        getTileLayoutFromData(tab, tileIndex);
         const anchorCell = getDragAnchorCell(tab, layout, e.clientX, e.clientY);
-        const grabOffset = getDragAnchorOffset(tab, layout, anchorCell.col, anchorCell.row, tile.getBoundingClientRect());
+        const grabOffset = getDragGrabOffset(tile.getBoundingClientRect(), e.clientX, e.clientY);
         dragSource = {
           kind: 'grid-tile',
           tab,
@@ -8551,6 +12673,7 @@ function syncTileRadiusControls(tabEl) {
           baseLayouts: captureLayoutSnapshot(tab),
           grabCellCol: anchorCell.col,
           grabCellRow: anchorCell.row,
+          dropOffset: getDragLayoutOffset(tab, layout, e.clientX, e.clientY) || grabOffset,
           previewResult: null,
           appliedPreviewResult: null,
           previewKey: '',
@@ -8605,11 +12728,14 @@ function syncTileRadiusControls(tabEl) {
   async function flushSettingsTileSaveBeforeHide(tab, index) {
     if (index < 0) return true;
     const timerKey = tab + ':' + index;
+    // A pending edit needs no save of its own: the parking save carries the
+    // tile's snapshot with it, and an extra save made the device write and
+    // rebuild its grid twice. Only a save already on its way must land first.
     if (autoSaveTimers[timerKey]) {
       clearTimeout(autoSaveTimers[timerKey]);
       delete autoSaveTimers[timerKey];
     }
-    saveTile(tab, true, index);
+    clearDraft(tab, index);
     const saveKey = getTileSaveKey(tab, index);
     const deadline = Date.now() + 8000;
     while (Date.now() < deadline) {
@@ -8624,21 +12750,34 @@ function syncTileRadiusControls(tabEl) {
     return false;
   }
 
+  // Moves of the Settings tile between the grid and the parking slot show at
+  // once and queue their saves (queueSettingsAccessSave keeps the order), so
+  // a move made while the device still saves the previous one is not lost
+  // (user 2026-10-02). Only the latest move reconciles with the device, and
+  // only when the device put the tile elsewhere than the preview: reloading
+  // the Home grid made the panel read every folder it links to.
+  function settingsTransferMatches(saved, index) {
+    return saved && Number(saved.settings_tile_index) === index;
+  }
+
   async function hideSettingsTileFromGrid() {
     const hidden = settingsAccessElement('settings_tile_hidden');
     const swipe = settingsAccessElement('settings_swipe_enabled');
-    if (!hidden || settingsTileTransferInFlight) return false;
-    settingsTileTransferInFlight = true;
+    if (!hidden) return false;
+    const settingsTile = (getTilesData('folder0') || []).findIndex(
+      tile => Number(tile?.type || 0) === 7);
+    if (settingsTile < 0) {
+      return false;
+    }
+    const snapshot = normalizeHiddenSettingsSnapshot(
+      getTileSnapshotForSave('folder0', settingsTile) ||
+      currentGridSettingsSnapshot());
+    const transfer = ++settingsTileTransferSeq;
+    settingsTileTransfersInFlight++;
     try {
-      const settingsTile = (getTilesData('folder0') || []).findIndex(
-        tile => Number(tile?.type || 0) === 7);
-      if (settingsTile < 0) {
-        return false;
-      }
-      const snapshot = normalizeHiddenSettingsSnapshot(
-        getTileSnapshotForSave('folder0', settingsTile) ||
-        currentGridSettingsSnapshot());
+      previewSettingsTileTransfer(true, snapshot);
       if (!(await flushSettingsTileSaveBeforeHide('folder0', settingsTile))) {
+        if (transfer === settingsTileTransferSeq) await reconcileSettingsTileUi(false);
         return false;
       }
       hidden.checked = true;
@@ -8646,33 +12785,52 @@ function syncTileRadiusControls(tabEl) {
       toggleSettingsAccessFields();
       const saved = await queueSettingsAccessSave(
         null, null, snapshot, false);
-      if (!saved) return false;
+      if (transfer !== settingsTileTransferSeq) return saved;
+      if (!saved) {
+        await reconcileSettingsTileUi(false);
+        return false;
+      }
+      if (settingsTransferMatches(saved, -1)) return true;
       return await reconcileSettingsTileUi(true, snapshot);
     } finally {
-      settingsTileTransferInFlight = false;
+      settingsTileTransfersInFlight--;
+      flushDeferredSensorRefresh();
     }
   }
 
   async function restoreHiddenSettingsTile(col, row) {
     const hidden = settingsAccessElement('settings_tile_hidden');
-    if (!hidden || settingsTileTransferInFlight) return false;
+    if (!hidden) return false;
     const snapshot = normalizeHiddenSettingsSnapshot();
-    settingsTileTransferInFlight = true;
+    const transfer = ++settingsTileTransferSeq;
+    settingsTileTransfersInFlight++;
     try {
+      // The Settings checkbox restores without a drop spot; the device then
+      // picks the spot and the reload shows it.
+      const shownAt = Number.isFinite(col) && Number.isFinite(row)
+        ? previewSettingsTileTransfer(false, snapshot, {col, row})
+        : -1;
       hidden.checked = false;
       toggleSettingsAccessFields();
       const saved = await queueSettingsAccessSave(
         null, {col, row}, null, false);
-      if (!saved) return false;
+      if (transfer !== settingsTileTransferSeq) return saved;
+      if (!saved) {
+        await reconcileSettingsTileUi(true, snapshot);
+        return false;
+      }
+      if (shownAt >= 0 && settingsTransferMatches(saved, shownAt)) return true;
       return await reconcileSettingsTileUi(false, snapshot, true);
     } finally {
-      settingsTileTransferInFlight = false;
+      settingsTileTransfersInFlight--;
+      flushDeferredSensorRefresh();
     }
   }
 
   function enableSettingsHiddenSlot() {
     const slot = document.getElementById('settingsHiddenSlot');
     const hiddenTile = document.getElementById('settingsHiddenTile');
+    const hint = document.getElementById('settingsHiddenHint');
     if (!slot || !hiddenTile || slot.dataset.bound === '1') return;
     slot.dataset.bound = '1';
     hiddenTile.addEventListener('click', () => selectHiddenSettingsTile());
@@ -8683,10 +12841,22 @@ function syncTileRadiusControls(tabEl) {
       const tile = getTilesData('folder0')?.[dragSource.index];
       return Number(dragSource.type || tile?.type || 0) === 7;
     };
+    // The slot is one more drop cell of the Settings tile and works like a
+    // grid cell (user 2026-10-02): with the pointer over it the teal
+    // placeholder shows in the slot and the grid's placeholder and reflow
+    // preview go back; a parked tile dropped on it stays parked. In a head
+    // bar layout it is a field of Home's grid, which takes its drops
+    // (page-fields.js pageFieldDrag).
+    const draggingSettings = () => slot.dataset.inGrid !== '1' && (acceptsGridSettings() ||
+      (dragSource?.kind === 'hidden-settings' && dragSource.tab === 'folder0'));
     slot.addEventListener('dragover', event => {
-      if (!acceptsGridSettings()) return;
+      if (!draggingSettings()) return;
       event.preventDefault();
       event.dataTransfer.dropEffect = 'move';
+      if (slot.classList.contains('drop-target')) return;
+      restoreDragPreview('folder0');
+      clearDragPlaceholder();
+      if (dragSource.kind === 'hidden-settings') dragSource.hiddenTarget = null;
       slot.classList.add('drop-target');
     });
     slot.addEventListener('dragleave', event => {
@@ -8695,13 +12865,14 @@ function syncTileRadiusControls(tabEl) {
       slot.classList.remove('drop-target');
     });
     slot.addEventListener('drop', event => {
-      if (!acceptsGridSettings()) return;
+      if (!draggingSettings()) return;
       event.preventDefault();
       event.stopPropagation();
       slot.classList.remove('drop-target');
       restoreDragPreview('folder0');
       clearDragPlaceholder();
-      if (dragSource) dragSource.dropCommitted = true;
+      if (dragSource.kind === 'hidden-settings') return;
+      dragSource.dropCommitted = true;
       hideSettingsTileFromGrid();
     });
 
@@ -8710,15 +12881,29 @@ function syncTileRadiusControls(tabEl) {
         event.preventDefault();
         return;
       }
-      const spanW = clampHalf(hiddenTile.dataset.spanW, 1, GRID_COLS, 1);
-      const spanH = clampHalf(hiddenTile.dataset.spanH, 0.5, GRID_ROWS, 1);
+      // Taking the parked tile selects it like a grid tile, so the drag image
+      // carries the teal selection.
+      if (currentTileTab !== 'folder0' || currentTileIndex !== HIDDEN_SETTINGS_TILE_INDEX) {
+        selectHiddenSettingsTile();
+      }
+      // Out of its field it is one cell, like a page's folder (user
+      // 2026-10-22: it came out half high).
+      const spanW = 1;
+      const spanH = 1;
+      // The slot shows one cell: the grabbed half of it anchors the drop like
+      // a grid tile, and the drag image stays where the pointer took it.
+      const rect = hiddenTile.getBoundingClientRect();
+      const grabOffset = getDragGrabOffset(rect, event.clientX, event.clientY);
+      const grabCellCol = spanW > 0.5 && grabOffset.x >= rect.width / 2 ? 0.5 : 0;
+      const grabCellRow = spanH > 0.5 && grabOffset.y >= rect.height / 2 ? 0.5 : 0;
       dragSource = {
         kind: 'hidden-settings',
         tab: 'folder0',
         index: -1,
         layout: {col: 0, row: 0, span_w: spanW, span_h: spanH},
-        grabCellCol: 0,
-        grabCellRow: 0,
+        grabCellCol,
+        grabCellRow,
+        dropOffset: grabOffset,
         baseLayouts: null,
         dropCommitted: false,
         hiddenTarget: null
@@ -8727,13 +12912,16 @@ function syncTileRadiusControls(tabEl) {
       hiddenTile.classList.add('dragging');
       if (event.dataTransfer.setDragImage) {
         dragPreview = createDragPreview(hiddenTile);
-        event.dataTransfer.setDragImage(
-          dragPreview, hiddenTile.offsetWidth / 2, hiddenTile.offsetHeight / 2);
+        event.dataTransfer.setDragImage(dragPreview, grabOffset.x, grabOffset.y);
       }
+      // The slot it left is the empty slot at once: tray icon and hint.
+      slot.classList.add('lifting');
+      hint?.classList.remove('is-hidden');
     });
     hiddenTile.addEventListener('dragend', () => {
       hiddenTile.classList.remove('dragging');
-      slot.classList.remove('drop-target', 'invalid');
+      slot.classList.remove('drop-target', 'invalid', 'lifting');
+      hint?.classList.toggle('is-hidden', hiddenTile.dataset.hidden === '1');
       clearDragPlaceholder();
       if (dragPreview && dragPreview.parentNode) dragPreview.parentNode.removeChild(dragPreview);
       dragPreview = null;
@@ -8750,7 +12938,8 @@ function syncTileRadiusControls(tabEl) {
       const handle = e.target.closest('.tile-resize-handle');
       if (!handle) return;
       const tile = handle.closest('.tile');
-      if (!tile || tile.classList.contains('empty')) return;
+      // A page's tile is one cell: no resizing (page-fields.js).
+      if (!tile || tile.classList.contains('empty') || tile.classList.contains('page-field-tile')) return;
       beginTileResize(tab, tile, handle.dataset.resizeDir || 'se', e);
     });
   }
@@ -8780,6 +12969,11 @@ function syncTileRadiusControls(tabEl) {
     const localSnapshot = captureTilePositionSnapshot(tab);
     applyLocalTileReorder(tab, previewResult);
     clearDragPlaceholder();
+    // The layout window keeps the editor's places to itself (layout-window.js).
+    if (typeof layoutWindowOpen === 'function' && layoutWindowOpen()) {
+      clearDeferredSensorRefresh();
+      return;
+    }
     fetch('api/tiles/reorder', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -8818,7 +13012,8 @@ function syncTileRadiusControls(tabEl) {
     let selectedCol = Number.MAX_SAFE_INTEGER;
     document.querySelectorAll('#tab-tiles-' + tab + ' .tile').forEach(tile => {
       const index = parseInt(tile.dataset.index, 10);
-      if (isNaN(index) || Number(tile.dataset.type || 0) === 0) return;
+      if (isNaN(index) || Number(tile.dataset.type || 0) === 0 ||
+          tile.classList.contains('tile-unplaced') || tile.classList.contains('page-field-tile')) return;
       const row = Number(tile.dataset.row);
       const col = Number(tile.dataset.col);
       const safeRow = isNaN(row) ? Number.MAX_SAFE_INTEGER : row;
@@ -8831,6 +13026,2168 @@ function syncTileRadiusControls(tabEl) {
     });
     return selectedIndex >= 0 ? selectedIndex : 0;
   }
+  // Home's page fields and Settings field (head bar layouts, user 2026-10-13,
+  // build/design-mockups/pages/felder-*.png): cells of Home's own grid,
+  // exactly the tiles' size, in two columns beside a square or upright screen
+  // or in rows under a landscape one. A page is its folder's own tile shown
+  // in its field (one cell), dragged like any tile: a Home folder onto a free
+  // field becomes a page, a page onto the screen a folder tile again, a page
+  // onto another field moves there (onto a page they swap). The parked
+  // Settings tile stands in the Settings field (settings/access.js parks it).
+  // The dots take the pages in field order and skip the free fields. The
+  // layout window shows the same fields with its own pages (layout-window.js).
+  const PAGE_SLOT_COUNT = 5;
+
+  // The markup's holder: the page places (data-pages), and at first the
+  // fields' elements, which layoutPageFields moves into the grid.
+  function pageSlotsElement() {
+    return document.getElementById('pageSlots');
+  }
+
+  // The places as stored, without looking for their tiles.
+  function pageSlotIds() {
+    const stored = String(pageSlotsElement()?.dataset.pages || '').split(',').map(Number);
+    return Array.from({length: PAGE_SLOT_COUNT}, (_, i) => stored[i] > 0 ? stored[i] : 0);
+  }
+
+  // The places as put: a folder or 0 for a free one; a folder deleted
+  // meanwhile has left its place free.
+  function pageSlotList() {
+    const stored = String(pageSlotsElement()?.dataset.pages || '').split(',').map(Number);
+    return Array.from({length: PAGE_SLOT_COUNT}, (_, i) => stored[i] > 0 && homeFolderTile(stored[i]) ? stored[i] : 0);
+  }
+
+  // The pages in dot order.
+  function pageFolders() {
+    return pageSlotList().filter(id => id > 0);
+  }
+
+  // The stored form: up to the last page, free places as 0.
+  function encodePageSlots(slots) {
+    const last = slots.reduce((end, id, i) => id ? i + 1 : end, 0);
+    return slots.slice(0, last).join(',');
+  }
+
+  // Home's folder tile of a folder, from the page itself: the server and
+  // the browser both mark it (data-navigate-target), also before the tile
+  // data has loaded.
+  function homeFolderTile(folderId) {
+    return getTileGrid('folder0')?.querySelector(
+      ':scope > .tile[data-type="4"][data-navigate-target="' + Number(folderId) + '"]') || null;
+  }
+
+  function homeFolderTileIndex(folderId) {
+    const tile = homeFolderTile(folderId);
+    return tile ? Number(tile.dataset.index) : -1;
+  }
+
+  // The layout window shows the fields too (user 2026-10-13), on Home: in its
+  // bar layouts its own pages, in every layout the Settings field, as
+  // Settings is parked per layout (stored with the places, layout-window.js).
+  function pageFieldsInWindow() {
+    return typeof layoutWindowOpen === 'function' && layoutWindowOpen();
+  }
+
+  // The fields show in Home's grid of a head bar layout; in the layout window
+  // only while it holds Home's grid (behind it the page keeps its own).
+  function pageFieldsShown() {
+    if (!pageSlotsElement()) return false;
+    if (!pageFieldsInWindow()) return headBarLayout();
+    return layoutWindowShowsFields() && !!getTileGrid('folder0')?.classList.contains('setup-grid');
+  }
+
+  // The page fields themselves: the window's classic layout has the
+  // Settings field only (pages need the head bar).
+  function pageSlotsShown() {
+    return !pageFieldsInWindow() || layoutWindowShowsPages();
+  }
+
+  // A panel whose active layout is the classic one has no fields in its
+  // page: the layout window brings them for its bar layouts.
+  function ensurePageFields() {
+    if (pageSlotsElement()) return;
+    const holder = document.createElement('div');
+    holder.id = 'pageSlots';
+    holder.className = 'page-fields';
+    holder.dataset.pages = '';
+    const word = document.createElement('div');
+    word.className = 'page-fields-label';
+    word.textContent = t('pagesTitle');
+    holder.appendChild(word);
+    for (let i = 0; i < PAGE_SLOT_COUNT; ++i) {
+      const field = document.createElement('div');
+      field.className = 'page-field';
+      field.dataset.slot = String(i);
+      holder.appendChild(field);
+    }
+    document.body.appendChild(holder);
+    enablePageFields();
+  }
+
+  // The fields: the pages' and the Settings field.
+  function pageFieldCount() {
+    return PAGE_SLOT_COUNT + 1;
+  }
+
+  // The room the fields take beside a square or upright screen (two
+  // columns, 14 px apart) or under a landscape one (rows, one word over
+  // them, a little off the screen: user 2026-10-14): a part that grows with
+  // the cells and a fixed one. The layout window keeps it beside its area
+  // (layout-window.js mountLayoutTab).
+  const PAGE_FIELDS_WORD_ROOM = 26;
+  const PAGE_FIELDS_WORD_Y = 6;
+  function pageFieldRoom(cellW, cellH, gap, cols, rows) {
+    if (cols > rows) {
+      const fieldRows = Math.ceil(pageFieldCount() / cols);
+      return {beside: false, w: 0, h: gap + fieldRows * (cellH + gap), fixedW: 0, fixedH: PAGE_FIELDS_WORD_ROOM};
+    }
+    return {beside: true, w: 2 * (cellW + gap) + gap, h: 0, fixedW: 14, fixedH: 0};
+  }
+
+  // Where the fields lie, in the grid's cell units from its first cell
+  // (fractional: they start one grid gap off the screen's edge), and the
+  // room they take beside or under the screen.
+  function pageFieldPlaces(grid) {
+    const style = getComputedStyle(grid);
+    const px = name => parseFloat(style.getPropertyValue(name)) || 0;
+    const cellW = px('--preview-cell-w'), cellH = px('--preview-cell-h'), gap = px('--preview-gap');
+    const padRight = px('--preview-pad-right') || px('--preview-pad');
+    const padBottom = px('--preview-pad-bottom') || px('--preview-pad');
+    // In the layout window its whole area (screen and storage).
+    const cols = placeCols('folder0'), rows = placeRows('folder0');
+    const stepX = cellW + gap, stepY = cellH + gap;
+    const screenW = cols * stepX - gap, screenH = rows * stepY - gap;
+    // The fields lie on a black box of their own like the screen (user
+    // 2026-10-13), one word over it. Its black margin is one grid gap on
+    // every side (user 2026-10-14: the top one was a pixel short of it, its
+    // 1 px line inside), under a landscape screen its sides line up with the
+    // screen's. The boxes are outer edges in the grid's padding box units
+    // from its first cell's corner.
+    const room = pageFieldRoom(cellW, cellH, gap, cols, rows);
+    const fieldRows = Math.ceil(pageFieldCount() / (room.beside ? 2 : cols));
+    const settingsField = pageFieldCount() > PAGE_SLOT_COUNT;
+    if (!room.beside) {
+      // Under a landscape screen in its columns; the Settings field last,
+      // in the sixth column or under the last one.
+      const word = room.fixedH + gap;
+      const top = (screenH + padBottom + word) / stepY;
+      const at = (col, row) => ({col, row: top + row});
+      const wordY = screenH + padBottom + PAGE_FIELDS_WORD_Y;
+      // A word over the Settings field where it starts a row of its own
+      // or stands in the first one (user 2026-10-14).
+      const settingsWord = place => ({x: place.col * stepX, y: wordY + (place.row - top) * stepY});
+      // The window's classic layout: the Settings field alone on its box.
+      if (!pageSlotsShown()) {
+        const place = at(cols - 1, Math.floor(PAGE_SLOT_COUNT / cols));
+        return {
+          pages: Array.from({length: PAGE_SLOT_COUNT}, (_, i) => at(i % cols, Math.floor(i / cols))),
+          settings: settingsField ? place : null,
+          right: 0,
+          bottom: room.h + room.fixedH,
+          box: {x: place.col * stepX - gap - 1, y: place.row * stepY - gap - 1, w: cellW + 2 * gap + 2, h: cellH + 2 * gap + 2},
+          word: null,
+          settingsWord: settingsField ? settingsWord(place) : null
+        };
+      }
+      const settingsPlace = at(cols - 1, Math.floor(PAGE_SLOT_COUNT / cols));
+      return {
+        pages: Array.from({length: PAGE_SLOT_COUNT}, (_, i) => at(i % cols, Math.floor(i / cols))),
+        settings: settingsField ? settingsPlace : null,
+        right: 0,
+        bottom: room.h + room.fixedH,
+        // The box from the screen's left edge to its right one and down to
+        // the grid's end (its bottom margin is the grid's: one gap).
+        box: {x: null, y: screenH + padBottom + word - gap - 1, w: null, h: null},
+        word: {x: 0, y: wordY},
+        // Over the pages' row: no room for it under it.
+        settingsWord: settingsField && settingsPlace.row === top ? settingsWord(settingsPlace) : null
+      };
+    }
+    // Beside a square or upright screen in two columns along its rows, the
+    // word in its head's height; the Settings field bottom right.
+    const apart = room.fixedW;
+    const left = (screenW + padRight + apart + gap) / stepX;
+    // The window's classic layout: the Settings field alone on its box.
+    if (!pageSlotsShown()) {
+      const at = {col: left + 1, row: Math.floor(PAGE_SLOT_COUNT / 2)};
+      return {
+        pages: Array.from({length: PAGE_SLOT_COUNT}, (_, i) => ({col: left + i % 2, row: Math.floor(i / 2)})),
+        settings: settingsField ? at : null,
+        right: room.w + room.fixedW,
+        bottom: 0,
+        box: {x: at.col * stepX - gap, y: at.row * stepY - gap, w: stepX + gap, h: stepY + gap},
+        word: null
+      };
+    }
+    return {
+      pages: Array.from({length: PAGE_SLOT_COUNT}, (_, i) => ({col: left + i % 2, row: Math.floor(i / 2)})),
+      settings: settingsField ? {col: left + 1, row: Math.floor(PAGE_SLOT_COUNT / 2)} : null,
+      right: room.w + room.fixedW,
+      bottom: 0,
+      box: {x: screenW + padRight + apart - 1, y: -gap - 1, w: 2 * stepX + gap + 2, h: fieldRows * stepY + gap + 2},
+      word: {x: screenW + padRight + apart, y: -gap - 19},
+      // Between the fields' rows there is no room for a word.
+      settingsWord: null
+    };
+  }
+
+  function setFieldPlace(el, place) {
+    el.style.setProperty('--tile-col', String(place.col));
+    el.style.setProperty('--tile-row', String(place.row));
+  }
+
+  // A page's folder tile stands in its field as one cell (layout.js
+  // layoutTiles, grid-preview.js renderTileFromData); in the layout window
+  // the Settings tile parked in the shown layout stands in its field.
+  function pageFieldOfTile(tab, tile) {
+    if (tab !== 'folder0' || !tile?.layout_hidden || !pageFieldsShown()) return null;
+    if (Number(tile.type) === 7) {
+      const grid = getTileGrid('folder0');
+      return pageFieldsInWindow() && grid ? pageFieldPlaces(grid).settings : null;
+    }
+    if (Number(tile.type) !== 4) return null;
+    const slot = pageSlotIds().indexOf(Number(tile.navigate_target));
+    const grid = getTileGrid('folder0');
+    return slot >= 0 && grid ? pageFieldPlaces(grid).pages[slot] : null;
+  }
+
+  // The tile picked in the editor is a page's: one cell in its field, the
+  // editor neither moves nor sizes it (layout.js updateLayoutFromInputs,
+  // live-preview.js, type-selection.js) and its stored size stays.
+  function selectedPageTile(tab) {
+    return currentTileIndex >= 0 &&
+      !!document.getElementById(tab + '-tile-' + currentTileIndex)?.classList.contains('page-field-tile');
+  }
+
+  // Shown there only: its stored place (the tile's data-col/-row, which a
+  // tile save sends) stays as it is.
+  function placeOnPageField(el, place) {
+    el.classList.remove('tile-unplaced');
+    el.classList.add('fractional-tile', 'page-field-tile');
+    el.style.gridColumn = 'auto';
+    el.style.gridRow = 'auto';
+    for (const [name, value] of Object.entries({col: place.col, row: place.row, w: 1, h: 1})) {
+      el.style.setProperty('--tile-' + name, String(value));
+    }
+    el.style.display = '';
+  }
+
+  // The grid's room for the fields, the screen drawn behind its own part
+  // only (admin.css .has-page-fields), the free fields' frames, the word
+  // and the Settings field. Runs after every layout of Home's grid.
+  function layoutPageFields(tab) {
+    const holder = pageSlotsElement();
+    const grid = getTileGrid('folder0');
+    if (tab !== 'folder0' || !holder || !grid) return;
+    if (holder.children.length) grid.append(...holder.children);
+    // While the layout window is open Home's grid behind it stays as the
+    // page had it (user 2026-10-13: the window's sizes widened it there and
+    // squeezed the page); the window lays it out once it holds it.
+    if (pageFieldsInWindow() && !grid.classList.contains('setup-grid')) return;
+    const shown = pageFieldsShown();
+    grid.classList.toggle('has-page-fields', shown);
+    if (!shown) {
+      grid.style.removeProperty('--fields-right');
+      grid.style.removeProperty('--fields-bottom');
+      grid.style.removeProperty('--grid-border');
+      return;
+    }
+    const places = pageFieldPlaces(grid);
+    grid.style.setProperty('--fields-right', places.right + 'px');
+    grid.style.setProperty('--fields-bottom', places.bottom + 'px');
+    // The fields' box (admin.css .has-page-fields::after), from the grid's
+    // padding box corner; under the screen as wide as it, never past the
+    // grid's border edges. Both boxes take the border as drawn (0.8 px at 125 %
+    // Windows scaling) and the grid's fractional size (clientWidth/-Height
+    // are rounded): a box a fraction of a pixel past the grid gave the
+    // preview scroll bars (Tab5, user 2026-10-15).
+    const style = getComputedStyle(grid);
+    const padLeft = parseFloat(style.paddingLeft) || 0, padTop = parseFloat(style.paddingTop) || 0;
+    const border = parseFloat(style.borderLeftWidth) || 0;
+    grid.style.setProperty('--grid-border', border + 'px');
+    const box = places.box;
+    const boxLeft = box.x === null ? -border : padLeft + box.x;
+    const boxTop = padTop + box.y;
+    const toEdgeW = 'calc(100% + ' + (border - boxLeft) + 'px)';
+    const toEdgeH = 'calc(100% + ' + (border - boxTop) + 'px)';
+    grid.style.setProperty('--fields-box-l', boxLeft + 'px');
+    grid.style.setProperty('--fields-box-t', boxTop + 'px');
+    grid.style.setProperty('--fields-box-w', box.w === null ? toEdgeW : 'min(' + box.w + 'px, ' + toEdgeW + ')');
+    grid.style.setProperty('--fields-box-h', box.h === null ? toEdgeH : 'min(' + box.h + 'px, ' + toEdgeH + ')');
+    const slots = pageSlotList();
+    // A picked field taken meanwhile (a folder dropped in) or out of sight.
+    if (markedPageSlot >= 0 && (slots[markedPageSlot] || pageFieldsInWindow() || !pageSlotsShown())) {
+      clearPageFieldMark(true);
+    }
+    grid.querySelectorAll(':scope > .page-field:not(.settings-field)').forEach(field => {
+      const slot = Number(field.dataset.slot);
+      setFieldPlace(field, places.pages[slot]);
+      field.hidden = !pageSlotsShown() || !!slots[slot];
+      // A free field is picked like a free cell (#100, user 2026-10-22: a
+      // click made a folder at once, mistakes guaranteed); only the picked
+      // one shows its "+", which makes the page. The layout window keeps its
+      // pages until "Speichern": none there.
+      field.classList.toggle('can-add', !pageFieldsInWindow());
+      field.classList.toggle('marked', markedPageSlot === slot);
+      if (!field.querySelector(':scope > .page-field-add')) {
+        const plus = document.createElement('button');
+        plus.type = 'button';
+        plus.className = 'page-field-add';
+        plus.setAttribute('aria-label', getTileTypeMeta('4')?.label || '');
+        plus.innerHTML = '<i class="mdi mdi-plus"></i>';
+        field.appendChild(plus);
+        field.addEventListener('click', () => selectPageField(Number(field.dataset.slot)));
+        plus.addEventListener('click', event => {
+          event.stopPropagation();
+          // The second click of a double click on the field picks nothing.
+          if (event.detail > 1 || markedPageSlot !== Number(field.dataset.slot)) return;
+          addPageFolder(markedPageSlot);
+        });
+      }
+    });
+    const word = grid.querySelector(':scope > .page-fields-label:not(.settings-label)');
+    const placeWord = (el, place) => {
+      el.hidden = !place;
+      if (!place) return;
+      el.style.setProperty('--word-x', place.x + 'px');
+      el.style.setProperty('--word-y', place.y + 'px');
+    };
+    if (word) placeWord(word, places.word);
+    // The Settings field's own word, the tile type's name (user 2026-10-14).
+    let settingsWord = grid.querySelector(':scope > .page-fields-label.settings-label');
+    if (!settingsWord && places.settingsWord) {
+      settingsWord = document.createElement('div');
+      settingsWord.className = 'page-fields-label settings-label';
+      settingsWord.textContent = getTileTypeMeta('7')?.label || '';
+      grid.appendChild(settingsWord);
+    }
+    if (settingsWord) placeWord(settingsWord, places.settingsWord);
+    const settings = grid.querySelector(':scope > .settings-hidden-slot');
+    if (settings && places.settings) setFieldPlace(settings, places.settings);
+    // The window's own free Settings field (its parked tile stands there
+    // itself; the editor's parking slot stays the page's).
+    let free = grid.querySelector(':scope > .page-field.settings-field');
+    if (pageFieldsInWindow() && !free) {
+      free = document.createElement('div');
+      free.className = 'page-field settings-field';
+      grid.appendChild(free);
+    }
+    if (free) {
+      if (places.settings) setFieldPlace(free, places.settings);
+      // Parked, its tile stands there (a free frame where there is none).
+      free.hidden = !pageFieldsInWindow() || (layoutWindowSettingsParked() && layoutSettingsIndex() >= 0);
+    }
+  }
+
+  // The field under the pointer: a page field or the Settings field.
+  function pageFieldAt(clientX, clientY) {
+    const grid = getTileGrid('folder0');
+    if (!grid || !pageFieldsShown()) return null;
+    const style = getComputedStyle(grid);
+    const px = name => parseFloat(style.getPropertyValue(name)) || 0;
+    const rect = grid.getBoundingClientRect();
+    const cellW = px('--preview-cell-w'), cellH = px('--preview-cell-h'), gap = px('--preview-gap');
+    const left = rect.left + grid.clientLeft + parseFloat(style.paddingLeft);
+    const top = rect.top + grid.clientTop + parseFloat(style.paddingTop);
+    const inside = place => place &&
+      clientX >= left + place.col * (cellW + gap) && clientX < left + place.col * (cellW + gap) + cellW &&
+      clientY >= top + place.row * (cellH + gap) && clientY < top + place.row * (cellH + gap) + cellH;
+    const places = pageFieldPlaces(grid);
+    const slot = pageSlotsShown() ? places.pages.findIndex(inside) : -1;
+    if (slot >= 0) return {kind: 'page', slot, place: places.pages[slot]};
+    return inside(places.settings) ? {kind: 'settings', place: places.settings} : null;
+  }
+
+  // True beside or under the screen, where only the fields are: no free
+  // slot follows the pointer there (layout.js enableFreeSlotHover).
+  function pointerBesideScreen(grid, clientX, clientY) {
+    if (!grid?.classList.contains('has-page-fields')) return false;
+    const rect = grid.getBoundingClientRect();
+    const style = getComputedStyle(grid);
+    return clientX > rect.right - (parseFloat(style.getPropertyValue('--fields-right')) || 0) ||
+      clientY > rect.bottom - (parseFloat(style.getPropertyValue('--fields-bottom')) || 0);
+  }
+
+  function draggedHomeFolder() {
+    if (!dragSource || dragSource.kind !== 'grid-tile' || dragSource.tab !== 'folder0') return 0;
+    const tile = document.getElementById('folder0-tile-' + dragSource.index);
+    return tile?.dataset.type === '4' ? Number(tile.dataset.navigateTarget || 0) : 0;
+  }
+
+  // A drag over a field (drag-resize.js asks first): the grid's placeholder
+  // there, and the drop decides there. False when no field is under the
+  // pointer, so the grid handles it.
+  function pageFieldDrag(tab, event, drop) {
+    if (tab !== 'folder0' || !dragSource) return false;
+    const field = pageFieldAt(event.clientX, event.clientY);
+    if (!field) {
+      // Beside the screen only the fields take a tile (between them, or the
+      // layout window's free spot where the editor has its Settings field).
+      if (!pointerBesideScreen(getTileGrid('folder0'), event.clientX, event.clientY)) return false;
+      event.preventDefault();
+      restoreDragPreview(tab);
+      dragSource.previewKey = '';
+      if (drop) {
+        event.stopPropagation();
+        clearDragPlaceholder();
+      } else {
+        event.dataTransfer.dropEffect = 'none';
+        ensureDragPlaceholder(tab)?.classList.remove('show');
+      }
+      return true;
+    }
+    event.preventDefault();
+    if (drop) event.stopPropagation();
+    const places = pageSlotList();
+    const folder = dragSource.kind === 'page-slot' ? dragSource.folder : draggedHomeFolder();
+    const settings = dragSource.kind === 'hidden-settings' ||
+      (dragSource.kind === 'grid-tile' && Number(dragSource.type) === 7);
+    // A folder onto a free field, a page onto any; Settings onto its own.
+    const fits = field.kind === 'page'
+      ? pageSlotsShown() && folder > 0 && !dragSource.settings && (dragSource.kind === 'page-slot' || !places[field.slot])
+      : settings || !!dragSource.settings;
+    restoreDragPreview(tab);
+    dragSource.previewKey = '';
+    if (!drop) {
+      event.dataTransfer.dropEffect = fits ? 'move' : 'none';
+      const placeholder = ensureDragPlaceholder(tab);
+      if (placeholder) {
+        placeholder.classList.add('show');
+        placeholder.classList.toggle('invalid', !fits);
+        setTileGridPosition(placeholder, field.place.col, field.place.row, 1, 1);
+      }
+      return true;
+    }
+    clearDragPlaceholder();
+    if (!fits) return true;
+    if (field.kind === 'settings') {
+      dragSource.dropCommitted = true;
+      // In the layout window parked in its layout until "Speichern".
+      if (pageFieldsInWindow()) layoutSettingsIn();
+      else if (dragSource.kind !== 'hidden-settings') hideSettingsTileFromGrid();
+      return true;
+    }
+    const from = places.indexOf(folder);
+    if (from === field.slot) return true;
+    // Pages have no PIN: a locked folder asks before it becomes one.
+    const unlock = from < 0 && homeFolderTile(folder)?.dataset.folderPinEnabled === '1';
+    if (unlock && !window.confirm(t('pageUnlockConfirm'))) return true;
+    dragSource.dropCommitted = true;
+    // Exactly where it is dropped; the page there takes its old place.
+    if (from >= 0) places[from] = places[field.slot];
+    places[field.slot] = folder;
+    // In the layout window it stays there until "Speichern" (layout-window.js).
+    if (pageFieldsInWindow()) layoutWindowPages(places, unlock);
+    else savePages(places, {}, unlock);
+    return true;
+  }
+
+  // Home and the pages show the dots in their head and the gear; a page
+  // left the fields shows its X again (home_bar.cpp). Only what differs is
+  // touched: rebuilding the dots for every folder tab the page loaded made
+  // them blink (user 2026-10-12). The layout window passes its own pages.
+  function syncPageHeads(pages = pageFolders()) {
+    document.querySelectorAll('.tile-tab[data-folder-id]').forEach(tab => {
+      const head = tab.querySelector('.head-bar-preview');
+      if (!head) return;
+      const folder = Number(tab.dataset.folderId);
+      const page = !pages.length ? -1 : folder === 0 ? 0 : pages.indexOf(folder) + (pages.includes(folder) ? 1 : -1);
+      const want = page < 0 ? '' : Array.from({length: pages.length + 1}, (_, i) => i === page ? 'O' : 'o').join('');
+      const shown = head.querySelector('.head-dots');
+      const have = shown ? Array.from(shown.children, dot => dot.classList.contains('on') ? 'O' : 'o').join('') : '';
+      if (have !== want) {
+        shown?.remove();
+        head.classList.toggle('has-dots', page >= 0);
+        if (page >= 0) {
+          head.style.setProperty('--head-dots-n', String(pages.length + 1));
+          const dots = document.createElement('span');
+          dots.className = 'head-dots';
+          for (let i = 0; i <= pages.length; ++i) {
+            const dot = document.createElement('i');
+            if (i === page) dot.className = 'on';
+            dots.appendChild(dot);
+          }
+          head.insertBefore(dots, head.querySelector('.head-time'));
+        }
+      }
+      if (folder === 0) return;
+      const button = head.querySelector('.head-button');
+      const icon = button?.querySelector('i');
+      if (!button || !icon) return;
+      const homeGear = document.querySelector('#tab-tiles-folder0 .head-bar-preview .head-gear');
+      const iconClass = 'mdi ' + (page > 0 ? 'mdi-cog' : 'mdi-window-close');
+      if (button.classList.contains('head-gear') !== page > 0) button.classList.toggle('head-gear', page > 0);
+      const off = page > 0 && !!homeGear?.classList.contains('is-off');
+      if (button.classList.contains('is-off') !== off) button.classList.toggle('is-off', off);
+      if (icon.className !== iconClass) icon.className = iconClass;
+    });
+  }
+
+  // Shows a change of the pages at once, like any move: Home's folder tiles
+  // in their fields or on the screen, and the heads. `slots` and `previous`
+  // are the places after and before; a folder leaving them comes back on the
+  // screen as one cell (`out`: at its dropped spot).
+  function showPagesLocally(slots, previous, out = null) {
+    pageSlotsElement().dataset.pages = encodePageSlots(slots);
+    const tiles = getTilesData('folder0') || [];
+    const pages = slots.filter(id => id > 0);
+    new Set([...pages, ...previous.filter(id => id > 0)]).forEach(folder => {
+      const el = homeFolderTile(folder);
+      const tile = el ? tiles[Number(el.dataset.index)] : null;
+      if (!tile) return;
+      const page = pages.includes(folder);
+      // A folder in the fields is one cell, and comes back as one (user
+      // 2026-10-12: a half-high one changed its size in and out).
+      tile.layout_hidden = page;
+      Object.assign(tile, {span_w: 1, span_h: 1});
+      if (!page && out && out.folder === folder) Object.assign(tile, {col: out.col, row: out.row});
+      renderTileFromData('folder0', Number(el.dataset.index), tile, sensorMetaCache);
+    });
+    layoutTiles('folder0', tiles);
+    syncPageHeads();
+    // A page has no PIN: its folder's PIN option goes.
+    if (currentTileTab === 'folder0' && typeof syncFolderPinControls === 'function') syncFolderPinControls('folder0');
+  }
+
+  // The saves go out one after the other; each shows before it is sent.
+  let pageSlotsQueue = Promise.resolve();
+
+  function savePages(slots, extra = {}, unlock = false) {
+    const previous = pageSlotList();
+    const out = extra.out ? {folder: Number(extra.out), col: Number(extra.col), row: Number(extra.row)} : null;
+    showPagesLocally(slots, previous, out);
+    pageSlotsQueue = pageSlotsQueue.then(() => sendPages(slots, previous, extra, unlock));
+    return pageSlotsQueue;
+  }
+
+  async function sendPages(slots, previous, extra, unlock) {
+    const undo = message => {
+      showPagesLocally(previous, slots);
+      showNotification(message, false);
+      return false;
+    };
+    try {
+      const body = new URLSearchParams({pages: encodePageSlots(slots)});
+      if (unlock) body.set('unlock', '1');
+      ['out', 'col', 'row'].forEach(key => {
+        if (extra[key] !== undefined) body.set(key, String(extra[key]));
+      });
+      const response = await fetch('api/pages', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: body.toString()
+      });
+      let data = {};
+      try { data = await response.json(); } catch (_) {}
+      if (!response.ok || !data.success) {
+        return undo(data.error === 'No free cell' ? t('tileDoesNotFit') : t('networkErrorSave'));
+      }
+      const tiles = getTilesData('folder0') || [];
+      // A page has no PIN: its lock went with the save.
+      if (unlock) {
+        slots.filter(id => id > 0).forEach(folder => {
+          const index = homeFolderTileIndex(folder);
+          if (index < 0 || !tiles[index]) return;
+          tiles[index].folder_pin_enabled = false;
+          renderTileFromData('folder0', index, tiles[index], sensorMetaCache);
+        });
+        layoutTiles('folder0', tiles);
+      }
+      // A folder back on the screen: the place the device gave it.
+      if (extra.out !== undefined) {
+        const index = homeFolderTileIndex(Number(extra.out));
+        const tile = index >= 0 ? tiles[index] : null;
+        const place = tile ? data.places?.[ACTIVE_LAYOUT]?.['0']?.[String(tile.view_id)] : null;
+        if (place) {
+          Object.assign(tile, {col: place[0], row: place[1], span_w: place[2], span_h: place[3]});
+          renderTileFromData('folder0', index, tile, sensorMetaCache);
+          layoutTiles('folder0', tiles);
+        } else {
+          const fresh = await fetchTileGridData('folder0', true);
+          fresh.forEach((data, i) => renderTileFromData('folder0', i, data, sensorMetaCache));
+          layoutTiles('folder0', fresh);
+        }
+      }
+      showNotification(t('pagesSaved'));
+      return true;
+    } catch (error) {
+      return undo(t('networkErrorSave'));
+    }
+  }
+
+  // The free page field picked in the editor (-1: none).
+  let markedPageSlot = -1;
+
+  // A free field picked (#100, user 2026-10-22): its teal ring and "+", and
+  // the editor with Type offering Empty and Folder only, and the title and
+  // icon the new folder gets. Nothing is made yet.
+  function selectPageField(slot) {
+    if (pageFieldsInWindow() || pageSlotList()[slot] || markedPageSlot === slot) return;
+    ++tileSelectionSeq;
+    if (currentTileTab && typeof parkClimateMiniEditor === 'function') parkClimateMiniEditor(currentTileTab);
+    clearPageFieldMark();
+    currentTileIndex = -1;
+    currentTileTab = 'folder0';
+    newTileSpot = null;
+    tileSelectionByTab.folder0 = {kind: 'page', slot};
+    persistSelectedTileState();
+    document.querySelectorAll('.tile-grid > .tile').forEach(tile => {
+      tile.classList.remove('active');
+      delete tile.dataset.selected;
+    });
+    document.getElementById('settingsHiddenTile')?.classList.remove('active');
+    markedPageSlot = slot;
+    const specific = document.querySelector('#folder0Settings .tile-specific-settings');
+    specific?.classList.remove('hidden');
+    specific?.classList.add('page-field-marked');
+    setSettingsPane('folder0', 'tile');
+    applyFolderTypeLock('folder0', false);
+    const type = document.getElementById('folder0_tile_type');
+    if (type) {
+      for (const option of type.options) {
+        option.dataset.pageHidden = option.hidden ? '1' : '0';
+        option.hidden = option.value !== '0' && option.value !== '4';
+      }
+      type.value = '0';
+    }
+    const title = document.getElementById('folder0_tile_title');
+    if (title) title.value = '';
+    const icon = document.getElementById('folder0_tile_icon');
+    if (icon) icon.value = '';
+    updateTileType('folder0');
+    if (typeof refreshTileIconButtons === 'function') refreshTileIconButtons('folder0');
+    setupLivePreview('folder0');
+    layoutPageFields('folder0');
+  }
+
+  function pageFieldPicked() {
+    return markedPageSlot >= 0;
+  }
+
+  // The pick ends with any other selection; `hideEditor` when nothing else
+  // is picked (its field was taken).
+  function clearPageFieldMark(hideEditor = false) {
+    if (markedPageSlot < 0) return;
+    markedPageSlot = -1;
+    document.querySelectorAll('.tile-grid > .page-field.marked').forEach(field => field.classList.remove('marked'));
+    const specific = document.querySelector('#folder0Settings .tile-specific-settings');
+    specific?.classList.remove('page-field-marked');
+    if (hideEditor && currentTileIndex === -1) specific?.classList.add('hidden');
+    for (const option of document.getElementById('folder0_tile_type')?.options || []) {
+      if (option.dataset.pageHidden === undefined) continue;
+      option.hidden = option.dataset.pageHidden === '1';
+      delete option.dataset.pageHidden;
+    }
+  }
+
+  // Type changed while a free field is picked (editor.js): Folder makes its
+  // page, the menu stays at Empty until the panel made it.
+  function pageFieldTypeChosen(select) {
+    if (markedPageSlot < 0) return false;
+    const folder = select.value === '4';
+    select.value = '0';
+    updateTileType('folder0');
+    if (folder) addPageFolder(markedPageSlot);
+    return true;
+  }
+
+  // The panel makes a new Home folder that is the page there at once
+  // (/api/pages new=<slot>), also when Home's screen has no free cell; the
+  // picked field's title and icon name it, the editor then shows its tile.
+  function addPageFolder(slot) {
+    if (pageFieldsInWindow()) return pageSlotsQueue;
+    const named = markedPageSlot === slot;
+    const title = named ? String(document.getElementById('folder0_tile_title')?.value || '').trim() : '';
+    const icon = named ? String(document.getElementById('folder0_tile_icon')?.value || '') : '';
+    pageSlotsQueue = pageSlotsQueue.then(() => sendNewPage(slot, title, icon));
+    return pageSlotsQueue;
+  }
+
+  async function sendNewPage(slot, title, icon) {
+    // A second request before the first was done finds the field taken.
+    const slots = pageSlotList();
+    if (slots[slot]) return false;
+    // While the panel makes it: the field's "+" is busy.
+    const field = getTileGrid('folder0')?.querySelector(':scope > .page-field[data-slot="' + slot + '"]');
+    field?.classList.add('busy');
+    try {
+      const body = new URLSearchParams({pages: encodePageSlots(slots), new: String(slot)});
+      if (title) body.set('title', title);
+      if (icon) body.set('icon_name', icon);
+      const response = await fetch('api/pages', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: body.toString()
+      });
+      let data = {};
+      try { data = await response.json(); } catch (_) {}
+      if (!response.ok || !data.success) {
+        const used = (getTilesData('folder0') || []).filter(tile => Number(tile?.type || 0) !== 0).length;
+        showNotification(data.error === 'Folder full' ? tf('folderFull', {n: used, max: TILES_PER_GRID})
+          : t('networkErrorSave'), false);
+        return false;
+      }
+      const folder = Number(data.folder) || 0;
+      const index = Number(data.index);
+      // Only the new tile from the panel, then it is picked at once; its
+      // folder's tab follows (user 2026-10-22: loading the whole grid and
+      // the tab first took ages, a new folder tile shows at once).
+      const tileResponse = await fetch('api/tiles?folder=0&index=' + encodeURIComponent(index));
+      if (!tileResponse.ok) throw new Error('Tile HTTP ' + tileResponse.status);
+      const tile = await tileResponse.json();
+      const tiles = getTilesData('folder0');
+      tiles[index] = tile;
+      slots[slot] = folder;
+      pageSlotsElement().dataset.pages = encodePageSlots(slots);
+      renderTileFromData('folder0', index, tile, sensorMetaCache);
+      layoutTiles('folder0', tiles);
+      syncPageHeads();
+      selectTile(index, 'folder0');
+      showNotification(t('pagesSaved'));
+      ensureFolderTabUi(folder, String(tile.title || ''), String(tile.icon_name || '')).then(ok => {
+        restoreCurrentTileSelectionUi();
+        if (!ok) {
+          persistSelectedTileState();
+          setTimeout(() => location.reload(), 400);
+        }
+      });
+      return true;
+    } catch (error) {
+      showNotification(t('networkErrorSave'), false);
+      return false;
+    } finally {
+      field?.classList.remove('busy');
+    }
+  }
+
+  // A page leaving the fields onto Home's screen (drag-resize.js
+  // handleGridDrop).
+  function canPlacePageTile(candidate) {
+    if (!dragSource || dragSource.kind !== 'page-slot') return false;
+    return supportedTileLayout(dragSource.settings ? 7 : 4, candidate) &&
+      canPlaceTileLayout('folder0', dragSource.index, candidate);
+  }
+
+  function dropPageOnGrid(candidate) {
+    const folder = dragSource.folder;
+    dragSource.dropCommitted = true;
+    // The layout window's parked Settings tile back on its area, its own size.
+    if (dragSource.settings) {
+      layoutSettingsOut({col: candidate.col, row: candidate.row, span_w: candidate.span_w, span_h: candidate.span_h});
+      return;
+    }
+    // One cell, like the device (/api/pages).
+    const place = {col: candidate.col, row: candidate.row, span_w: 1, span_h: 1};
+    // In the layout window it stays there until "Speichern" (layout-window.js).
+    if (pageFieldsInWindow()) {
+      layoutPageOut(folder, place);
+      return;
+    }
+    // Its field stays free.
+    savePages(pageSlotList().map(id => id === folder ? 0 : id), {out: folder, ...place});
+  }
+
+  function enablePageFields() {
+    const grid = getTileGrid('folder0');
+    if (!pageSlotsElement() || !grid || grid.dataset.pageFieldsBound === '1') return;
+    grid.dataset.pageFieldsBound = '1';
+    layoutPageFields('folder0');
+    syncPageHeads();
+    // A page's tile is taken like any tile; its drag is a page's: one cell,
+    // onto the screen it becomes a folder tile again (after the tile's own
+    // dragstart, drag-resize.js enableTileDrag).
+    grid.addEventListener('dragstart', event => {
+      const tile = event.target.closest?.('.tile.page-field-tile');
+      if (!tile || dragSource?.kind !== 'grid-tile' || dragSource.index !== Number(tile.dataset.index)) return;
+      // The layout window's parked Settings tile (layoutSettingsOut).
+      const settings = tile.dataset.type === '7';
+      // The grab point from where it is drawn: its stored place lies elsewhere.
+      dragSource = {...dragSource, kind: 'page-slot', folder: Number(tile.dataset.navigateTarget || 0), settings,
+        // One cell out of its field, the Settings tile like a page's folder
+        // (user 2026-10-22: it came out half high).
+        layout: {col: 0, row: 0, span_w: 1, span_h: 1},
+        grabCellCol: 0, grabCellRow: 0,
+        dropOffset: getDragGrabOffset(tile.getBoundingClientRect(), event.clientX, event.clientY),
+        baseLayouts: null, pageTarget: null};
+    });
+  }
+  // The layout window ("Layout ändern", grid_layout.h / tile_layouts.h). It
+  // holds the page's real tile grid and editor, laid out for the chosen
+  // layout in one area for all three: the layout's screen and, beside it, its
+  // storage ("Ablage"): tiles there are no part of the layout but keep their
+  // spot. A tile half over the screen's edge is red. Each layout keeps its
+  // own arrangement: "Speichern" stores it, "Umstellen" stores it and
+  // restarts the panel with it; switching between layouts keeps the unsaved
+  // ones. Nothing else reaches the panel while the window is open: the
+  // editor's own saves stay in the window. The bar layouts' page fields
+  // beside Home's area (page-fields.js, user 2026-10-13) are kept like the
+  // places and stored with them, and so is every layout's Settings field:
+  // Settings is parked per layout (user 2026-10-13: each layout decides).
+  const LAYOUT_KEYS = ['classic', 'bar', 'portrait'];
+  let layoutWindow = null;
+  const layoutWindowFetch = window.fetch.bind(window);
+  let layoutBaseSizes = null;  // every px size of the page's preview (:root)
+  let layoutHead = null;       // the head's places on the page's screen
+
+  function layoutWindowOpen() { return !!layoutWindow; }
+  function layoutPx(value) { return value.toFixed(2) + 'px'; }
+  function layoutClone(value) { return JSON.parse(JSON.stringify(value)); }
+  function layoutEmptyTile() { return {type: 0, title: '', icon_name: '', col: 0, row: 0, span_w: 1, span_h: 1}; }
+  function layoutUsed(tile) { return !!tile && Number(tile.type || 0) !== 0; }
+  // A tile on the window's area: a page's folder tile stands in its field
+  // instead (layout_hidden, page-fields.js) and needs no place.
+  function layoutShown(tile) { return layoutUsed(tile) && !tile.layout_hidden; }
+  function layoutNavType(type) { return [7, 8].includes(Number(type)); }
+  // The bar layouts' head has the X: no Back tile there. The Settings tile
+  // is a tile like any other (user 2026-10-08). A page's folder tile is not
+  // on Home's area there either: it stands in its field.
+  function layoutBarHidden(tile, tab) {
+    if (Number(tile.type) === 8) return true;
+    const pages = layoutWindow?.pageSlots || layoutWindow?.data?.places?.pages || [];
+    return Number(tile.type) === 4 && layoutFolderId(tab) === '0' &&
+      pages.map(Number).includes(Number(tile.navigate_target));
+  }
+  // Such a tile in a bar layout: Back goes, a page in its field.
+  function layoutBarTile(tile) {
+    return Number(tile.type) === 8 ? layoutEmptyTile() : {...tile, layout_hidden: true};
+  }
+  // Tiles that must be reached in every layout, so never in its storage:
+  // folders, and the Settings tile (user 2026-10-12: always to be tapped;
+  // whoever wants it gone parks it, independent of the gear in the head).
+  function layoutMustReach(type) { return [4, 7].includes(Number(type)); }
+  function layoutRootPx(name) {
+    return parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name)) || 0;
+  }
+  // Preview px per screen px (web_admin_styles.cpp), the same for every layout.
+  function layoutScale() { return layoutRootPx('--radius-preview-scale') || 1; }
+  // The pages, then the screensaver (its two rows at the bottom of each
+  // screen, three upright, screensaver_places.h). Every folder takes part,
+  // also one whose page is not loaded yet: its tiles' data is enough until
+  // its tab is shown (mountLayoutTab loads it then; user 2026-10-13: opening
+  // loaded every folder's page one after the other, slower with each one).
+  function layoutTabs() {
+    const tabs = tileTabs.filter(tab => document.getElementById('tab-tiles-' + tab));
+    for (const tab of Object.values(tabByFolder)) {
+      if (tab && !tabs.includes(tab)) tabs.push(tab);
+    }
+    return [...tabs.filter(tab => !isScreensaverTileTab(tab)), ...tabs.filter(isScreensaverTileTab)];
+  }
+  function layoutSize(key) { return LAYOUTS[key].cols + ' × ' + String(LAYOUTS[key].rows).replace('.', ','); }
+
+  // The window's editor area: the same for every layout. Every layout's
+  // screen starts in its top left corner, right under the head; the storage
+  // lies to the right and below (user 2026-10-08, every panel). The area
+  // keeps at least two columns and two rows beside the smallest screen (the
+  // square panels' layouts are all 3 x 3).
+  function layoutCanvas() {
+    const keys = LAYOUT_KEYS.filter(key => LAYOUTS[key].available);
+    const cols = keys.map(key => LAYOUTS[key].cols);
+    const rows = keys.map(key => Math.ceil(LAYOUTS[key].rows));
+    return {cols: Math.max(...cols, Math.min(...cols) + 2),
+      rows: Math.max(...rows, Math.min(...rows) + 2) + (layoutWindow?.extraRows || 0)};
+  }
+  // On the layout's screen; a screensaver tile (`tab`) only in its rows at
+  // the bottom, the panel refuses a place above them (/api/layouts).
+  function layoutInside(tile, key, tab) {
+    const L = LAYOUTS[key];
+    const top = tab !== undefined && isScreensaverTileTab(tab) ? screensaverFirstRow(key, L.rows) : 0;
+    return tile.col >= -1e-6 && tile.col + tile.span_w <= L.cols + 1e-6 &&
+      tile.row >= top - 1e-6 && tile.row + tile.span_h <= L.rows + 1e-6;
+  }
+  // The head on the layout's screen: the X and the time keep their distance
+  // to its right edge.
+  function layoutHeadVars(L) {
+    const w = L.screenW * layoutScale();
+    const shift = w - layoutHead.w;
+    return {'--head-screen-w': layoutPx(w), '--head-close-x': layoutPx(layoutHead.close + shift),
+      '--head-time-x': layoutPx(layoutHead.time + shift), '--head-title-w': layoutPx(layoutHead.title + shift),
+      '--head-time-x-alone': layoutPx(layoutHead.timeAlone + shift)};
+  }
+  function layoutSetVars(el, vars) { for (const [name, value] of Object.entries(vars)) el.style.setProperty(name, value); }
+
+  // Every layout's own preview sizes (cells, circles, text places): the
+  // page's for the active layout, .layout-vars-<key> for the others
+  // (web_admin_styles.cpp). Read at every opening: the page's sizes change
+  // with the global options (the tile radius slider).
+  function readLayoutBaseSizes() {
+    layoutBaseSizes = {};
+    const rootStyle = getComputedStyle(document.documentElement);
+    const px = value => /^\s*-?[\d.]+px\s*$/.test(value) ? parseFloat(value) : null;
+    for (const key of LAYOUT_KEYS) layoutBaseSizes[key] = {};
+    for (const sheet of document.styleSheets) {
+      let rules;
+      try { rules = sheet.cssRules; } catch (e) { continue; }
+      for (const rule of rules) {
+        const key = rule.selectorText === ':root' ? ACTIVE_LAYOUT
+          : LAYOUT_KEYS.find(k => rule.selectorText === '.layout-vars-' + k);
+        if (!key || !rule.style) continue;
+        for (const name of rule.style) {
+          if (!name.startsWith('--')) continue;
+          // The page's values as they are now (the radius slider sets some).
+          const raw = key === ACTIVE_LAYOUT ? rootStyle.getPropertyValue(name) : rule.style.getPropertyValue(name);
+          const value = name === '--radius-preview-scale' ? parseFloat(raw) : px(raw);
+          if (value !== null && !Number.isNaN(value)) layoutBaseSizes[key][name] = value;
+        }
+      }
+    }
+    // The global options live on the page only (the radius slider's last
+    // value). A page without a layout's own sizes takes the page's with that
+    // layout's cells and margins.
+    const page = layoutBaseSizes[ACTIVE_LAYOUT];
+    for (const key of LAYOUT_KEYS) {
+      if (key === ACTIVE_LAYOUT) continue;
+      if (!Object.keys(layoutBaseSizes[key]).length) {
+        const L = LAYOUTS[key], s = layoutScale();
+        layoutBaseSizes[key] = {...page, '--preview-cell-w': L.cellW * s, '--preview-cell-h': L.cellH * s,
+          '--preview-pad-left': L.padLeft * s, '--preview-pad-right': L.padRight * s,
+          '--preview-pad-top': L.padTop * s, '--preview-pad-bottom': L.padBottom * s};
+      }
+      if (page['--tile-radius'] !== undefined) layoutBaseSizes[key]['--tile-radius'] = page['--tile-radius'];
+    }
+    layoutHead = {w: layoutRootPx('--head-screen-w'), close: layoutRootPx('--head-close-x'),
+      time: layoutRootPx('--head-time-x'), title: layoutRootPx('--head-title-w'),
+      timeAlone: layoutRootPx('--head-time-x-alone') || layoutRootPx('--head-time-x')};
+  }
+
+  // --- Places ------------------------------------------------------------
+
+  function layoutFolderId(tab) { return String(getFolderIdForTab(tab)); }
+  // A tile without a classic place, and its spot in the classic storage
+  // (none yet: [0, 0, 0, 0]).
+  function classicHidden(tab, view) {
+    return !!layoutWindow.data.places?.classic_parked?.[layoutFolderId(tab)]?.[view];
+  }
+  function classicParked(tab, view) {
+    const p = layoutWindow.data.places?.classic_parked?.[layoutFolderId(tab)]?.[view];
+    return p && p[2] > 0 && p[3] > 0
+      ? {col: p[0], row: p[1], span_w: p[2], span_h: p[3]} : null;
+  }
+  // Wholly beside the layout's screen, to the right or below: in its storage.
+  function layoutParked(tile, key) {
+    const L = LAYOUTS[key];
+    return tile.col >= -1e-6 && tile.row >= -1e-6 && (tile.col >= L.cols - 1e-6 || tile.row >= L.rows - 1e-6);
+  }
+  // The page's tiles with their classic places.
+  function layoutBase(tab) {
+    const classic = {};
+    (layoutWindow.data.classic?.[layoutFolderId(tab)] || []).forEach(([slot, view, col, row, w, h]) => {
+      classic[slot] = {view, col, row, span_w: w, span_h: h};
+    });
+    const tiles = layoutClone(layoutWindow.pages[tab] || []).map((tile, index) => {
+      if (!layoutUsed(tile)) return tile;
+      delete tile.layout_hidden;
+      const p = classic[index];
+      if (p && Number(p.view) === Number(tile.view_id)) {
+        Object.assign(tile, {col: p.col, row: p.row, span_w: p.span_w, span_h: p.span_h});
+      } else {
+        tile._unplaced = true;
+      }
+      return tile;
+    });
+    // The Settings tile parked off Home in the layout the panel shows takes
+    // part with its kept ID and classic place (/api/layouts settings.tile):
+    // its places in the other layouts stay.
+    const parked = layoutWindow.settingsTile;
+    if (layoutFolderId(tab) === '0' && parked && !tiles.some(tile => layoutUsed(tile) && Number(tile.type) === 7)) {
+      const free = tiles.findIndex(tile => !layoutUsed(tile));
+      if (free >= 0) tiles[free] = layoutClone(parked);
+    }
+    return tiles;
+  }
+
+  // Every tile on its own spot of the window's area: tiles that need a place
+  // (none in this layout, or one taken) go to a free spot in the storage
+  // beside the layout's screen first; the Settings tile to the screen's first
+  // free spot from the bottom right (like a new Settings tile, and the panel
+  // for a layout stored without it: tile_config.cpp showUnplacedSettingsTile).
+  function layoutSettle(key, tiles) {
+    const canvas = layoutCanvas();
+    const cols2 = canvas.cols * 2, rows2 = canvas.rows * 2;
+    // The window's grid while it settles (the storage may grow below).
+    if (layoutWindow) useLayoutGrid();
+    const taken = Array.from({length: rows2}, () => Array(cols2).fill(false));
+    const fits = (col, row, w, h) => {
+      if (col < 0 || row < 0 || col + w > canvas.cols || row + h > canvas.rows) return false;
+      for (let r = row * 2; r < (row + h) * 2; r++) for (let c = col * 2; c < (col + w) * 2; c++) if (taken[r][c]) return false;
+      return true;
+    };
+    const take = tile => {
+      for (let r = tile.row * 2; r < (tile.row + tile.span_h) * 2; r++) for (let c = tile.col * 2; c < (tile.col + tile.span_w) * 2; c++) taken[r][c] = true;
+    };
+    const order = tiles.map((tile, index) => index).filter(index => layoutShown(tiles[index]))
+      .sort((a, b) => (tiles[a]._unplaced ? 1 : 0) - (tiles[b]._unplaced ? 1 : 0));
+    // Every tile in the size it is drawn in (a Media tile at least 2 x 2).
+    const drawn = (type, col, row, w, h) => {
+      const shown = normalizeLayoutForTileType(type, col, row, w, h);
+      return shown.col === col && shown.row === row && shown.span_w === w && shown.span_h === h;
+    };
+    const later = [];
+    const settings = type => Number(type) === 7;
+    for (const index of order) {
+      const tile = tiles[index];
+      const shown = normalizeLayoutForTileType(tile.type, tile.col, tile.row, tile.span_w, tile.span_h);
+      if (!tile._unplaced && shown.col === tile.col && shown.row === tile.row &&
+          fits(tile.col, tile.row, shown.span_w, shown.span_h) && (!settings(tile.type) || layoutInside(shown, key))) {
+        Object.assign(tile, shown);
+        take(tile);
+      } else {
+        later.push(tile);
+      }
+    }
+    // The others keep their size (user 2026-10-08: they are moved by hand):
+    // the first free spot beside the screen, else on it.
+    const free = (tile, col, row, w, h) => fits(col, row, w, h) &&
+      supportedTileLayout(tile.type, {col, row, span_w: w, span_h: h}) && drawn(tile.type, col, row, w, h);
+    for (const tile of later) {
+      const shown = normalizeLayoutForTileType(tile.type, 0, 0, tile.span_w, tile.span_h);
+      const w = shown.span_w, h = shown.span_h;
+      let spot = null;
+      if (settings(tile.type)) {
+        const L = LAYOUTS[key];
+        for (let row = Math.floor((L.rows - h) * 2) / 2; !spot && row >= 0; row -= 0.5) {
+          for (let col = Math.floor((L.cols - w) * 2) / 2; !spot && col >= 0; col -= 0.5) {
+            if (free(tile, col, row, w, h)) spot = {col, row, span_w: w, span_h: h};
+          }
+        }
+      }
+      // A folder back from the pages (reconcileLayoutPages): the screen's
+      // first free spot, whole cells before half steps, like the panel gives
+      // it one (/api/layouts).
+      if (tile._screen) {
+        const L = LAYOUTS[key];
+        for (const step of [1, 0.5]) {
+          for (let row = 0; !spot && row + h <= L.rows; row += step) {
+            for (let col = 0; !spot && col + w <= L.cols; col += step) {
+              if (free(tile, col, row, w, h)) spot = {col, row, span_w: w, span_h: h};
+            }
+          }
+        }
+      }
+      for (const outside of [true, false]) {
+        for (let row = 0; !spot && row + h <= canvas.rows; row += 0.5) {
+          for (let col = 0; !spot && col + w <= canvas.cols; col += 0.5) {
+            if (free(tile, col, row, w, h) && (!outside || layoutParked({col, row, span_w: w, span_h: h}, key))) {
+              spot = {col, row, span_w: w, span_h: h};
+            }
+          }
+        }
+        if (spot) break;
+      }
+      // No spot left: the storage grows by rows below (user 2026-10-12:
+      // every tile, every folder above all, keeps a visible spot there).
+      while (!spot && layoutWindow && canvas.rows < 64) {
+        const row = canvas.rows;
+        const grow = Math.ceil(h);
+        canvas.rows += grow;
+        for (let i = 0; i < grow * 2; ++i) taken.push(Array(cols2).fill(false));
+        layoutWindow.extraRows = (layoutWindow.extraRows || 0) + grow;
+        useLayoutGrid();
+        for (let col = 0; !spot && col + w <= canvas.cols; col += 0.5) {
+          if (free(tile, col, row, w, h)) spot = {col, row, span_w: w, span_h: h};
+        }
+      }
+      if (spot) { Object.assign(tile, spot); take(tile); }
+    }
+    tiles.forEach(tile => {
+      if (!tile) return;
+      delete tile._unplaced;
+      delete tile._screen;
+    });
+    return tiles;
+  }
+
+  // Taking a layout over from another one: every tile as it is there, the
+  // same place on the screen and the same size (user 2026-10-08: "wie es
+  // aktuell im Layout ist"); what does not fit the new screen is red.
+  // Settings and Back stay in the classic layout only.
+  function takeoverTiles(tab, key, from) {
+    const L = LAYOUTS[key];
+    const tiles = layoutBase(tab);
+    const shift = isScreensaverTileTab(tab) ? L.rows - LAYOUTS[from].rows : 0;
+    // The screensaver's rows at the bottom: three upright, two otherwise. A
+    // tile above them there goes to the storage, as the panel leaves it out
+    // (screensaver_places::find).
+    const top = isScreensaverTileTab(tab) ? screensaverFirstRow(key, L.rows) : 0;
+    if (from === 'classic') {
+      tiles.forEach(tile => {
+        if (!layoutUsed(tile)) return;
+        tile.row += shift;
+        if (classicHidden(tab, tile.view_id) || tile.row < top - 1e-6) tile._unplaced = true;
+      });
+    } else {
+      // The other layout as its window shows it: saved, or its first take-over.
+      const source = setupTiles(tab, from);
+      tiles.forEach((tile, index) => {
+        const p = source[index];
+        if (!layoutUsed(tile)) return;
+        if (layoutShown(p) && layoutInside(p, from, tab) && p.row + shift >= top - 1e-6) {
+          Object.assign(tile, {col: p.col, row: p.row + shift, span_w: p.span_w, span_h: p.span_h});
+          delete tile._unplaced;
+        } else if (!layoutBarHidden(tile, tab)) {
+          // Back keeps its classic place, here in this layout's columns.
+          // Not on that screen: into this layout's storage too. Back keeps
+          // its classic place.
+          tile._unplaced = true;
+        }
+      });
+    }
+    return layoutSettle(key, layoutParkSettings(tab, L.bar ? tiles.map(tile => (layoutUsed(tile) &&
+      layoutBarHidden(tile, tab) ? layoutBarTile(tile) : tile)) : tiles, !!layoutWindow.settingsParked?.[key]));
+  }
+
+  // The window's start: the layout's saved places; a layout never set up is
+  // taken over from the classic layout.
+  function setupTiles(tab, key) {
+    if (key === 'classic') {
+      const tiles = layoutBase(tab);
+      tiles.forEach(tile => {
+        if (!layoutUsed(tile) || !classicHidden(tab, tile.view_id)) return;
+        const spot = classicParked(tab, tile.view_id);
+        if (spot) {
+          Object.assign(tile, spot);
+          delete tile._unplaced;
+        } else {
+          tile._unplaced = true;
+        }
+      });
+      return layoutSettle(key, layoutParkSettings(tab, tiles, !!layoutWindow.savedSettingsParked?.[key]));
+    }
+    const places = layoutWindow.data.places?.[key]?.[layoutFolderId(tab)];
+    if (!places) return takeoverTiles(tab, key, 'classic');
+    return layoutSettle(key, layoutParkSettings(tab, layoutBase(tab).map(tile => {
+      if (!layoutUsed(tile)) return tile;
+      if (layoutBarHidden(tile, tab)) return layoutBarTile(tile);
+      const p = places[tile.view_id];
+      if (p) {
+        Object.assign(tile, {col: p[0], row: p[1], span_w: p[2], span_h: p[3]});
+        delete tile._unplaced;
+      } else {
+        tile._unplaced = true;
+      }
+      return tile;
+    }), !!layoutWindow.savedSettingsParked?.[key]));
+  }
+
+  // Every tile's place on every page, to tell unsaved changes.
+  function layoutSignature(list) {
+    return JSON.stringify(layoutTabs().map(tab => (list(tab) || []).map(tile => layoutShown(tile)
+      ? [tile.col, tile.row, tile.span_w, tile.span_h] : 0)));
+  }
+  // A layout's places as stored (its window start) and its unsaved ones.
+  function layoutSavedSig(key) {
+    if (!(key in layoutWindow.saved)) layoutWindow.saved[key] = layoutSignature(tab => setupTiles(tab, key));
+    return layoutWindow.saved[key];
+  }
+  function layoutDirty(key = layoutWindow?.key) {
+    if (!layoutWindow) return false;
+    const work = key === layoutWindow.key ? getTilesData : (layoutWindow.work[key] ? tab => layoutWindow.work[key][tab] : null);
+    return (!!work && layoutSignature(work) !== layoutSavedSig(key)) || layoutClockDirty(key) ||
+      (!!LAYOUTS[key]?.bar && layoutPagesDirty()) ||
+      !!layoutWindow.settingsParked?.[key] !== !!layoutWindow.savedSettingsParked?.[key];
+  }
+
+  // --- The page fields --------------------------------------------------------
+
+  // The page fields beside Home's area in the bar layouts, as in the editor
+  // (page-fields.js, user 2026-10-13): a Home folder put into one is a page,
+  // its tile leaves Home in both bar layouts and stands in its field. Kept
+  // like the places and stored with them ("Speichern"); both bar layouts
+  // share them.
+  function layoutPageSlotsFrom(data) {
+    const stored = (data?.places?.pages || []).map(Number);
+    return Array.from({length: PAGE_SLOT_COUNT}, (_, i) => stored[i] > 0 ? stored[i] : 0);
+  }
+  function layoutHomeTab() { return layoutTabs().find(tab => layoutFolderId(tab) === '0') || ''; }
+  // The page's folder tile on Home, in the page's data.
+  function layoutHomeFolderIndex(folder) {
+    return (layoutWindow.pages[layoutHomeTab()] || []).findIndex(tile =>
+      layoutUsed(tile) && Number(tile.type) === 4 && Number(tile.navigate_target) === Number(folder));
+  }
+  function layoutPagesDirty() {
+    return !!layoutWindow && JSON.stringify(layoutWindow.pageSlots) !== JSON.stringify(layoutWindow.savedPageSlots);
+  }
+  // The page fields show on Home in a bar layout (page-fields.js
+  // pageSlotsShown), the Settings field in every layout (pageFieldsShown).
+  function layoutWindowShowsPages() {
+    return !!layoutWindow && !!LAYOUTS[layoutWindow.key].bar && layoutWindow.tab === layoutHomeTab();
+  }
+  function layoutWindowShowsFields() {
+    return !!layoutWindow && layoutWindow.tab === layoutHomeTab();
+  }
+
+  // --- The Settings field -----------------------------------------------------
+
+  // Where Settings is parked, as stored (user 2026-10-13: each layout
+  // decides; /api/layouts settings.parked, bit by bit in LAYOUT_KEYS order).
+  function layoutSettingsParkedFrom(data) {
+    const parked = data?.settings?.parked || [];
+    return Object.fromEntries(LAYOUT_KEYS.map((key, i) => [key, !!parked[i]]));
+  }
+  // The shown layout's choice in the window (page-fields.js).
+  function layoutWindowSettingsParked() {
+    return !!layoutWindow?.settingsParked?.[layoutWindow.key];
+  }
+  // Home's Settings tile parked (in its field, no place) or not.
+  function layoutParkSettings(tab, tiles, parked) {
+    if (layoutFolderId(tab) !== '0') return tiles;
+    tiles.forEach(tile => {
+      if (!layoutUsed(tile) || Number(tile.type) !== 7) return;
+      if (parked) tile.layout_hidden = true;
+      else delete tile.layout_hidden;
+    });
+    return tiles;
+  }
+  function layoutSettingsIndex() {
+    return (getTilesData(layoutHomeTab()) || []).findIndex(tile => layoutUsed(tile) && Number(tile.type) === 7);
+  }
+  // Dropped on its field (page-fields.js pageFieldDrag): parked in this
+  // layout until "Speichern".
+  function layoutSettingsIn() {
+    const home = layoutHomeTab();
+    const index = layoutSettingsIndex();
+    if (!layoutWindow || index < 0) return;
+    const tiles = getTilesData(home);
+    tiles[index] = {...tiles[index], layout_hidden: true};
+    renderTileFromData(home, index, tiles[index], sensorMetaCache);
+    layoutWindow.settingsParked[layoutWindow.key] = true;
+    layoutPagesChanged();
+  }
+  // Out of its field onto the window's area (page-fields.js dropPageOnGrid).
+  function layoutSettingsOut(place) {
+    const home = layoutHomeTab();
+    const index = layoutSettingsIndex();
+    if (!layoutWindow || index < 0) return;
+    const tiles = getTilesData(home);
+    const tile = {...tiles[index], col: place.col, row: place.row, span_w: place.span_w, span_h: place.span_h};
+    delete tile.layout_hidden;
+    tiles[index] = tile;
+    renderTileFromData(home, index, tile, sensorMetaCache);
+    layoutWindow.settingsParked[layoutWindow.key] = false;
+    layoutPagesChanged();
+  }
+
+  // A bar layout shown again (its unsaved places or its stored ones) follows
+  // the fields: a new page's tile goes into its field, a folder back from the
+  // pages without a place on its screen gets the first free one.
+  function reconcileLayoutPages(key, tab, tiles) {
+    if (!LAYOUTS[key].bar || layoutFolderId(tab) !== '0') return tiles;
+    const base = layoutWindow.pages[tab] || [];
+    const left = folder => (layoutWindow.savedPageSlots || []).includes(folder) &&
+      !(layoutWindow.pageSlots || []).includes(folder);
+    let back = false;
+    const out = tiles.map((tile, index) => {
+      const own = base[index];
+      if (!layoutUsed(own) || Number(own.type) !== 4) return tile;
+      if (layoutBarHidden(own, tab)) return layoutBarTile(layoutClone(own));
+      if ((layoutShown(tile) && layoutInside(tile, key)) || !left(Number(own.navigate_target))) return tile;
+      back = true;
+      const moved = layoutClone(own);
+      delete moved.layout_hidden;
+      Object.assign(moved, layoutShown(tile) ? {col: tile.col, row: tile.row, span_w: tile.span_w, span_h: tile.span_h}
+        : {span_w: 1, span_h: 1});
+      return Object.assign(moved, {_unplaced: true, _screen: true});
+    });
+    return back ? layoutSettle(key, out) : out;
+  }
+
+  // The fields with the window's pages: Home's tiles laid out again (its
+  // pages in their fields) and the heads' dots (the page's again on close).
+  function showLayoutPages() {
+    const holder = pageSlotsElement();
+    if (!holder || !layoutWindow) return;
+    holder.dataset.pages = encodePageSlots(layoutWindow.pageSlots);
+    const home = layoutHomeTab();
+    if (layoutWindow.tab === home) layoutTiles(home, getTilesData(home));
+    syncPageHeads(layoutWindow.pageSlots.filter(id => id > 0));
+  }
+
+  function layoutPagesChanged() {
+    showLayoutPages();
+    markLayoutRed(layoutWindow.tab);
+  }
+
+  // A drop on a field (page-fields.js pageFieldDrag): a Home folder becomes
+  // a page, its tile goes into its field; a page moves or swaps.
+  function layoutWindowPages(places, unlock) {
+    const home = layoutHomeTab();
+    const tiles = getTilesData(home);
+    // Pages have no PIN: the folder's lock goes with "Speichern".
+    if (unlock) layoutWindow.pageUnlock = true;
+    places.forEach(folder => {
+      const index = folder && !layoutWindow.pageSlots.includes(folder) ? layoutHomeFolderIndex(folder) : -1;
+      if (index < 0) return;
+      tiles[index] = layoutBarTile(layoutClone(layoutWindow.pages[home][index]));
+      renderTileFromData(home, index, tiles[index], sensorMetaCache);
+    });
+    layoutWindow.pageSlots = places;
+    layoutPagesChanged();
+  }
+
+  // A page dragged onto the window's area (page-fields.js dropPageOnGrid):
+  // its folder tile there, its field free.
+  function layoutPageOut(folder, place) {
+    const home = layoutHomeTab();
+    const index = layoutHomeFolderIndex(folder);
+    if (!layoutWindow || index < 0) return;
+    const tiles = getTilesData(home);
+    const tile = layoutClone(layoutWindow.pages[home][index]);
+    delete tile.layout_hidden;
+    Object.assign(tile, {col: place.col, row: place.row, span_w: place.span_w, span_h: place.span_h});
+    tiles[index] = tile;
+    renderTileFromData(home, index, tile, sensorMetaCache);
+    layoutWindow.pageSlots = layoutWindow.pageSlots.map(id => id === folder ? 0 : id);
+    layoutPagesChanged();
+  }
+
+  // --- The screensaver clock -------------------------------------------------
+
+  // Every layout's clock, place and size (screensaver_config.h): as stored,
+  // and the window's unsaved one.
+  function layoutClockFrom(data, key) {
+    const c = data?.clock?.[key];
+    return Array.isArray(c) && c.length === 4
+      ? {clock_x: Number(c[0]), clock_y: Number(c[1]), time_font_size: Number(c[2]), date_font_size: Number(c[3])} : null;
+  }
+  function layoutClock(key) {
+    const clocks = layoutWindow.clocks || (layoutWindow.clocks = {});
+    if (!clocks[key]) clocks[key] = layoutClockFrom(layoutWindow.data, key);
+    return clocks[key];
+  }
+  function layoutClockDirty(key) {
+    const clock = layoutWindow.clocks?.[key];
+    return !!clock && JSON.stringify(clock) !== JSON.stringify(layoutClockFrom(layoutWindow.data, key));
+  }
+  // The clock the screensaver tab shows in the window: the edited layout's
+  // (the screensaver editor's place and size, screensaver/editor.js).
+  function layoutWindowClock() {
+    if (!layoutWindow || !isScreensaverTileTab(layoutWindow.tab)) return null;
+    return layoutClock(layoutWindow.key);
+  }
+  // The layout's screen in the window's grid (padding box px)
+  // and on the page, for the clock's place.
+  function layoutWindowScreen(preview) {
+    const screen = layoutWindow?.screen;
+    if (!screen || !preview?.classList?.contains('setup-grid') || !isScreensaverTileTab(layoutWindow.tab)) return null;
+    const box = preview.getBoundingClientRect();
+    return {...screen, rect: {left: box.left + preview.clientLeft + screen.left, top: box.top + preview.clientTop + screen.top,
+      width: screen.width, height: screen.height}};
+  }
+  function layoutWindowClockChanged() {
+    refreshLayoutStatus();
+  }
+
+  // --- The window ----------------------------------------------------------
+
+  function showLayoutTiles(tab, tiles) {
+    tilesData[tab] = tiles;
+    tiles.forEach((tile, index) => renderTileFromData(tab, index, tile || layoutEmptyTile(), sensorMetaCache));
+    layoutTiles(tab, tiles);
+  }
+
+  function useLayoutGrid() {
+    const canvas = layoutCanvas();
+    GRID_COLS = canvas.cols;
+    GRID_ROWS = canvas.rows;
+    GRID_SHOWN_COLS = canvas.cols;
+    GRID_SHOWN_ROWS = canvas.rows;
+    HEAD_BAR = false;
+  }
+
+  // Red: half over the screen's edge, or a folder or the Settings tile
+  // without a place (it could not be reached); a tile wholly in the storage
+  // is only dimmed.
+  function layoutRed(tile, key, tab) {
+    return !layoutInside(tile, key, tab) && (layoutMustReach(tile.type) || !layoutParked(tile, key));
+  }
+  function redCount(tab) {
+    return getTilesData(tab).filter(tile => layoutShown(tile) && layoutRed(tile, layoutWindow.key, tab)).length;
+  }
+  function parkedCount(tab) {
+    return getTilesData(tab).filter(tile => layoutShown(tile) && !layoutRed(tile, layoutWindow.key, tab) &&
+      !layoutInside(tile, layoutWindow.key, tab)).length;
+  }
+  // A folder's list holds one entry per classic cell plus the storage's
+  // entries (grid_slots.h). With no more tiles than that in a layout's
+  // storage, a free cell on its screen always takes a new tile.
+  function layoutStorageMax() { return Math.max(0, TILES_PER_GRID - GRID_COLS * GRID_ROWS); }
+
+  function markLayoutRed(tab) {
+    if (!layoutWindow || layoutWindow.tab !== tab) return;
+    document.querySelectorAll(`#tab-tiles-${tab} .setup-grid > .tile`).forEach(el => {
+      // A page in its field is reached by its dot: never red (page-fields.js).
+      const place = !el.classList.contains('empty') && !el.classList.contains('page-field-tile') &&
+        el.dataset.col !== undefined
+        ? {type: el.dataset.type, col: Number(el.dataset.col), row: Number(el.dataset.row),
+          span_w: Number(el.dataset.spanW), span_h: Number(el.dataset.spanH)} : null;
+      const red = !!place && layoutRed(place, layoutWindow.key, tab);
+      el.classList.toggle('setup-red', red);
+      el.classList.toggle('setup-parked', !!place && !red && !layoutInside(place, layoutWindow.key, tab));
+    });
+    // Folders and the Settings tile carry a badge on their top right corner
+    // like the page tabs: a green tick when they have a place (still
+    // reachable), a red "!" when not.
+    const grid = document.querySelector(`#tab-tiles-${tab} .setup-grid`);
+    if (grid) {
+      grid.querySelectorAll('.setup-flag').forEach(flag => flag.remove());
+      grid.querySelectorAll(':scope > .tile:is([data-type="4"], [data-type="7"]):not(.empty)').forEach(el => {
+        const flag = document.createElement('span');
+        const missing = el.classList.contains('setup-red');
+        flag.className = 'setup-flag ' + (missing ? 'missing' : 'ok');
+        flag.dataset.for = el.id;
+        flag.innerHTML = missing ? '!' : '<i class="mdi mdi-check"></i>';
+        grid.appendChild(flag);
+      });
+      placeLayoutBadges(grid);
+    }
+    refreshLayoutStatus();
+  }
+
+  // "**...**" in a translation is shown bold.
+  function layoutRichText(text) {
+    return escapeHtml(text).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+  }
+
+  function refreshLayoutStatus() {
+    const dialog = document.querySelector('.setup-dialog');
+    if (!dialog || !layoutWindow) return;
+    let total = 0, parked = 0, storageFull = null;
+    for (const tab of layoutTabs()) {
+      const count = redCount(tab);
+      total += count;
+      const stored = parkedCount(tab);
+      parked += stored;
+      if (stored > layoutStorageMax() && (!storageFull || stored > storageFull)) storageFull = stored;
+      const badge = dialog.querySelector(`.setup-tab[data-tab="${tab}"] .setup-badge`);
+      if (badge) {
+        badge.textContent = count || '';
+        badge.hidden = !count;
+      }
+    }
+    dialog.querySelectorAll('.setup-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === layoutWindow.tab));
+    dialog.querySelectorAll('.setup-layout').forEach(b => {
+      b.classList.toggle('selected', b.dataset.key === layoutWindow.key);
+      const arrow = dialog.querySelector(`.setup-arrow[data-key="${b.dataset.key}"]`);
+      arrow?.classList.toggle('selected', b.dataset.key === layoutWindow.key);
+      if (arrow && b.dataset.key === layoutWindow.key) arrow.parentNode.appendChild(arrow);
+      b.classList.toggle('is-dirty', layoutDirty(b.dataset.key));
+    });
+    // A folder or the Settings tile without a place could not be reached in
+    // that layout, so each must have one (green) before the layout can be
+    // stored or shown.
+    let missing = 0, settingsMissing = 0;
+    for (const tab of layoutTabs()) {
+      getTilesData(tab).forEach(tile => {
+        if (!layoutShown(tile) || layoutInside(tile, layoutWindow.key)) return;
+        if (Number(tile.type) === 4) missing++;
+        if (Number(tile.type) === 7) settingsMissing++;
+      });
+    }
+    layoutWindow.missingFolders = missing;
+    // Red (a folder without a place, a tile half over the edge) is to be
+    // solved first: nothing is stored or switched before (user 2026-10-08).
+    // So is a storage with more tiles than entries (user 2026-10-16): a free
+    // cell could then take no new tile.
+    layoutWindow.blocked = total > 0 || storageFull !== null;
+    const L = LAYOUTS[layoutWindow.key];
+    const apply = dialog.querySelector('.setup-apply');
+    apply.disabled = layoutWindow.blocked || !L.switchable;
+    // Every note side by side (user 2026-10-08): folders without a place,
+    // tiles half over the edge, tiles in the storage, a layout that cannot
+    // be switched to yet; or that everything fits.
+    const tiles = total - missing - settingsMissing;
+    const notes = [];
+    if (missing) notes.push(['missing', 'folder-alert-outline',
+      missing === 1 ? t('layoutFolderMissing') : tf('layoutFoldersMissing', {n: missing})]);
+    if (settingsMissing) notes.push(['missing', 'cog-outline', t('layoutSettingsMissing')]);
+    if (tiles) notes.push(['missing', 'alert-circle-outline',
+      tiles === 1 ? t('layoutTileMissing') : tf('layoutTilesMissing', {n: tiles})]);
+    if (storageFull !== null) {
+      notes.push(['missing', 'tray-arrow-down', tf('layoutStorageFull', {n: storageFull, max: layoutStorageMax()})]);
+    } else if (parked) {
+      notes.push(['parked', 'tray-arrow-down',
+        parked === 1 ? t('layoutParkedTile') : tf('layoutParkedTiles', {n: parked})]);
+    }
+    if (!notes.length) notes.push(['ok', 'check-circle-outline', t('layoutAllFit')]);
+    dialog.querySelector('.setup-status').innerHTML = notes.map(([kind, icon, text]) =>
+      `<span class="setup-status-item is-${kind}"><i class="mdi mdi-${icon}"></i><span>${layoutRichText(text)}</span></span>`).join('');
+    refreshLayoutSave();
+    refreshLayoutDelete();
+  }
+
+  function unmountLayoutGrid() {
+    const home = layoutWindow?.home;
+    if (!home) return;
+    home.grid.querySelectorAll(':scope > .setup-storage-label, :scope > .setup-flag, :scope > .setup-trash')
+      .forEach(node => node.remove());
+    home.grid.classList.remove('setup-grid', 'setup-head', 'setup-no-head');
+    // Back as the page had it (its fields' room): nothing behind the window
+    // changes size (user 2026-10-13).
+    if (home.style) home.grid.setAttribute('style', home.style);
+    else home.grid.removeAttribute('style');
+    home.grid.classList.toggle('has-page-fields', home.fields);
+    home.placeholder.replaceWith(home.grid);
+    layoutWindow.home = null;
+  }
+
+  async function mountLayoutTab(tab) {
+    unmountLayoutGrid();
+    // A folder whose page is not loaded yet: now (its tiles stay the
+    // window's, layoutTabs).
+    if (!document.getElementById('tab-tiles-' + tab) && getFolderIdForTab(tab) !== undefined) {
+      try { await ensureFolderTabUi(getFolderIdForTab(tab)); } catch (error) {}
+      if (!layoutWindow) return;
+    }
+    layoutWindow.tab = tab;
+    layoutWindow.screen = null;
+    await switchTab('tab-tiles-' + tab);
+    if (!layoutWindow) return;
+    const host = document.getElementById('tab-tiles-' + tab);
+    const backdrop = document.querySelector('.setup-backdrop');
+    const grid = host?.querySelector('.tile-grid');
+    if (!host || !backdrop || !grid) return;
+    // The page keeps the grid's room, so nothing behind the window reflows.
+    const placeholder = document.createElement('div');
+    placeholder.style.cssText = `width:${grid.offsetWidth}px;height:${grid.offsetHeight}px;flex:none;`;
+    grid.replaceWith(placeholder);
+    layoutWindow.home = {grid, placeholder, style: grid.getAttribute('style'), fields: grid.classList.contains('has-page-fields')};
+    // First in the tab, so the editor's "#tab-tiles-x .tile-grid" still finds this grid.
+    host.insertBefore(backdrop, host.firstChild);
+    backdrop.querySelector('.setup-stage').appendChild(grid);
+    const L = LAYOUTS[layoutWindow.key];
+    grid.classList.add('setup-grid', 'setup-head');
+    // Every layout shows its own head; the classic one has none on the panel,
+    // so none here either (user 2026-10-11).
+    grid.classList.toggle('setup-no-head', !L.bar);
+    // One scale for all layouts, taken from the largest one: the head and the
+    // tiles keep their size when the layout changes, and so does the window.
+    // The screen always starts in the same corner. All preview sizes grow by
+    // that one factor, so the editor's own measuring stays right.
+    const dialog = backdrop.querySelector('.setup-dialog');
+    const chrome = [...dialog.children].filter(el => !el.classList.contains('setup-stage'))
+      .reduce((sum, el) => sum + el.offsetHeight, 0) + 16 * (dialog.children.length - 1) + 48 + 2;
+    // Every layout with its own sizes: a head layout with its head's room on
+    // top, the classic one from the top like the panel.
+    const sizesOf = key => ({...layoutBaseSizes[key], ...Object.fromEntries(Object.entries(layoutHeadVars(LAYOUTS[key]))
+      .map(([n, val]) => [n, parseFloat(val)]))});
+    const areaOf = (sizes, cols, rows) => {
+      const gap = sizes['--preview-gap'] || 0;
+      return [sizes['--preview-pad-left'] + sizes['--preview-pad-right'] + cols * sizes['--preview-cell-w'] + (cols - 1) * gap,
+        sizes['--preview-pad-top'] + sizes['--preview-pad-bottom'] + rows * sizes['--preview-cell-h'] + (rows - 1) * gap];
+    };
+    const canvas = layoutCanvas();
+    // The page fields' room beside or under the area (page-fields.js), kept
+    // in every tab and layout so the window keeps its size: a part that
+    // grows with the cells, a fixed one.
+    const fields = LAYOUT_KEYS.some(key => LAYOUTS[key].bar && LAYOUTS[key].available);
+    const roomOf = sizes => fields ? pageFieldRoom(sizes['--preview-cell-w'], sizes['--preview-cell-h'],
+      sizes['--preview-gap'] || 0, canvas.cols, canvas.rows) : {w: 0, h: 0, fixedW: 0, fixedH: 0};
+    const fullOf = sizes => {
+      const [w, h] = areaOf(sizes, canvas.cols, canvas.rows);
+      const room = roomOf(sizes);
+      return [w + room.w, h + room.h];
+    };
+    const fixed = roomOf(sizesOf(layoutWindow.key));
+    const areas = LAYOUT_KEYS.filter(key => LAYOUTS[key].available).map(key => fullOf(sizesOf(key)));
+    // The page's own preview scale; smaller only when the window lacks room.
+    const roomW = Math.min(innerWidth - 32, layoutRootPx('--admin-wrapper-width') || innerWidth) - 58 - fixed.fixedW;
+    const roomH = innerHeight - 32 - chrome - fixed.fixedH;
+    // Taken once: the window keeps its size whatever layout it shows.
+    const f = layoutWindow.scale ||
+      (layoutWindow.scale = Math.min(0.9, ...areas.map(([w, h]) => Math.min(roomW / w, roomH / h))));
+    const stage = backdrop.querySelector('.setup-stage');
+    const stageW = Math.max(...areas.map(([w]) => w)) * f;
+    const stageH = Math.max(...areas.map(([, h]) => h)) * f;
+    stage.style.width = stageW + fixed.fixedW + 2 + 'px';
+    stage.style.height = stageH + fixed.fixedH + 2 + 'px';
+    const base = sizesOf(layoutWindow.key);
+    // Every layout fills the window's area with its own factor (user
+    // 2026-10-11: the classic layout's smaller cells left it small and
+    // pressed in a corner): its cells come out about as big as every other
+    // layout's, the window stays the same.
+    const [ownW, ownH] = fullOf(base);
+    const fk = Math.min(stageW / ownW, stageH / ownH);
+    const scale = base['--radius-preview-scale'] || layoutScale();
+    layoutSetVars(grid, Object.fromEntries(Object.entries(base).filter(([n]) => n !== '--radius-preview-scale')
+      .map(([n, val]) => [n, (val * fk).toFixed(2) + 'px'])));
+    // The window's area has whole rows only (an upright page's half row
+    // track, --grid-half-track, is not part of it).
+    layoutSetVars(grid, {'--grid-cols': String(GRID_COLS), '--grid-rows': String(GRID_ROWS),
+      '--grid-half-track': 'initial', '--radius-preview-scale': String(scale * fk)});
+    // The fields' room at these cells (admin.css .setup-grid).
+    const room = fields ? pageFieldPlaces(grid) : {right: 0, bottom: 0};
+    layoutSetVars(grid, {'--setup-room-right': room.right + 'px', '--setup-room-bottom': room.bottom + 'px'});
+    // The layout's screen, in the theme's screen color (black in the dark
+    // theme) with its rounded corners, behind the tiles (on the storage,
+    // admin.css .setup-grid::before).
+    // The classic screen has no head: its cells start at its top.
+    let w, h, y = 0;
+    if (L.bar) {
+      [w, h] = areaOf(base, L.cols, L.rows).map(value => value * fk);
+    } else {
+      const own = layoutBaseSizes.classic;
+      const px = name => own[name];
+      const gap = base['--preview-gap'] || 0;
+      w = (px('--preview-pad-left') + px('--preview-pad-right') + L.cols * px('--preview-cell-w') + (L.cols - 1) * gap) * fk;
+      h = (px('--preview-pad-top') + px('--preview-pad-bottom') + L.rows * px('--preview-cell-h') + (L.rows - 1) * gap) * fk;
+      y = (base['--preview-pad-top'] - px('--preview-pad-top')) * fk;
+    }
+    const r = parseFloat(getComputedStyle(grid).borderTopLeftRadius) || 20;
+    const screen = (panelRole('screen') || [0, 0, 0]).join(',');
+    const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${w}' height='${h}'><rect width='${w}' height='${h}' rx='${r}' fill='rgb(${screen})'/></svg>`;
+    layoutSetVars(grid, {'--setup-screen': `url("data:image/svg+xml,${encodeURIComponent(svg)}")`,
+      '--setup-screen-pos': `0px ${y}px`});
+    // The screen: the screensaver clock's frame.
+    layoutWindow.screen = {left: 0, top: y, width: w, height: h, screenW: L.screenW};
+    // The storage's name in its bottom right corner (beside every screen).
+    const label = document.createElement('div');
+    label.className = 'setup-storage-label';
+    label.innerHTML = `<b>${escapeHtml(t('layoutStorage'))}</b><span>${escapeHtml(t('layoutStorageHint'))}</span>`;
+    grid.appendChild(label);
+    // Tiles such as Media measure their card when they are drawn: draw them
+    // again at the window's scale.
+    showLayoutTiles(tab, getTilesData(tab));
+    showLayoutPages();
+    // The screensaver's clock at this layout's place.
+    if (isScreensaverTileTab(tab) && typeof screensaverLoaded !== 'undefined' && screensaverLoaded) renderScreensaverEditor();
+  }
+
+  async function loadLayoutWindow(key, from) {
+    // "Kopieren von" can be undone: the places before it, until the next
+    // layout or save.
+    layoutWindow.undo = from && layoutWindow.shown && key === layoutWindow.key
+      ? Object.fromEntries(layoutTabs().map(tab => [tab, layoutClone(getTilesData(tab))])) : null;
+    // The screensaver clock comes along (its place and size there).
+    layoutWindow.undoClock = layoutWindow.undo ? layoutClone(layoutClock(key)) : null;
+    if (from && layoutClock(from)) layoutWindow.clocks[key] = layoutClone(layoutClock(from));
+    // The layout left keeps its unsaved places for later.
+    if (layoutWindow.shown) {
+      layoutWindow.work[layoutWindow.key] = Object.fromEntries(layoutTabs().map(tab => [tab, layoutClone(getTilesData(tab))]));
+    }
+    layoutWindow.key = key;
+    layoutWindow.shown = true;
+    useLayoutGrid();
+    const work = !from && layoutWindow.work[key];
+    for (const tab of layoutTabs()) {
+      const tiles = from ? takeoverTiles(tab, key, from) : work?.[tab] ? layoutClone(work[tab]) : setupTiles(tab, key);
+      showLayoutTiles(tab, reconcileLayoutPages(key, tab, tiles));
+    }
+    delete layoutWindow.work[key];
+    layoutSavedSig(key);
+    await mountLayoutTab(layoutWindow.tab);
+    refreshLayoutButtons();
+  }
+
+  function refreshLayoutButtons() {
+    const dialog = document.querySelector('.setup-dialog');
+    if (!dialog || !layoutWindow) return;
+    // Take over from any other layout.
+    dialog.querySelector('.setup-undo').hidden = !layoutWindow.undo;
+    dialog.querySelector('.setup-from').innerHTML = `<option value="">${escapeHtml(t('layoutCopyFrom'))}</option>` +
+      LAYOUT_KEYS.filter(key => key !== layoutWindow.key && LAYOUTS[key].available)
+        .map(key => `<option value="${key}">${escapeHtml(LAYOUTS[key].name)}</option>`).join('');
+    // The active layout needs no switch; the button keeps its room, so the
+    // window keeps its size.
+    dialog.querySelector('.setup-apply').style.visibility = layoutWindow.key === ACTIVE_LAYOUT ? 'hidden' : '';
+    refreshLayoutStatus();
+  }
+
+  function refreshLayoutSave() {
+    const button = document.querySelector('.setup-save');
+    if (!button || !layoutWindow) return;
+    const changed = layoutDirty();
+    // A layout with a folder out of reach is never stored, like it can never
+    // be switched to: the folder would be gone on the panel.
+    button.disabled = !changed || layoutWindow.blocked || layoutWindow.busy;
+    button.innerHTML = changed ? escapeHtml(t('save')) : `<i class="mdi mdi-check"></i> ${escapeHtml(t('layoutSaved'))}`;
+  }
+
+  // The selected tile with the cross on its corner: on the screen it goes
+  // into the storage, in the storage (or half over the edge) it is deleted
+  // (not folders, not Settings and Back).
+  function layoutSelectedTile() {
+    if (!layoutWindow || currentTileTab !== layoutWindow.tab || currentTileIndex < 0) return null;
+    const tile = getTilesData(layoutWindow.tab)[currentTileIndex];
+    return layoutUsed(tile) && Number(tile.type) !== 4 && !layoutNavType(tile.type) ? tile : null;
+  }
+
+  function refreshLayoutDelete() {
+    const grid = layoutWindow && document.querySelector(`#tab-tiles-${layoutWindow.tab} .setup-grid`);
+    if (!grid) return;
+    grid.querySelectorAll('.setup-trash').forEach(node => node.remove());
+    const el = layoutSelectedTile() && document.getElementById(`${layoutWindow.tab}-tile-${currentTileIndex}`);
+    if (!el) return;
+    const cross = document.createElement('span');
+    cross.className = 'setup-trash';
+    cross.title = t('layoutDeleteTile');
+    cross.dataset.for = el.id;
+    cross.innerHTML = '<i class="mdi mdi-close"></i>';
+    grid.appendChild(cross);
+    placeLayoutBadges(grid);
+  }
+
+  // Badges sit on their tile's top right corner, half outside. While a tile
+  // is dragged or resized they ride on the editor's placeholder, so they go
+  // along with the tile's new place.
+  let layoutMoving = '';
+  function placeLayoutBadges(grid) {
+    const resizing = resizeState ? resizeState.tileId : '';
+    const target = layoutMoving || resizing;
+    const holder = target && grid.querySelector(resizing ? '.tile-resize-placeholder.show' : '.tile-drop-placeholder.show');
+    grid.querySelectorAll('.setup-flag, .setup-trash').forEach(badge => {
+      const tile = document.getElementById(badge.dataset.for);
+      const box = badge.dataset.for === target && holder ? holder : tile;
+      if (!box) return;
+      const left = (box.offsetLeft + box.offsetWidth - 11) + 'px';
+      const top = (box.offsetTop - 7) + 'px';
+      if (badge.style.left !== left) badge.style.left = left;
+      if (badge.style.top !== top) badge.style.top = top;
+    });
+  }
+
+  function deselectLayoutTile(tab) {
+    currentTileIndex = -1;
+    document.querySelectorAll(`#tab-tiles-${tab} .tile-grid > .tile`).forEach(el => {
+      el.classList.remove('active');
+      delete el.dataset.selected;
+    });
+  }
+
+  // The cross on a tile on the screen puts it into the storage: no part of
+  // this layout, its places in the other layouts stay (user 2026-10-08).
+  // The cross on a tile deletes it after the question, from every layout
+  // (user 2026-10-08); into the storage a tile is dragged.
+  async function deleteLayoutTile() {
+    const tile = layoutSelectedTile();
+    if (!tile) return;
+    const tab = layoutWindow.tab, index = currentTileIndex;
+    const name = tile.title || getTileTypeMeta(tile.type)?.label || '';
+    // A folder's question names it and says its tiles go too.
+    const folder = Number(tile.type) === 4;
+    const question = folder ? tf('deleteFolderConfirm', {name}) : tf('layoutDeleteConfirm', {tile: name});
+    if (!window.confirm(question)) return;
+    const form = new FormData();
+    form.append('folder', layoutFolderId(tab));
+    form.append('index', String(index));
+    form.append('type', '0');
+    if (folder) form.append('delete_folder', '1');
+    try {
+      const response = await layoutWindowFetch('api/tiles', {method: 'POST', body: form});
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+    } catch (error) {
+      showNotification(t('deleteFailed'), false);
+      return;
+    }
+    if (!layoutWindow) return;
+    layoutWindow.changed = true;
+    // Gone from every layout: from the page, the stored places and every
+    // layout's unsaved ones; only the other edits remain unsaved.
+    const tabIndex = layoutTabs().indexOf(tab);
+    if (layoutWindow.pages[tab]) layoutWindow.pages[tab][index] = layoutEmptyTile();
+    for (const work of Object.values(layoutWindow.work)) if (work[tab]) work[tab][index] = layoutEmptyTile();
+    for (const key of Object.keys(layoutWindow.saved)) {
+      const saved = JSON.parse(layoutWindow.saved[key]);
+      if (saved[tabIndex]) saved[tabIndex][index] = 0;
+      layoutWindow.saved[key] = JSON.stringify(saved);
+    }
+    if (drafts[tab]) delete drafts[tab][index];
+    deselectLayoutTile(tab);
+    getTilesData(tab)[index] = layoutEmptyTile();
+    renderTileFromData(tab, index, layoutEmptyTile(), sensorMetaCache);
+    layoutTiles(tab, getTilesData(tab));
+  }
+
+  // Back to the places before "Kopieren von".
+  async function undoLayoutCopy() {
+    const before = layoutWindow?.undo;
+    if (!before) return;
+    layoutWindow.undo = null;
+    if (layoutWindow.undoClock) layoutWindow.clocks[layoutWindow.key] = layoutWindow.undoClock;
+    layoutWindow.undoClock = null;
+    for (const tab of layoutTabs()) if (before[tab]) showLayoutTiles(tab, before[tab]);
+    await mountLayoutTab(layoutWindow.tab);
+    refreshLayoutButtons();
+  }
+
+  // Closing the window with layouts not saved asks first.
+  function mayLeaveLayout() {
+    const open = LAYOUT_KEYS.filter(key => layoutDirty(key)).map(key => LAYOUTS[key].name);
+    return !open.length || window.confirm(tf('layoutUnsavedConfirm', {layout: open.join(', ')}));
+  }
+
+  // "Speichern": every place of every page; the server takes what lies on
+  // the layout's screen (and keeps the bar layouts' red places).
+  async function saveLayoutWindow() {
+    if (!layoutWindow || layoutWindow.blocked || layoutWindow.busy) return false;
+    const key = layoutWindow.key;
+    const folders = {};
+    for (const tab of layoutTabs()) {
+      const places = folders[layoutFolderId(tab)] = {};
+      getTilesData(tab).forEach(tile => {
+        if (!layoutUsed(tile) || !tile.view_id || (key !== 'classic' && layoutBarHidden(tile, tab))) return;
+        // Parked in this layout: in its field, no place.
+        if (Number(tile.type) === 7 && tile.layout_hidden) return;
+        places[tile.view_id] = [tile.col, tile.row, tile.span_w, tile.span_h];
+      });
+    }
+    const settingsParked = !!layoutWindow.settingsParked?.[key];
+    const body = {layout: key, folders, settings_parked: settingsParked};
+    // The page row with a bar layout's places, in one go (user 2026-10-12).
+    const pagesChanged = !!LAYOUTS[key].bar && layoutPagesDirty();
+    if (pagesChanged) {
+      const slots = layoutWindow.pageSlots;
+      body.pages = slots.slice(0, slots.reduce((end, id, i) => id ? i + 1 : end, 0));
+      if (layoutWindow.pageUnlock) body.unlock = true;
+    }
+    const clock = layoutClockDirty(key) && layoutWindow.clocks[key];
+    if (clock) body.clock = [clock.clock_x, clock.clock_y, clock.time_font_size, clock.date_font_size];
+    layoutWindow.busy = true;
+    refreshLayoutSave();
+    try {
+      const response = await layoutWindowFetch('api/layouts', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+      if (!response.ok) {
+        // A folder back from the pages without room on the panel's screen.
+        let reason = '';
+        try { reason = (await response.json())?.error || ''; } catch (_) {}
+        throw new Error(reason === 'No free cell' ? t('tileDoesNotFit') : '');
+      }
+      const data = await (await layoutWindowFetch('api/layouts', {cache: 'no-store'})).json();
+      if (data?.success) layoutWindow.data = data;
+    } catch (error) {
+      showNotification(error?.message || t('saveFailed'), false);
+      return false;
+    } finally {
+      if (layoutWindow) layoutWindow.busy = false;
+    }
+    if (!layoutWindow) return false;
+    if (key === ACTIVE_LAYOUT) layoutWindow.changed = true;
+    // The panel's own layout: Settings left Home or came back at once.
+    if (key === ACTIVE_LAYOUT && settingsParked !== !!layoutWindow.savedSettingsParked?.[key]) {
+      layoutWindow.settingsActiveChanged = true;
+    }
+    if (layoutWindow.savedSettingsParked) layoutWindow.savedSettingsParked[key] = settingsParked;
+    if (pagesChanged) {
+      // The other bar layout's unsaved places follow the new pages first
+      // (a folder back from them takes the spot the panel gave it).
+      for (const other of LAYOUT_KEYS) {
+        const work = layoutWindow.work[other];
+        if (other === key || !LAYOUTS[other].bar || !work) continue;
+        for (const tab of Object.keys(work)) work[tab] = reconcileLayoutPages(other, tab, work[tab]);
+      }
+      layoutWindow.savedPageSlots = layoutWindow.pageSlots.slice();
+      layoutWindow.pageUnlock = false;
+      layoutWindow.changed = true;
+    }
+    // The page's screensaver tab shows the active layout's clock.
+    if (clock && key === ACTIVE_LAYOUT && typeof screensaverDraft !== 'undefined' && screensaverDraft) {
+      Object.assign(screensaverDraft, clock);
+    }
+    if (layoutWindow.clocks) delete layoutWindow.clocks[key];
+    for (const other of Object.keys(layoutWindow.saved)) if (!layoutWindow.work[other]) delete layoutWindow.saved[other];
+    // The other bar layout's stored places changed with the pages (a folder
+    // back from them got a spot there): its unsaved ones count against those.
+    if (pagesChanged) {
+      for (const other of LAYOUT_KEYS) {
+        if (other !== key && LAYOUTS[other].bar && layoutWindow.work[other]) {
+          layoutWindow.saved[other] = layoutSignature(tab => setupTiles(tab, other));
+        }
+      }
+    }
+    layoutWindow.undo = null;
+    const undo = document.querySelector('.setup-undo');
+    if (undo) undo.hidden = true;
+    layoutWindow.saved[key] = layoutSignature(getTilesData);
+    refreshLayoutStatus();
+    return true;
+  }
+
+  // "Umstellen": stored, chosen, and the panel restarts with it.
+  async function applyLayoutWindow() {
+    if (!layoutWindow) return;
+    const L = LAYOUTS[layoutWindow.key];
+    if (!L.switchable || layoutWindow.blocked) return;
+    if (!window.confirm(tf('layoutSwitchConfirm', {layout: L.name}))) return;
+    if (!(await saveLayoutWindow())) return;
+    try {
+      const response = await layoutWindowFetch('api/layouts/active', {
+        method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: 'layout=' + encodeURIComponent(layoutWindow.key)});
+      if (!response.ok) {
+        // The device's reason (folders without a place there).
+        let reason = '';
+        try { reason = (await response.json())?.error || ''; } catch (_) {}
+        throw new Error(reason);
+      }
+    } catch (error) {
+      showNotification(error?.message || t('saveFailed'), false);
+      return;
+    }
+    closeLayoutWindow();
+    restartPanelForLayout();
+  }
+
+  async function openLayoutWindow() {
+    if (layoutWindow) return;
+    // Every folder's tiles side by side, and the stored places; a folder's
+    // page loads when its tab is shown.
+    initTileTabs();
+    let data = null;
+    try {
+      await Promise.all(layoutTabs().filter(tab => !isScreensaverTileTab(tab)).map(tab => fetchTileGridData(tab)));
+      const response = await layoutWindowFetch('api/layouts', {cache: 'no-store'});
+      data = await response.json();
+      if (!response.ok || !data?.success) throw new Error('layouts');
+    } catch (error) {
+      showNotification(t('loadFailed'), false);
+      return;
+    }
+    if (layoutWindow) return;
+    readLayoutBaseSizes();
+    const tabs = layoutTabs();
+    layoutWindow = {
+      key: ACTIVE_LAYOUT === 'classic' ? 'bar' : ACTIVE_LAYOUT,
+      tab: tabs.includes(currentTileTab) ? currentTileTab : tabs[0],
+      data,
+      pages: Object.fromEntries(tabs.map(tab => [tab, layoutClone(getTilesData(tab))])),
+      drafts: layoutClone(drafts),
+      // The page's selected tile: selected again when the window closes.
+      selection: {tab: currentTileTab, index: currentTileIndex, byTab: layoutClone(selectedTileByTab)},
+      grid: {GRID_COLS, GRID_ROWS, GRID_SHOWN_COLS, GRID_SHOWN_ROWS, HEAD_BAR},
+      changed: false,
+      busy: false,
+      shown: false,
+      undo: null,
+      work: {},
+      saved: {},
+      missingFolders: 0,
+      blocked: false,
+      home: null,
+      pageSlots: [],
+      savedPageSlots: [],
+      pageUnlock: false,
+      // Settings parked per layout: the window's choice and the stored one,
+      // and the tile parked off Home in the panel's layout (layoutBase).
+      settingsParked: layoutSettingsParkedFrom(data),
+      savedSettingsParked: layoutSettingsParkedFrom(data),
+      settingsTile: data?.settings?.tile ? {...data.settings.tile, type: 7} : null,
+      settingsActiveChanged: false
+    };
+    // The page row as stored; a folder gone meanwhile left its place free.
+    layoutWindow.pageSlots = layoutPageSlotsFrom(data).map(id => id && layoutHomeFolderIndex(id) >= 0 ? id : 0);
+    layoutWindow.savedPageSlots = layoutWindow.pageSlots.slice();
+    // Every layout's storage once, so the window has its size from the
+    // start (it grows by rows where tiles find no spot).
+    useLayoutGrid();
+    for (const key of LAYOUT_KEYS.filter(key => LAYOUTS[key].available)) {
+      for (const tab of layoutTabs()) setupTiles(tab, key);
+    }
+    const backdrop = document.createElement('div');
+    backdrop.className = 'setup-backdrop';
+    const layoutButton = key => {
+      const L = LAYOUTS[key];
+      const shape = 'setup-shape' + (L.portrait ? ' portrait' : '') + (L.bar ? ' bar' : '');
+      const active = key === ACTIVE_LAYOUT ? `<span class="setup-active">${escapeHtml(t('layoutActive'))}</span>` : '';
+      return `<button type="button" class="setup-layout" data-key="${key}"><span class="${shape}"></span>` +
+        `<span class="setup-layout-text"><b>${escapeHtml(L.name)}</b><small>${layoutSize(key)}</small></span>${active}</button>`;
+    };
+    // The layout the panel shows on the left, arrows to the others on the
+    // right, one above the other (user 2026-10-08); the arrow to the layout
+    // being set up lights up, none while the active one itself is edited.
+    const targets = LAYOUT_KEYS.filter(key => key !== ACTIVE_LAYOUT && LAYOUTS[key].available);
+    const arrowHeight = targets.length > 1 ? 76 : 34;
+    const arrows = targets.map((key, index) => {
+      const y = targets.length > 1 ? (index ? 59 : 17) : 17;
+      const middle = arrowHeight / 2;
+      return `<g class="setup-arrow" data-key="${key}"><path d="M2 ${middle} H12 C22 ${middle} 22 ${y} 32 ${y} H40"/>` +
+        `<path d="M35 ${y - 5} L40.5 ${y} L35 ${y + 5}"/></g>`;
+    }).join('');
+    const layoutButtons = layoutButton(ACTIVE_LAYOUT) +
+      `<svg class="setup-arrows" viewBox="0 0 44 ${arrowHeight}" width="44" height="${arrowHeight}" aria-hidden="true">` +
+      `${arrows}</svg><div class="setup-targets">${targets.map(layoutButton).join('')}</div>`;
+    const tabButtons = tabs.map(tab => {
+      // A folder not loaded yet has its name and icon on its page button.
+      const host = document.getElementById('tab-tiles-' + tab) ||
+        document.querySelector(`.folder-tab-btn[data-tab-id="${tab}"]`);
+      const home = layoutFolderId(tab) === '0';
+      const saver = isScreensaverTileTab(tab);
+      const name = home ? t('home') : saver ? t('importScreensaver') : host?.dataset.folderName || tab;
+      const icon = home ? 'home' : saver ? 'monitor' : host?.dataset.folderIcon || 'folder';
+      return `<button type="button" class="tab-btn setup-tab" data-tab="${tab}"><i class="mdi mdi-${escapeHtml(icon)}"></i> ` +
+        `${escapeHtml(name)}<span class="setup-badge" hidden></span></button>`;
+    }).join('');
+    backdrop.innerHTML = [
+      '<div class="setup-dialog" role="dialog" aria-modal="true">',
+      // One head: the title, the layouts with the notes right beside them,
+      // the X (user 2026-10-08).
+      `<div class="setup-head-row"><div class="setup-title">${escapeHtml(t('layoutChange'))}</div>`,
+      `<div class="setup-layouts">${layoutButtons}</div><div class="setup-status"></div>`,
+      `<div class="setup-head-right"><button type="button" class="setup-close" aria-label="${escapeHtml(t('close'))}">` +
+        '<i class="mdi mdi-close"></i></button></div></div>',
+
+      `<div class="setup-tabs">${tabButtons}</div>`,
+      '<div class="setup-stage"></div>',
+      // The buttons on the right.
+      '<div class="setup-foot">',
+      '<div class="setup-actions">',
+      `<button type="button" class="btn setup-undo" hidden><i class="mdi mdi-undo"></i> ${escapeHtml(t('layoutUndo'))}</button>`,
+      `<select class="setup-from" aria-label="${escapeHtml(t('layoutCopyFrom'))}"></select>`,
+      `<button type="button" class="btn setup-save">${escapeHtml(t('save'))}</button>`,
+      `<button type="button" class="btn btn-go setup-apply">${escapeHtml(t('layoutSwitch'))}</button></div></div></div>`
+    ].join('');
+    document.body.appendChild(backdrop);
+    document.body.classList.add('setup-window');
+    // The page fields, also on a panel showing the classic layout.
+    ensurePageFields();
+    const buttons = [...backdrop.querySelectorAll('.setup-layout')];
+    const widest = Math.max(...buttons.map(button => button.offsetWidth));
+    buttons.forEach(button => { button.style.width = widest + 'px'; });
+    // A click on the window's free area does not start a new tile.
+    backdrop.querySelector('.setup-stage').addEventListener('click', event => {
+      if (event.target.classList?.contains('setup-grid')) event.stopPropagation();
+    }, true);
+    await loadLayoutWindow(layoutWindow.key, '');
+  }
+
+  async function closeLayoutWindow() {
+    if (!layoutWindow) return;
+    const state = layoutWindow;
+    unmountLayoutGrid();
+    document.querySelector('.setup-backdrop')?.remove();
+    document.body.classList.remove('setup-window');
+    // The window's places never reach the editor: pending saves are dropped,
+    // its drafts give way to the page's.
+    for (const key of Object.keys(autoSaveTimers)) {
+      if (autoSaveTimers[key]) clearTimeout(autoSaveTimers[key]);
+      if (key.includes(':')) delete autoSaveTimers[key];
+      else autoSaveTimers[key] = null;
+    }
+    for (const key of Object.keys(drafts)) delete drafts[key];
+    Object.assign(drafts, state.drafts);
+    persistDrafts();
+    GRID_COLS = state.grid.GRID_COLS;
+    GRID_ROWS = state.grid.GRID_ROWS;
+    GRID_SHOWN_COLS = state.grid.GRID_SHOWN_COLS;
+    GRID_SHOWN_ROWS = state.grid.GRID_SHOWN_ROWS;
+    HEAD_BAR = state.grid.HEAD_BAR;
+    layoutWindow = null;
+    currentTileIndex = -1;
+    if (typeof screensaverLoaded !== 'undefined' && screensaverLoaded) renderScreensaverEditor();
+    document.querySelectorAll('.tile-grid > .tile').forEach(el => {
+      el.classList.remove('active', 'setup-red');
+      delete el.dataset.selected;
+    });
+    document.querySelectorAll('.tile-specific-settings').forEach(el => el.classList.add('hidden'));
+    document.querySelectorAll('.tile-settings').forEach(panel => { panel.dataset.pane = 'global'; });
+    // The editor's page slots as stored (the window may have saved them).
+    const pageSlots = typeof pageSlotsElement === 'function' ? pageSlotsElement() : null;
+    if (pageSlots) pageSlots.dataset.pages = encodePageSlots(state.savedPageSlots);
+    // The page again, with what the panel now has.
+    for (const tab of Object.keys(state.pages)) {
+      tilesData[tab] = state.pages[tab];
+      if (state.changed) {
+        try { await fetchTileGridData(tab, true); } catch (error) {}
+      }
+      showLayoutTiles(tab, getTilesData(tab));
+    }
+    if (pageSlots) syncPageHeads();
+    // Settings parked or back in the panel's layout: the editor's parking
+    // checkbox and slot follow (settings/access.js).
+    if (state.settingsActiveChanged) {
+      const parked = !!state.savedSettingsParked[ACTIVE_LAYOUT];
+      const box = settingsAccessElement('settings_tile_hidden');
+      if (box) box.checked = parked;
+      settingsAccessCommittedState = readSettingsAccessState();
+      await reconcileSettingsTileUi(parked, state.settingsTile);
+    }
+    // The tile the page had selected before, with its settings beside the
+    // preview (the window's own selections are forgotten).
+    const selection = state.selection;
+    for (const key of Object.keys(selectedTileByTab)) delete selectedTileByTab[key];
+    Object.assign(selectedTileByTab, selection.byTab);
+    currentTileTab = selection.tab;
+    // Deleted meanwhile or now in the storage: the first tile top left.
+    const visible = (tile) => !!tile && Number(tile.type || 0) !== 0 && !tile.layout_hidden;
+    const firstVisible = tab => {
+      const tiles = getTilesData(tab) || [];
+      let best = -1;
+      tiles.forEach((tile, index) => {
+        if (!visible(tile)) return;
+        const other = tiles[best];
+        if (best < 0 || Number(tile.row) < Number(other.row) ||
+            (Number(tile.row) === Number(other.row) && Number(tile.col) < Number(other.col))) best = index;
+      });
+      return best;
+    };
+    let restored = false;
+    if (selection.index === -2 && typeof selectHiddenSettingsTile === 'function') {
+      selectHiddenSettingsTile();
+      restored = currentTileIndex === -2;
+    } else if (selection.tab && selection.index >= 0) {
+      const index = visible(getTilesData(selection.tab)?.[selection.index]) ? selection.index : firstVisible(selection.tab);
+      if (index >= 0) {
+        selectTile(index, selection.tab);
+        restored = true;
+      }
+    }
+    if (!restored) {
+      try { localStorage.setItem(SELECTED_TILE_STORAGE_KEY, JSON.stringify(selectedTileByTab)); } catch (e) {}
+    }
+  }
+
+  // The window's editor saves only in the window (see above).
+  window.fetch = (url, options) => (layoutWindow && options && /post/i.test(options.method || '') &&
+      /^\/api\/tiles(\/reorder)?(\?|$)/.test(String(url)))
+    ? Promise.resolve(new Response('{"success":true}', {headers: {'Content-Type': 'application/json'}}))
+    : layoutWindowFetch(url, options);
+
+  document.addEventListener('dragstart', event => {
+    const tile = layoutWindow && event.target.closest?.('.setup-grid > .tile');
+    layoutMoving = tile ? tile.id : '';
+  }, true);
+  document.addEventListener('dragend', () => {
+    layoutMoving = '';
+    const grid = layoutWindow && document.querySelector(`#tab-tiles-${layoutWindow.tab} .setup-grid`);
+    if (grid) requestAnimationFrame(() => placeLayoutBadges(grid));
+  }, true);
+  // The placeholders move by style changes; the badges follow frame by frame.
+  let layoutBadgeFrame = 0;
+  if (typeof MutationObserver === 'function') {
+    new MutationObserver(records => {
+      if (!layoutWindow || layoutBadgeFrame) return;
+      if (records.every(record => record.target.classList?.contains('setup-flag') ||
+          record.target.classList?.contains('setup-trash'))) return;
+      layoutBadgeFrame = requestAnimationFrame(() => {
+        layoutBadgeFrame = 0;
+        const grid = layoutWindow && document.querySelector(`#tab-tiles-${layoutWindow.tab} .setup-grid`);
+        if (grid) placeLayoutBadges(grid);
+      });
+    }).observe(document.body, {attributes: true, subtree: true, attributeFilter: ['style', 'class']});
+  }
+
+  document.addEventListener('click', event => {
+    if (!layoutWindow || !event.target.closest?.('.setup-dialog')) return;
+    const layout = event.target.closest('.setup-layout');
+    if (layout && layout.dataset.key !== layoutWindow.key) loadLayoutWindow(layout.dataset.key, '');
+    const tab = event.target.closest('.setup-tab');
+    if (tab && tab.dataset.tab !== layoutWindow.tab) mountLayoutTab(tab.dataset.tab);
+    if (event.target.closest('.setup-close') && mayLeaveLayout()) { closeLayoutWindow(); return; }
+    if (event.target.closest('.setup-save')) saveLayoutWindow();
+    if (event.target.closest('.setup-undo')) undoLayoutCopy();
+    if (event.target.closest('.setup-trash')) deleteLayoutTile();
+    if (event.target.closest('.setup-apply')) applyLayoutWindow();
+    // Selecting a tile decides the delete cross.
+    setTimeout(refreshLayoutDelete, 0);
+  });
+  document.addEventListener('change', event => {
+    const from = event.target.closest?.('.setup-from');
+    if (!from || !layoutWindow || !from.value) return;
+    const source = from.value;
+    from.value = '';
+    loadLayoutWindow(layoutWindow.key, source);
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && layoutWindow && mayLeaveLayout()) closeLayoutWindow();
+  });
 
   let screensaverDraft = null;
   let screensaverLoaded = false;
@@ -8838,6 +15195,9 @@ function syncTileRadiusControls(tabEl) {
   let screensaverSelected = { kind: 'background', index: -1 };
   let screensaverWallpaperIndex = -1;
   let screensaverSaveTimer = null;
+  // What the display stores now (screensaverSaveKey): a click, a selection
+  // or a drag without a change saves nothing and shows no "Saved".
+  let screensaverSavedKey = '';
   const screensaverTimeFontSizes = [20, 24, 28, 32, 40, 48, 56, 64, 72, 80, 96];
   const screensaverDateFontSizes = [20, 24, 28, 32, 40, 48, 56, 64, 72];
 
@@ -8852,6 +15212,67 @@ function syncTileRadiusControls(tabEl) {
   function ssClamp(value, min, max) {
     const n = Number(value);
     return Math.max(min, Math.min(max, Number.isFinite(n) ? n : min));
+  }
+
+  // The image frame stands for the panel's screen: its box in the grid's
+  // padding box (where the clock is positioned) and on the page.
+  function ssPreviewScreenRect(preview) {
+    // In the layout window: that layout's screen (layout-window.js).
+    const shown = layoutWindowScreen(preview);
+    if (shown) return shown.rect;
+    const frame = preview.querySelector('.screensaver-grid-image-frame');
+    return (frame || preview).getBoundingClientRect();
+  }
+
+  // One background opacity for every screensaver tile (tile_opacity, set in
+  // the screensaver footer): the draft once loaded, else the server-rendered
+  // slider.
+  function screensaverTileOpacity() {
+    const value = screensaverDraft?.tile_opacity ??
+      document.getElementById('screensaverTileOpacity')?.value;
+    return Math.round(ssClamp(value ?? SCREENSAVER_TILE_DEFAULT_OPACITY, 0, 255));
+  }
+
+  // The new opacity on every screensaver tile preview and in the Global tab.
+  function refreshScreensaverTileOpacity() {
+    const value = screensaverTileOpacity();
+    const output = document.getElementById('screensaverTileOpacityValue');
+    if (output) output.textContent = Math.round(value * 100 / 255) + ' %';
+    refreshScreensaverTiles();
+  }
+
+  // Draws every screensaver tile preview again (opacity, design).
+  function refreshScreensaverTiles() {
+    const tiles = tilesData.screensaver || [];
+    tiles.forEach((tile, index) => {
+      if (tile && Number(tile.type)) renderTileFromData('screensaver', index, tile, sensorMetaCache);
+    });
+    layoutTiles('screensaver', tiles);
+    if (currentTileTab === 'screensaver' && currentTileIndex >= 0) updateTilePreview('screensaver');
+  }
+
+  function ssPreviewScreen(preview) {
+    const shown = layoutWindowScreen(preview);
+    if (shown) return shown;
+    const frame = preview.querySelector('.screensaver-grid-image-frame');
+    const rect = ssPreviewScreenRect(preview);
+    return {
+      left: frame ? frame.offsetLeft : 0,
+      top: frame ? frame.offsetTop : 0,
+      width: rect.width || 800,
+      height: rect.height || 500
+    };
+  }
+
+  // The clock's place and size: the draft's (the active layout's), in the
+  // layout window the edited layout's (user 2026-10-08: the clock per
+  // layout); the window stores it with its places.
+  function ssClockPlace(preview) {
+    return (layoutWindowScreen(preview) && layoutWindowClock()) || screensaverDraft;
+  }
+  function ssClockEdited(preview) {
+    if (layoutWindowScreen(preview) && layoutWindowClock()) layoutWindowClockChanged();
+    else scheduleScreensaverSave();
   }
 
   function ssNearestClockFont(value, dateLine = false) {
@@ -8891,7 +15312,22 @@ function syncTileRadiusControls(tabEl) {
     data.wallpapers = Array.isArray(data.wallpapers) ? data.wallpapers : [];
     data.duration_seconds = Math.round(ssClamp(
       data.duration_seconds ?? 15, 3, 3600));
+    // The picture's source: the SD slideshow or the Bridge's picture of an
+    // image or camera entity (the slideshow stays stored).
+    data.picture_source = data.picture_source === 'ha' ? 'ha' : 'sd';
+    data.picture_entity = typeof data.picture_entity === 'string' ? data.picture_entity : '';
+    // How the Bridge places it and a camera's interval (3..60 s).
+    data.picture_fit = ['fit', 'original'].includes(data.picture_fit) ? data.picture_fit : 'fill';
+    data.picture_every = Math.round(ssClamp(data.picture_every ?? 10, 3, 60));
+    // The tiles' design: 0 dark, 1 light, 2 automatic (the panel's).
+    data.theme = [0, 1, 2].includes(Number(data.theme)) ? Number(data.theme) : 2;
     return data;
+  }
+
+  // The stored settings without the editor's preview image: equal keys mean
+  // nothing to save.
+  function screensaverSaveKey(payload) {
+    return JSON.stringify({...payload, preview_wallpaper: ''});
   }
 
   // Keep the stored image list in step with the card: entries of deleted
@@ -8909,9 +15345,10 @@ function syncTileRadiusControls(tabEl) {
       data.wallpapers = kept;
     }
     const listed = new Set(data.wallpapers.map(item => key(item.file_name)));
+    const most = typeof SCREENSAVER_MAX_WALLPAPERS === 'number' ? SCREENSAVER_MAX_WALLPAPERS : 500;
     available.forEach(name => {
-      // The display stores at most 32 images.
-      if (listed.has(key(name)) || data.wallpapers.length >= 32) return;
+      // The display stores at most SCREENSAVER_MAX_WALLPAPERS images.
+      if (listed.has(key(name)) || data.wallpapers.length >= most) return;
       listed.add(key(name));
       data.wallpapers.push({
         file_name: name, enabled: true,
@@ -8946,6 +15383,7 @@ function syncTileRadiusControls(tabEl) {
     fetch('api/screensaver').then(r => r.json()).then(config => {
       if (!config || !config.success) throw new Error('screensaver config');
       screensaverDraft = ssNormalizeLoaded(config);
+      screensaverSavedKey = screensaverSaveKey(ssPayload(screensaverDraft, ''));
       const imagesChanged = ssSyncCardImages(screensaverDraft);
       screensaverWallpaperIndex = screensaverDraft.wallpapers.findIndex(w => w.enabled);
       if (screensaverWallpaperIndex < 0 && screensaverDraft.wallpapers.length) screensaverWallpaperIndex = 0;
@@ -8965,6 +15403,8 @@ function syncTileRadiusControls(tabEl) {
       shuffle: !!d.shuffle,
       tile_shadow: !!d.tile_shadow,
       tile_border: d.tile_border !== false,
+      tile_opacity: Math.round(ssClamp(d.tile_opacity ?? SCREENSAVER_TILE_DEFAULT_OPACITY, 0, 255)),
+      theme: [0, 1, 2].includes(Number(d.theme)) ? Number(d.theme) : 2,
       show_time: !!d.show_time,
       show_date: !!d.show_date,
       show_weekday: !!d.show_weekday,
@@ -8978,6 +15418,10 @@ function syncTileRadiusControls(tabEl) {
       clock_x: Math.round(ssClamp(d.clock_x, 0, 1000)),
       clock_y: Math.round(ssClamp(d.clock_y, 0, 1000)),
       duration_seconds: Math.round(ssClamp(d.duration_seconds, 3, 3600)),
+      picture_source: d.picture_source === 'ha' ? 'ha' : 'sd',
+      picture_entity: String(d.picture_entity || ''),
+      picture_fit: ['fit', 'original'].includes(d.picture_fit) ? d.picture_fit : 'fill',
+      picture_every: Math.round(ssClamp(d.picture_every ?? 10, 3, 60)),
       preview_wallpaper: previewName ?? (ssCurrentWallpaper()?.file_name || ''),
       wallpapers: d.wallpapers.map(w => ({
         file_name: w.file_name, enabled: !!w.enabled,
@@ -8996,12 +15440,16 @@ function syncTileRadiusControls(tabEl) {
 
   function saveScreensaverNow() {
     if (!screensaverLoaded) return;
+    const payload = ssPayload();
+    const key = screensaverSaveKey(payload);
+    if (key === screensaverSavedKey) return;
     fetch('api/screensaver', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(ssPayload())
+      body: JSON.stringify(payload)
     }).then(async response => {
       const result = await response.json().catch(() => ({}));
       if (!response.ok || !result.success) throw new Error(result.error || 'save');
+      screensaverSavedKey = key;
       showNotification(t('screensaverSaved'));
     }).catch(() => {
       showNotification(t('screensaverSaveFailed'), false);
@@ -9009,7 +15457,8 @@ function syncTileRadiusControls(tabEl) {
   }
 
   function ssCurrentWallpaper() {
-    if (!screensaverDraft || screensaverWallpaperIndex < 0) return null;
+    // Without a card no image is shown or edited (its entries stay stored).
+    if (!screensaverDraft || screensaverWallpaperIndex < 0 || screensaverDraft.sd_ready !== true) return null;
     return screensaverDraft.wallpapers[screensaverWallpaperIndex] || null;
   }
 
@@ -9026,6 +15475,7 @@ function syncTileRadiusControls(tabEl) {
       delete tile.dataset.selected;
     });
     document.getElementById('screensaverGrid')?.classList.add('selected-background');
+    setSettingsPane('screensaver', 'global');
     currentTileIndex = -1;
     currentTileTab = 'screensaver';
     renderScreensaverEditor();
@@ -9036,6 +15486,7 @@ function syncTileRadiusControls(tabEl) {
     document.getElementById('screensaverBackgroundSettings')?.classList.add('hidden');
     document.getElementById('screensaverClockSettings')?.classList.remove('hidden');
     document.getElementById('screensaverGrid')?.classList.remove('selected-background');
+    setSettingsPane('screensaver', 'tile');
     const settings = document.getElementById('screensaverSettings');
     settings?.querySelector('.tile-specific-settings')?.classList.add('hidden');
     document.querySelectorAll('#tab-tiles-screensaver .tile').forEach(tile => {
@@ -9051,6 +15502,15 @@ function syncTileRadiusControls(tabEl) {
     const list = document.getElementById('screensaverWallpaperList');
     if (!list || !screensaverDraft) return;
     list.innerHTML = '';
+    // Only the images on the card (user 2026-10-11): without a card the list
+    // is empty; the stored entries return with it.
+    if (screensaverDraft.sd_ready !== true) {
+      const empty = document.createElement('div');
+      empty.className = 'screensaver-save-state';
+      empty.textContent = t('screensaverNoSd');
+      list.appendChild(empty);
+      return;
+    }
     screensaverDraft.wallpapers.forEach((wallpaper, index) => {
       const row = document.createElement('div');
       row.className = 'screensaver-wallpaper-row' + (index === screensaverWallpaperIndex ? ' active' : '');
@@ -9113,8 +15573,12 @@ function syncTileRadiusControls(tabEl) {
     if (!preview || !image || !clock) return;
     preview.classList.toggle('selected-background', screensaverSelected.kind === 'background');
     clock.classList.toggle('selected-clock', screensaverSelected.kind === 'clock');
-    const width = preview.getBoundingClientRect().width || 800;
-    const scale = width / Number(d.screen_width || 1280);
+    // The image frame is the panel's screen. The grid around it is wider
+    // (editor padding and gaps), so the clock is placed and scaled on the
+    // frame; on the grid it sat about 10 px up and right, against the edge.
+    const screen = ssPreviewScreen(preview);
+    const scale = screen.width / Number(screen.screenW || d.screen_width || 1280);
+    const place = ssClockPlace(preview);
     const rootStyles = getComputedStyle(document.documentElement);
     const devicePx = (name, fallback) => {
       const value = parseFloat(rootStyles.getPropertyValue(name));
@@ -9133,7 +15597,23 @@ function syncTileRadiusControls(tabEl) {
     clock.style.setProperty(
       '--screensaver-clock-shadow-6',
       (devicePx('--screensaver-shadow-6', 6) * scale) + 'px');
-    const wallpaper = ssCurrentWallpaper();
+    // The type picks the controls: the slideshow's or the picture entity.
+    const fromHa = d.picture_source === 'ha';
+    const source = document.getElementById('screensaverPictureSource');
+    if (source && source.value !== d.picture_source) source.value = d.picture_source;
+    document.getElementById('screensaverHaPicture')?.classList.toggle('hidden', !fromHa);
+    document.getElementById('screensaverSdPicture')?.classList.toggle('hidden', fromHa);
+    const pictureEntity = document.getElementById('screensaver_picture_entity');
+    if (pictureEntity && pictureEntity.value !== d.picture_entity) pictureEntity.value = d.picture_entity;
+    const pictureFit = document.getElementById('screensaverPictureFit');
+    if (pictureFit && pictureFit.value !== d.picture_fit) pictureFit.value = d.picture_fit;
+    const pictureEvery = document.getElementById('screensaverPictureEvery');
+    if (pictureEvery && document.activeElement !== pictureEvery &&
+        Number(pictureEvery.value) !== d.picture_every) pictureEvery.value = String(d.picture_every);
+    // Only a camera sends stills on an interval.
+    document.getElementById('screensaverPictureEveryRow')?.classList.toggle('hidden',
+      !String(d.picture_entity || '').startsWith('camera.'));
+    const wallpaper = fromHa ? null : ssCurrentWallpaper();
     if (d.use_wallpapers && wallpaper && wallpaper.file_name) {
       const wanted = 'api/screensaver/wallpaper?name=' + encodeURIComponent(wallpaper.file_name);
       if (image.dataset.src !== wanted) { image.src = wanted; image.dataset.src = wanted; }
@@ -9148,18 +15628,38 @@ function syncTileRadiusControls(tabEl) {
       image.removeAttribute('src');
       delete image.dataset.src;
     }
-    clock.style.left = (d.clock_x / 10) + '%';
-    clock.style.top = (d.clock_y / 10) + '%';
+    clock.style.left = (screen.left + place.clock_x * screen.width / 1000) + 'px';
+    clock.style.top = (screen.top + place.clock_y * screen.height / 1000) + 'px';
     const time = document.getElementById('screensaverClockTime');
     const date = document.getElementById('screensaverClockDate');
     time.hidden = !d.show_time;
     date.hidden = !d.show_date && !d.show_weekday;
     time.style.fontSize =
-      Math.max(10, deviceClockFontPx(d.time_font_size, 48) * scale) + 'px';
+      Math.max(10, deviceClockFontPx(place.time_font_size, 48) * scale) + 'px';
     date.style.fontSize =
-      Math.max(8, deviceClockFontPx(d.date_font_size, 28) * scale) + 'px';
-    time.textContent = getClockPreviewTime(d.time_format);
-    date.textContent = getScreensaverClockPreviewDate(d);
+      Math.max(8, deviceClockFontPx(place.date_font_size, 28) * scale) + 'px';
+    // Each line is as tall as its LVGL font's line height, the glyphs on the
+    // LVGL baseline, with the device gap between the lines (clock/renderer.cpp).
+    const applyClockLine = (el, raw, fallback, minPx) => {
+      const size = Number(raw || fallback);
+      const fontPx = deviceClockFontPx(raw, fallback) * scale;
+      // Tiny previews keep a readable font; the line box grows with it.
+      const lineScale = fontPx < minPx ? minPx / fontPx : 1;
+      const linePx = devicePx('--screensaver-lh' + size, size * 1.21) * scale * lineScale;
+      // The glyphs on the LVGL baseline, measured in this browser and zoom
+      // (text-baseline.js).
+      const base = parseFloat(rootStyles.getPropertyValue('--screensaver-lb' + size));
+      el.style.lineHeight = linePx + 'px';
+      el.style.position = 'relative';
+      el.style.top = (Number.isFinite(base)
+        ? previewBaselineShift(Math.max(minPx, fontPx), linePx, base * scale * lineScale) : 0) + 'px';
+    };
+    applyClockLine(time, place.time_font_size, 48, 10);
+    applyClockLine(date, place.date_font_size, 28, 8);
+    date.style.marginTop = !time.hidden && !date.hidden
+      ? devicePx('--screensaver-clock-gap', 6) * scale + 'px' : '0px';
+    setClockDigits(time, getClockPreviewTime(d.time_format));
+    setClockDigits(date, getScreensaverClockPreviewDate(d));
     time.style.width = 'auto';
     date.style.width = 'auto';
     time.style.textAlign = ssClockAlignmentCss(d.time_alignment);
@@ -9180,6 +15680,11 @@ function syncTileRadiusControls(tabEl) {
     document.getElementById('screensaverShuffle').checked = !!d.shuffle;
     document.getElementById('screensaverTileShadow').checked = !!d.tile_shadow;
     document.getElementById('screensaverTileBorder').checked = d.tile_border !== false;
+    document.querySelectorAll('#screensaverTheme [data-theme]').forEach(button => {
+      button.classList.toggle('active', button.dataset.theme === String(d.theme));
+    });
+    const opacityInput = document.getElementById('screensaverTileOpacity');
+    if (opacityInput) opacityInput.value = String(screensaverTileOpacity());
     document.getElementById('screensaverShowTime').checked = !!d.show_time;
     document.getElementById('screensaverShowDate').checked = !!d.show_date;
     document.getElementById('screensaverShowWeekday').checked = !!d.show_weekday;
@@ -9218,7 +15723,7 @@ function syncTileRadiusControls(tabEl) {
     });
     let backgroundDrag = null;
     preview.addEventListener('pointerdown', e => {
-      if (fromTileOrClock(e)) return;
+      if (fromTileOrClock(e) || layoutWindowScreen(preview)) return;
       selectScreensaverBackground();
       const wallpaper = ssCurrentWallpaper();
       if (!wallpaper) return;
@@ -9254,16 +15759,17 @@ function syncTileRadiusControls(tabEl) {
     });
     clock.addEventListener('pointermove', e => {
       if (!clockDrag || clockDrag.id !== e.pointerId) return;
-      const rect = preview.getBoundingClientRect();
+      const rect = ssPreviewScreenRect(preview);
       const centerX = e.clientX - clockDrag.offsetX;
       const centerY = e.clientY - clockDrag.offsetY;
-      screensaverDraft.clock_x = Math.round(ssClamp((centerX - rect.left) * 1000 / rect.width, 0, 1000));
-      screensaverDraft.clock_y = Math.round(ssClamp((centerY - rect.top) * 1000 / rect.height, 0, 1000));
+      const place = ssClockPlace(preview);
+      place.clock_x = Math.round(ssClamp((centerX - rect.left) * 1000 / rect.width, 0, 1000));
+      place.clock_y = Math.round(ssClamp((centerY - rect.top) * 1000 / rect.height, 0, 1000));
       renderScreensaverEditor();
     });
     const finishClockDrag = e => {
       if (!clockDrag || clockDrag.id !== e.pointerId) return;
-      clockDrag = null; clock.classList.remove('dragging'); scheduleScreensaverSave();
+      clockDrag = null; clock.classList.remove('dragging'); ssClockEdited(preview);
     };
     clock.addEventListener('pointerup', finishClockDrag);
     clock.addEventListener('pointercancel', finishClockDrag);
@@ -9285,8 +15791,8 @@ function syncTileRadiusControls(tabEl) {
           y: e.clientY,
           width: Math.max(1, rect.width),
           height: Math.max(1, rect.height),
-          timeFont: Number(screensaverDraft.time_font_size || 48),
-          dateFont: Number(screensaverDraft.date_font_size || 28)
+          timeFont: Number(ssClockPlace(preview).time_font_size || 48),
+          dateFont: Number(ssClockPlace(preview).date_font_size || 28)
         };
         clockResize.setPointerCapture(e.pointerId);
       });
@@ -9297,16 +15803,17 @@ function syncTileRadiusControls(tabEl) {
         const heightFactor = (clockResizeDrag.height + e.clientY - clockResizeDrag.y) /
                              clockResizeDrag.height;
         const factor = ssClamp(Math.max(widthFactor, heightFactor), 0.35, 3.0);
-        screensaverDraft.time_font_size = ssNearestClockFont(
+        const place = ssClockPlace(preview);
+        place.time_font_size = ssNearestClockFont(
           clockResizeDrag.timeFont * factor, false);
-        screensaverDraft.date_font_size = ssNearestClockFont(
+        place.date_font_size = ssNearestClockFont(
           clockResizeDrag.dateFont * factor, true);
         renderScreensaverEditor();
       });
       const finishClockResize = e => {
         if (!clockResizeDrag || clockResizeDrag.id !== e.pointerId) return;
         clockResizeDrag = null;
-        scheduleScreensaverSave();
+        ssClockEdited(preview);
       };
       clockResize.addEventListener('pointerup', finishClockResize);
       clockResize.addEventListener('pointercancel', finishClockResize);
@@ -9317,9 +15824,36 @@ function syncTileRadiusControls(tabEl) {
       element.addEventListener(event, () => { fn(element); renderScreensaverEditor(); if (save) scheduleScreensaverSave(); });
     };
     bind('screensaverUseWallpapers', 'change', el => { screensaverDraft.use_wallpapers = el.checked; });
+    bind('screensaverPictureSource', 'change', el => {
+      screensaverDraft.picture_source = el.value === 'ha' ? 'ha' : 'sd';
+    });
+    bind('screensaver_picture_entity', 'change', el => { screensaverDraft.picture_entity = el.value || ''; });
+    bind('screensaverPictureFit', 'change', el => {
+      screensaverDraft.picture_fit = ['fit', 'original'].includes(el.value) ? el.value : 'fill';
+    });
+    bind('screensaverPictureEvery', 'change', el => {
+      screensaverDraft.picture_every = Math.round(ssClamp(Number(el.value) || 10, 3, 60));
+    });
     bind('screensaverShuffle', 'change', el => { screensaverDraft.shuffle = el.checked; });
     bind('screensaverTileShadow', 'change', el => { screensaverDraft.tile_shadow = el.checked; });
     bind('screensaverTileBorder', 'change', el => { screensaverDraft.tile_border = el.checked; });
+    // The tiles' design (a segmented choice): the preview draws them on that
+    // surface at once.
+    document.getElementById('screensaverTheme')?.addEventListener('click', event => {
+      const button = event.target?.closest?.('[data-theme]');
+      if (!button) return;
+      screensaverDraft.theme = [0, 1, 2].includes(Number(button.dataset.theme)) ? Number(button.dataset.theme) : 2;
+      const grid = document.getElementById('screensaverGrid');
+      if (grid) grid.dataset.ssTheme = String(screensaverDraft.theme);
+      refreshScreensaverTiles();
+      renderScreensaverEditor();
+      scheduleScreensaverSave();
+    });
+    bind('screensaverTileOpacity', 'input', el => {
+      screensaverDraft.tile_opacity = Number(el.value);
+      refreshScreensaverTileOpacity();
+    }, false);
+    bind('screensaverTileOpacity', 'change', el => { screensaverDraft.tile_opacity = Number(el.value); });
     bind('screensaverShowTime', 'change', el => { screensaverDraft.show_time = el.checked; });
     bind('screensaverShowDate', 'change', el => { screensaverDraft.show_date = el.checked; });
     bind('screensaverShowWeekday', 'change', el => { screensaverDraft.show_weekday = el.checked; });
@@ -9708,11 +16242,8 @@ function syncTileRadiusControls(tabEl) {
   function scheduleHardwareIoEntityOptionsRefresh() {
     hardwareIoEntityRefreshTimers.forEach(timer => window.clearTimeout(timer));
     hardwareIoEntityRefreshTimers = [0, 2500, 7500].map(delay => window.setTimeout(() => {
-      fetchEntityOptions(true).then(data => {
-        tileTabs.forEach(tab => {
-          rebuildEntitySelect(tab + '_sensor_entity', data.sensors);
-          rebuildEntitySelect(tab + '_switch_entity', data.switches);
-        });
+      fetchEntityOptions(true).then(() => {
+        refreshEntityPickers();
         fetchSensorMetaCache(true);
       }).catch(() => {});
     }, delay));
@@ -9721,11 +16252,15 @@ function syncTileRadiusControls(tabEl) {
   function restartHardwareIoNow() {
     setHardwareIoSaveState(t('ioRestarting'), 'saving');
     const restartForm = document.getElementById('admin_restart_form');
-    if (restartForm) {
+    // form.submit() cannot carry the CSRF header a password-protected panel
+    // requires; send the same request with fetch and reload as before.
+    if (restartForm && !window.HomeTilesAuth?.csrfToken()) {
       window.setTimeout(() => restartForm.submit(), 100);
       return;
     }
-    fetch('restart', {method: 'POST'}).catch(() => {});
+    fetch('restart', {method: 'POST'}).catch(() => {}).finally(() => {
+      if (restartForm) window.setTimeout(() => window.location.assign('./'), 300);
+    });
   }
 
   async function saveHardwareIoNow() {
@@ -9820,14 +16355,22 @@ function syncTileRadiusControls(tabEl) {
   }
 
   document.addEventListener('DOMContentLoaded', () => {
+    bindPreviewBaselines();
     toggleStaticNetworkFields();
     toggleNetworkSettings();
     toggleSettingsAccessFields();
     initSettingsAccessControls();
     initAdminSettingsSave();
+    initWebAdminPasswordSettings();
+    initSettingsPages();
     initTileTabs();
     let initialTab = '';
     try { initialTab = localStorage.getItem('activeAdminTab') || ''; } catch (e) {}
+    // I/O was a tab of its own before it became a Settings page.
+    if (initialTab === 'tab-hardware') {
+      initialTab = 'tab-network';
+      showSettingsPage('io');
+    }
     prepareFolderTabSessionCache();
     restoreInitialFolderTabSessionFragment(initialTab);
     loadSelectedTileStates();
@@ -9861,14 +16404,46 @@ function syncTileRadiusControls(tabEl) {
       enableFreeSlotHover(tab);
     });
     enableSettingsHiddenSlot();
+    enablePageFields();
     associateFieldLabels();
     fillStaticClockPreviews();
     setInterval(fillStaticClockPreviews, 30000);
+    watchDeviceLanguage();
     updateTileSettingsMaxHeight();
+    // Any editing postpones the background folder tab prefetch.
+    ['pointerdown', 'keydown', 'input'].forEach(type =>
+      document.addEventListener(type, noteAdminInteraction, true));
+    scheduleFolderTabPrefetch();
   });
 
 function maybeFillTitleFromSensor(tab) {
     maybeFillTitleFromEntity(tab, '_sensor_entity');
+  }
+
+  // A finished text with its unit after a number ("21,5 °C", "Open · 58 %")
+  // as HTML, the unit a step smaller (.tile-unit), like the panel's
+  // value_unit::show_text (value_unit_rules.h split_unit): the last word, or
+  // the letters after the last digit, without a digit, right after a digit
+  // (one space allowed), on one line; any other text escaped as it is.
+  function unitTextHtml(text) {
+    const value = String(text ?? '');
+    const match = /^([^\n]*\d) ?([^ \d\n]+)$/.exec(value);
+    const bytes = match ? [...match[2]].reduce((n, c) => n + (c.codePointAt(0) < 0x80 ? 1 : c.codePointAt(0) < 0x800 ? 2 : c.codePointAt(0) < 0x10000 ? 3 : 4), 0) : 0;
+    if (!match || bytes > 12) return escapeHtml(value);
+    return escapeHtml(match[1]) + '<span class="tile-unit">' + escapeHtml(match[2]) + '</span>';
+  }
+
+  // A unit's inline size for a number of `valuePx` panel pixels, the step
+  // the panel takes (value_unit_rules.h unit_px over VALUE_UNIT_FONTS, its
+  // thin gap and the digits' tops meeting); the .tile-unit rule (80 %)
+  // stands in where the number's size is not known.
+  function valueUnitStyle(valuePx) {
+    const sizes = typeof VALUE_UNIT_FONTS !== 'undefined' && VALUE_UNIT_FONTS.length ? VALUE_UNIT_FONTS : [16, 20, 24, 28, 32];
+    let unit = sizes[0];
+    for (const size of sizes) if (size < valuePx && size * 10 <= valuePx * 8) unit = size;
+    const ratio = unit / valuePx;
+    return 'font-size:' + ratio.toFixed(4) + 'em;margin-left:' + (Math.floor((unit + 3) / 6) / unit).toFixed(4) +
+      'em;vertical-align:' + (0.727 * (1 - ratio) / ratio).toFixed(4) + 'em';
   }
 
   function formatSensorValue(value, decimals) {
@@ -9884,6 +16459,327 @@ function maybeFillTitleFromSensor(tab) {
     if (isNaN(num) || !isFinite(num)) return text;
     const d = Math.max(0, Math.min(6, parseInt(decimals, 10) || 0));
     return formatLocalizedNumber(num, d, false);
+  }
+  // The Sensor tile's looks below its header (types/sensor/sensor_look.h,
+  // gauge lab build/design-mockups/gauge-media/lab.html, 2026-10-28): the
+  // panel's box, arc fit, shapes and value place, drawn as SVG in panel
+  // pixels over the card and scaled like the rest of the preview
+  // (--radius-preview-scale). Lit places take the icon's shown color
+  // (--icon-shown), the track and the unlit places the controls' fill
+  // (--control-fill); with a color bar every place takes its own colors,
+  // which applyIconDiscTint hands over (tile.sensorLookTones).
+  const SENSOR_LOOK_VALUE_INSIDE = [8, 10, 11, 12];
+  let sensorLookClipSeq = 0;
+
+  function isSensorLookMode(mode) {
+    const m = Number(mode);
+    return m >= 3 && m <= 14;
+  }
+
+  function sensorLookValueInside(mode) {
+    return SENSOR_LOOK_VALUE_INSIDE.includes(Number(mode));
+  }
+
+  function sensorLookRootValue(name, fallback) {
+    if (typeof getComputedStyle !== 'function' || typeof document === 'undefined') return fallback;
+    const value = parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name));
+    return Number.isFinite(value) ? value : fallback;
+  }
+
+  // The look's sizes in panel pixels (tile_layout::scale of the lab's 12,
+  // 16, 6, 5 and 11), from web_admin_styles.cpp.
+  function sensorLookMetrics() {
+    const raw = typeof getComputedStyle === 'function' && typeof document !== 'undefined'
+      ? String(getComputedStyle(document.documentElement).getPropertyValue('--sensor-look-metrics')).trim() : '';
+    const parts = raw.split(/\s+/).map(Number);
+    const [stroke, band, stripe, gap, pitch] = parts.length === 5 && parts.every(Number.isFinite)
+      ? parts : [12, 16, 6, 5, 11];
+    return {stroke, band, stripe, gap, pitch};
+  }
+
+  // ---- The arc fit (sensor_look::fit_arc / auto_arc) ----
+
+  function sensorLookColumn(box, m, x) {
+    if (x < m - 1e-4 || x > box.w - m + 1e-4) return null;
+    let top = m, bottom = box.h - m;
+    const dx = Math.max(box.r - x, x - (box.w - box.r), 0);
+    if (dx > 0) {
+      const inner = box.r - m;
+      if (inner <= 0 || dx > inner + 1e-4) return null;
+      const s = Math.sqrt(Math.max(0, inner * inner - dx * dx));
+      top = Math.max(top, box.r - s);
+      bottom = Math.min(bottom, box.h - box.r + s);
+    }
+    return top <= bottom + 1e-4 ? [top, bottom] : null;
+  }
+
+  function sensorLookFitArc(box, angle, sw) {
+    const half = angle / 2 * Math.PI / 180, cx = box.w / 2, samples = 72;
+    const sines = [], cosines = [];
+    for (let k = 0; k <= samples; ++k) {
+      const a = -half + 2 * half * k / samples;
+      sines.push(Math.sin(a));
+      cosines.push(Math.cos(a));
+    }
+    const heights = r => {
+      let lo = -1e9, hi = 1e9;
+      for (let k = 0; k <= samples; ++k) {
+        const column = sensorLookColumn(box, sw / 2, cx + r * sines[k]);
+        if (!column) return null;
+        lo = Math.max(lo, column[0] + r * cosines[k]);
+        hi = Math.min(hi, column[1] + r * cosines[k]);
+        if (lo > hi) return null;
+      }
+      return [lo, hi];
+    };
+    let lo = 5, hi = 2 * Math.max(box.w, box.h);
+    if (!heights(lo)) return null;
+    for (let i = 0; i < 24; ++i) {
+      const mid = (lo + hi) / 2;
+      if (heights(mid)) lo = mid;
+      else hi = mid;
+    }
+    const range = heights(lo);
+    return {cx, cy: (range[0] + range[1]) / 2, r: lo, half, sw};
+  }
+
+  function sensorLookAutoArc(box, sw) {
+    let best = null, bestScore = -1;
+    for (let angle = 40; angle <= 300; angle += 10) {
+      const arc = sensorLookFitArc(box, angle, sw);
+      if (!arc) continue;
+      const w = 2 * arc.r * (arc.half >= Math.PI / 2 ? 1 : Math.sin(arc.half)) + arc.sw;
+      const h = arc.r * (1 - Math.cos(Math.min(arc.half, Math.PI))) + arc.sw;
+      const score = (w / box.w) * (h / box.h);
+      if (score > bestScore) { bestScore = score; best = arc; }
+    }
+    return best;
+  }
+
+  function sensorLookArc(mode, box, m) {
+    mode = Number(mode);
+    if (mode === 7 || mode === 8) return sensorLookAutoArc(box, m.stroke);
+    if (mode === 9 || mode === 10) return sensorLookAutoArc(box, m.band);
+    if (mode >= 11 && mode <= 14) {
+      const sw = mode === 11 || mode === 13 ? m.stroke : m.band;
+      const r = (Math.min(box.w, box.h) - sw) / 2;
+      return r > sw / 2 ? {cx: box.w / 2, cy: box.h / 2, r, half: Math.PI, sw} : null;
+    }
+    return null;
+  }
+
+  // sensor_look::value_top: open arcs put the standard size's top at the
+  // middle of their inside and keep its centre for a chosen size, a closed
+  // ring centres its digits on the ring's centre.
+  function sensorLookValueTop(mode, arc, size, standard) {
+    mode = Number(mode);
+    if (mode >= 11 && mode <= 14) return arc.cy - size * 0.5;
+    const bottom = Math.min(arc.cy + arc.r - arc.sw / 2, arc.cy - arc.r * Math.cos(arc.half));
+    return (arc.cy - arc.r + arc.sw / 2 + bottom) / 2 + (standard - size) / 2;
+  }
+
+  // ---- Shapes as SVG (the lab's drawing, box-local coordinates) ----
+
+  const sensorLookNum = v => (Math.round(v * 100) / 100).toString();
+
+  // Stripes (sensor_look::emit_stripes): round ends on the box, in the
+  // corners following the corner curve; each stripe shrunk by r and stroked
+  // 2r wide with round joins.
+  function sensorLookStripes(box, m, fraction, up, colorOf) {
+    const sw = m.stripe, rc = sw / 2, U = up ? box.h : box.w, V = up ? box.w : box.h, R = box.r;
+    const n = Math.floor((U + m.gap) / (sw + m.gap));
+    if (n < 1) return '';
+    const gap = n > 1 ? (U - n * sw) / (n - 1) : 0;
+    const lit = Math.round(n * fraction);
+    const edge = (u, r, dir) => {
+      const off = Math.max(0, R - u, up ? 0 : u - (U - R)), ri = R - r;
+      if (off <= 0) return dir > 0 ? V - r : r;
+      const d = Math.sqrt(Math.max(0, ri * ri - off * off));
+      return dir > 0 ? V - R + d : R - d;
+    };
+    const map = (u, v) => up ? `${sensorLookNum(v)} ${sensorLookNum(U - u)}` : `${sensorLookNum(u)} ${sensorLookNum(v)}`;
+    let body = '';
+    for (let i = 0; i < n; ++i) {
+      const su = i * (sw + gap), drop = Math.abs(edge(su, 0, 1) - edge(su + sw, 0, 1));
+      const r = drop > sw ? sw / 3 : rc, a = su + r, b = su + sw - r;
+      let d = '';
+      for (let k = 0; k <= 8; ++k) { const u = a + (b - a) * k / 8; d += `${k ? 'L' : 'M'}${map(u, edge(u, r, -1))}`; }
+      for (let k = 0; k <= 8; ++k) { const u = b - (b - a) * k / 8; d += `L${map(u, edge(u, r, 1))}`; }
+      const color = colorOf(i < lit, (i + 0.5) / n);
+      body += `<path d="${d}Z" style="fill:${color};stroke:${color}" stroke-width="${sensorLookNum(2 * r)}" stroke-linejoin="round"/>`;
+    }
+    return body;
+  }
+
+  // A level (sensor_look::emit_level): the track is the whole box, the fill
+  // as long as the value with its moving end rounded, inside the box.
+  function sensorLookLevel(box, end, fraction, up, colorOf) {
+    const r = box.r, id = 'sensorLookClip' + (++sensorLookClipSeq);
+    let body = `<rect width="${sensorLookNum(box.w)}" height="${sensorLookNum(box.h)}" rx="${sensorLookNum(r)}" style="fill:${colorOf(false, 0.5)}"/>`;
+    if (!(fraction > 0)) return body;
+    body += `<clipPath id="${id}"><rect width="${sensorLookNum(box.w)}" height="${sensorLookNum(box.h)}" rx="${sensorLookNum(r)}"/></clipPath>`;
+    let d;
+    if (up) {
+      const length = box.h * fraction, e = Math.min(end, length, box.w / 2), y = box.h - length;
+      d = `M0 ${sensorLookNum(box.h)}V${sensorLookNum(y + e)}A${e} ${e} 0 0 1 ${sensorLookNum(e)} ${sensorLookNum(y)}` +
+        `H${sensorLookNum(box.w - e)}A${e} ${e} 0 0 1 ${sensorLookNum(box.w)} ${sensorLookNum(y + e)}V${sensorLookNum(box.h)}Z`;
+    } else {
+      const length = box.w * fraction, e = Math.min(end, length, box.h / 2);
+      d = `M0 0H${sensorLookNum(length - e)}A${e} ${e} 0 0 1 ${sensorLookNum(length)} ${sensorLookNum(e)}` +
+        `V${sensorLookNum(box.h - e)}A${e} ${e} 0 0 1 ${sensorLookNum(length - e)} ${sensorLookNum(box.h)}H0Z`;
+    }
+    return body + `<path d="${d}" clip-path="url(#${id})" style="fill:${colorOf(true, fraction)}"/>`;
+  }
+
+  // An arc or ring (sensor_look::emit_arc): track, fill to the value with
+  // round ends; with a color bar small pieces in their colors and round ends.
+  function sensorLookArcBody(arc, fraction, closed, places, colorOf) {
+    const {cx, cy, r, sw} = arc;
+    const a0 = closed ? 0 : -arc.half, a1 = closed ? 2 * Math.PI : arc.half;
+    const at = a => `${sensorLookNum(cx + r * Math.sin(a))} ${sensorLookNum(cy - r * Math.cos(a))}`;
+    const path = (p, q) => q - p > Math.PI
+      ? `M${at(p)}A${r} ${r} 0 0 1 ${at((p + q) / 2)}A${r} ${r} 0 0 1 ${at(q)}`
+      : `M${at(p)}A${r} ${r} 0 0 1 ${at(q)}`;
+    const aOf = p => a0 + (a1 - a0) * p;
+    const cap = (p, color) => {
+      const a = aOf(p);
+      return `<circle cx="${sensorLookNum(cx + r * Math.sin(a))}" cy="${sensorLookNum(cy - r * Math.cos(a))}" r="${sw / 2}" style="fill:${color}"/>`;
+    };
+    let body = '';
+    if (!places) {
+      body += `<path d="${path(a0, a1)}" style="stroke:${colorOf(false, 0.5)}" stroke-width="${sw}" fill="none" stroke-linecap="${closed ? 'butt' : 'round'}"/>`;
+      if (fraction > 0) {
+        body += `<path d="${path(a0, Math.max(aOf(Math.min(1, fraction)), a0 + 1e-4))}" style="stroke:${colorOf(true, fraction)}" stroke-width="${sw}" fill="none" stroke-linecap="round"/>`;
+      }
+      return body;
+    }
+    const pieces = 48, colorAt = p => colorOf(p < fraction, p);
+    if (!closed) body += cap(0, colorOf(fraction > 0, 0)) + cap(1, colorOf(fraction >= 1, 1));
+    for (let k = 0; k < pieces; ++k) {
+      const p0 = k / pieces, p1 = Math.min(1, (k + 1.2) / pieces);
+      body += `<path d="${path(aOf(p0), aOf(p1))}" style="stroke:${colorAt((k + 0.5) / pieces)}" stroke-width="${sw}" fill="none"/>`;
+    }
+    if (fraction > 0) body += cap(0, colorOf(true, 0));
+    if (fraction > 0 && fraction < 1) body += cap(fraction, colorOf(true, fraction));
+    return body;
+  }
+
+  // Round stripes across an arc or ring (sensor_look::emit_ticks).
+  function sensorLookTicks(arc, m, fraction, closed, colorOf) {
+    const halfW = m.stripe / 2, r0 = arc.r - m.band / 2 + halfW, r1 = arc.r + m.band / 2 - halfW;
+    const n = closed ? Math.floor(2 * Math.PI * arc.r / m.pitch)
+      : Math.max(2, Math.floor(arc.r * 2 * arc.half / m.pitch) + 1);
+    if (n < 2) return '';
+    const lit = Math.round(n * fraction);
+    let body = '';
+    for (let i = 0; i < n; ++i) {
+      const a = closed ? 2 * Math.PI * i / n : -arc.half + 2 * arc.half * i / (n - 1);
+      const sn = Math.sin(a), cs = Math.cos(a);
+      body += `<line x1="${sensorLookNum(arc.cx + r0 * sn)}" y1="${sensorLookNum(arc.cy - r0 * cs)}" ` +
+        `x2="${sensorLookNum(arc.cx + r1 * sn)}" y2="${sensorLookNum(arc.cy - r1 * cs)}" ` +
+        `style="stroke:${colorOf(i < lit, (i + 0.5) / n)}" stroke-width="${sensorLookNum(m.stripe)}" stroke-linecap="round"/>`;
+    }
+    return body;
+  }
+
+  // ---- The tile ----
+
+  // The look's data on the tile element (applyCompactSensorPreview): the
+  // mode, the gauge range and the tile's color record.
+  function setSensorLookData(el, mode, data) {
+    if (!el?.dataset) return;
+    if (!isSensorLookMode(mode)) {
+      delete el.dataset.lookMode;
+      return;
+    }
+    el.dataset.lookMode = String(Number(mode));
+    let min = Number(data?.sensor_gauge_min), max = Number(data?.sensor_gauge_max);
+    if (!Number.isFinite(min)) min = 0;
+    if (!Number.isFinite(max) || max <= min) { min = 0; max = 100; }
+    el.dataset.lookMin = String(min);
+    el.dataset.lookMax = String(max);
+    el.dataset.lookRecord = String(data?.icon_colors || '');
+  }
+
+  // The color bar that colors the icon from the tile's own state
+  // (tile_icon_colors::own_bar), or null.
+  function sensorLookBar(record) {
+    if (!record || typeof parseIconColorRecord !== 'function') return null;
+    if (typeof iconColorOwnStateColorsIcon === 'function' && !iconColorOwnStateColorsIcon(record)) return null;
+    const parsed = parseIconColorRecord(record);
+    return parsed?.bar || null;
+  }
+
+  function sensorLookShownValue(el) {
+    const value = el.querySelector(':scope > .tile-value');
+    const text = value?.firstChild?.nodeType === 3 ? value.firstChild.nodeValue : (value?.textContent || '');
+    const number = parseFloat(String(text).replace(',', '.'));
+    return Number.isFinite(number) ? number : NaN;
+  }
+
+  function renderSensorLookPreview(el) {
+    if (!el?.querySelector) return;
+    let svg = el.querySelector(':scope > .sensor-look-svg');
+    const mode = Number(el.dataset.lookMode);
+    if (!isSensorLookMode(mode)) {
+      svg?.remove();
+      return;
+    }
+    const scale = sensorLookRootValue('--radius-preview-scale', 1) || 1;
+    const W = el.offsetWidth / scale, H = el.offsetHeight / scale;
+    if (!(W > 8 && H > 8)) return;
+    const inset = sensorLookRootValue('--climate-margin-x', 6 * scale) / scale;
+    const top = sensorLookRootValue('--climate-slots-top', 78 * scale) / scale;
+    const radius = sensorLookRootValue('--tile-radius-device', 31) - inset;
+    const box = {x: inset, y: top, w: W - 2 * inset, h: H - inset - top};
+    box.r = Math.max(0, Math.min(radius, box.w / 2, box.h / 2));
+    if (box.w < 8 || box.h < 8) { svg?.remove(); return; }
+    const m = sensorLookMetrics();
+    const end = Math.max(1, Math.round(sensorLookRootValue('--switch-bar-height', 68 * scale) / scale / 4));
+    const min = Number(el.dataset.lookMin) || 0, max = Number(el.dataset.lookMax) || 100;
+    const value = sensorLookShownValue(el);
+    const fraction = Number.isFinite(value) ? Math.min(1, Math.max(0, (value - min) / (max - min))) : 0;
+    // A color bar colors every place of stripes, arcs and rings.
+    const bar = mode >= 5 ? sensorLookBar(el.dataset.lookRecord) : null;
+    const tones = typeof el.sensorLookTones === 'function' ? el.sensorLookTones : null;
+    const colorOf = (lit, place) => {
+      if (bar && tones && typeof iconColorBarColor === 'function') {
+        const rgb = iconColorBarColor(bar, min + (max - min) * place);
+        const tone = tones([(rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255]);
+        return lit ? tone.lit : tone.off;
+      }
+      return lit ? 'var(--icon-shown, currentColor)' : 'var(--control-fill, rgba(255,255,255,0.12))';
+    };
+    let body = '';
+    if (mode === 3 || mode === 4) body = sensorLookLevel(box, end, fraction, mode === 4, colorOf);
+    else if (mode === 5 || mode === 6) body = sensorLookStripes(box, m, fraction, mode === 6, colorOf);
+    const arc = sensorLookArc(mode, box, m);
+    const closed = mode >= 11;
+    if (arc && [7, 8, 11, 13].includes(mode)) body = sensorLookArcBody(arc, fraction, closed, !!(bar && tones), colorOf);
+    if (arc && [9, 10, 12, 14].includes(mode)) body = sensorLookTicks(arc, m, fraction, closed, colorOf);
+    if (!svg) {
+      el.insertAdjacentHTML('afterbegin', '<svg class="sensor-look-svg" aria-hidden="true"></svg>');
+      svg = el.querySelector(':scope > .sensor-look-svg');
+    }
+    svg.setAttribute('viewBox', `0 0 ${sensorLookNum(W)} ${sensorLookNum(H)}`);
+    svg.innerHTML = `<g transform="translate(${sensorLookNum(box.x)} ${sensorLookNum(box.y)})">${body}</g>`;
+    // The value inside the arc or ring: Default 20 on one-row tiles, 24 on
+    // taller ones, or the chosen value size (tile_layout::value_font_for_choice);
+    // its em box's top where the panel puts it.
+    const valueEl = el.querySelector(':scope > .tile-value');
+    if (valueEl && sensorLookValueInside(mode) && arc) {
+      const taller = Number(el.dataset.lookTall) === 1;
+      const standardSize = taller ? 24 : 20;
+      const chosen = {1: 20, 2: 24, 3: 32, 4: 40, 5: 28}[Number(el.dataset.lookFont)] || standardSize;
+      const fontPx = sensorLookRootValue('--fs' + chosen, chosen * scale);
+      const size = fontPx / scale;
+      const standard = sensorLookRootValue('--fs' + standardSize, standardSize * scale) / scale;
+      valueEl.style.top = sensorLookNum((box.y + sensorLookValueTop(mode, arc, size, standard)) * scale - 3) + 'px';
+      valueEl.style.fontSize = sensorLookNum(fontPx) + 'px';
+    } else if (valueEl) {
+      valueEl.style.removeProperty('top');
+      valueEl.style.removeProperty('font-size');
+    }
   }
 
   const BINARY_SENSOR_ICON_PAIRS = Object.freeze({
@@ -9984,7 +16880,7 @@ function maybeFillTitleFromSensor(tab) {
 
   function binarySensorPreviewColor(state) {
     return state?.valid === true && state?.available === true &&
-      state?.state === 'on' ? '#ffc107' : '#9e9e9e';
+      state?.state === 'on' ? '#ffc107' : panelRoleHex('icon-rest', '#9e9e9e');
   }
 
   function binarySensorPreviewStateText(state) {
@@ -10057,25 +16953,112 @@ function maybeFillTitleFromSensor(tab) {
     el.classList.add(getSensorValueFontClass(value));
   }
 
+  // The Sensor menu's choices (web_html.cpp, mockup sensor-menu) and the
+  // stored Tile::sensor_display_mode (sensor_look.h). Layout 0 value,
+  // 1 graph, 2 bar, 3 ring, 4 the old gauge; Form 0 fill or line, 1 stripes;
+  // Orientation 0 horizontal, 1 upright; Ring 0 open, 1 closed; Value 0 in
+  // the head, 1 inside the ring.
+  const SENSOR_LAYOUT_FIELDS = ['sensor_layout', 'sensor_form', 'sensor_orientation', 'sensor_ring', 'sensor_place'];
+
+  function sensorModeFromChoices(c) {
+    if (c.layout === 1) return 2;
+    if (c.layout === 4) return 1;
+    if (c.layout === 2) return 3 + (c.form ? 2 : 0) + (c.orientation ? 1 : 0);
+    if (c.layout === 3) {
+      if (c.ring) return (c.place ? 11 : 13) + (c.form ? 1 : 0);
+      return 7 + (c.form ? 2 : 0) + (c.place ? 1 : 0);
+    }
+    return 0;
+  }
+
+  function sensorChoicesFromMode(mode) {
+    mode = Number(mode) || 0;
+    const c = {layout: 0, form: 0, orientation: 0, ring: 0, place: 1};
+    if (mode === 1) c.layout = 4;
+    else if (mode === 2) c.layout = 1;
+    else if (mode >= 3 && mode <= 6) Object.assign(c, {layout: 2, form: mode >= 5 ? 1 : 0, orientation: (mode - 3) % 2});
+    else if (mode >= 7 && mode <= 10) Object.assign(c, {layout: 3, form: mode >= 9 ? 1 : 0, place: (mode - 7) % 2});
+    else if (mode === 11 || mode === 12) Object.assign(c, {layout: 3, ring: 1, form: mode - 11, place: 1});
+    else if (mode === 13 || mode === 14) Object.assign(c, {layout: 3, ring: 1, form: mode - 13, place: 0});
+    return c;
+  }
+
+  // Shows a stored mode in the choices; the old gauge's button only on a
+  // tile that has it (`gauge`).
+  function setSensorLayoutChoices(tab, mode, gauge) {
+    const c = sensorChoicesFromMode(mode);
+    const values = {sensor_layout: c.layout, sensor_form: c.form, sensor_orientation: c.orientation,
+      sensor_ring: c.ring, sensor_place: c.place};
+    for (const field of SENSOR_LAYOUT_FIELDS) {
+      const select = document.getElementById(tab + '_' + field);
+      if (select) select.value = String(values[field]);
+    }
+    const layout = document.getElementById(tab + '_sensor_layout');
+    if (layout?.dataset) layout.dataset.gauge = gauge ? '1' : '0';
+  }
+
+  // A choice changed: the stored mode follows and its change event runs the
+  // preview, draft and autosave.
+  function applySensorLayoutChoices(tab) {
+    const read = field => Number(document.getElementById(tab + '_' + field)?.value || 0);
+    const mode = String(sensorModeFromChoices({layout: read('sensor_layout'), form: read('sensor_form'),
+      orientation: read('sensor_orientation'), ring: read('sensor_ring'), place: read('sensor_place')}));
+    const select = document.getElementById(tab + '_sensor_display_mode');
+    if (select && String(select.value) !== mode) {
+      select.value = mode;
+      if (typeof select.dispatchEvent === 'function') select.dispatchEvent(new Event('change', {bubbles: true}));
+    }
+    syncGaugeUi(tab);
+  }
+
   function syncGaugeUi(tab) {
     const prefix = tab;
     const typeValue = document.getElementById(prefix + '_tile_type')?.value || '0';
     const gaugeWrap = document.getElementById(prefix + '_sensor_gauge_fields');
     const graphWrap = document.getElementById(prefix + '_sensor_graph_fields');
+    // The graph fills its box; its old height field stays hidden.
+    if (graphWrap) graphWrap.classList.add('hidden');
     if (typeValue !== '1') {
       if (gaugeWrap) gaugeWrap.classList.add('hidden');
-      if (graphWrap) graphWrap.classList.add('hidden');
       return;
     }
     const displayMode = document.getElementById(prefix + '_sensor_display_mode')?.value || '0';
-    if (gaugeWrap) {
-      if (displayMode === '1') gaugeWrap.classList.remove('hidden');
-      else gaugeWrap.classList.add('hidden');
-    }
-    if (graphWrap) {
-      if (displayMode === '2') graphWrap.classList.remove('hidden');
-      else graphWrap.classList.add('hidden');
-    }
+    const c = sensorChoicesFromMode(displayMode);
+    const row = (field, shown) => {
+      const label = typeof document.querySelector === 'function'
+        ? document.querySelector('label[for="' + prefix + '_' + field + '"]') : null;
+      if (label) label.classList.toggle('hidden', !shown);
+      document.getElementById(prefix + '_' + field + '_choices')?.classList.toggle('hidden', !shown);
+    };
+    const bar = c.layout === 2, ring = c.layout === 3, gauge = c.layout === 4;
+    row('sensor_form', bar || ring);
+    row('sensor_orientation', bar);
+    row('sensor_ring', ring);
+    row('sensor_place', ring);
+    // A bar's first form is its fill, a ring's its line.
+    const form = document.getElementById(prefix + '_sensor_form');
+    const first = form?.options?.[0];
+    const firstName = bar ? form?.dataset?.level : form?.dataset?.line;
+    if (first && firstName) first.textContent = firstName;
+    // The old gauge stays offered on a tile that has it.
+    const layout = document.getElementById(prefix + '_sensor_layout');
+    const gaugeOption = layout?.options ? Array.from(layout.options).find(o => o.value === '4') : null;
+    if (gaugeOption) gaugeOption.hidden = layout.dataset?.gauge !== '1' && !gauge;
+    // The range belongs to the gauge and every look; the arc, size and
+    // offset to the gauge alone.
+    if (gaugeWrap) gaugeWrap.classList.toggle('hidden', !(bar || ring || gauge));
+    const shapeWrap = document.getElementById(prefix + '_sensor_gauge_shape_fields');
+    if (shapeWrap) shapeWrap.classList.toggle('hidden', !gauge);
+    // The value size everywhere: alone, in the head, inside an arc or ring
+    // (its Default there the look's 20 or 24).
+    row('sensor_value_font', true);
+    // The value's Y offset with the old gauge only (user 2026-10-28).
+    const offsetShown = gauge;
+    const offsetLabel = typeof document.querySelector === 'function'
+      ? document.querySelector('label[for="' + prefix + '_sensor_value_y_offset"]') : null;
+    if (offsetLabel) offsetLabel.classList.toggle('hidden', !offsetShown);
+    document.getElementById(prefix + '_sensor_value_y_offset')?.classList.toggle('hidden', !offsetShown);
+    if (typeof syncSwitchChoices === 'function') syncSwitchChoices(tab);
   }
 
   function loadSensorFields(tab, data) {
@@ -10093,6 +17076,7 @@ function maybeFillTitleFromSensor(tab) {
     if (popupModeEl) popupModeEl.value = (data.popup_open_mode !== undefined) ? String(data.popup_open_mode) : '1';
     const displayModeEl = document.getElementById(prefix + '_sensor_display_mode');
     if (displayModeEl) displayModeEl.value = (data.sensor_display_mode !== undefined) ? String(data.sensor_display_mode) : '0';
+    setSensorLayoutChoices(tab, displayModeEl?.value || 0, Number(data.sensor_display_mode) === 1);
     const gaugeMinEl = document.getElementById(prefix + '_sensor_gauge_min');
     if (gaugeMinEl) gaugeMinEl.value = (data.sensor_gauge_min !== undefined && data.sensor_gauge_min !== null) ? String(data.sensor_gauge_min) : '';
     const gaugeMaxEl = document.getElementById(prefix + '_sensor_gauge_max');
@@ -10146,6 +17130,7 @@ function maybeFillTitleFromSensor(tab) {
     if (popupModeEl) popupModeEl.value = '1';
     const displayModeEl = document.getElementById(prefix + '_sensor_display_mode');
     if (displayModeEl) displayModeEl.value = '0';
+    setSensorLayoutChoices(tab, 0, false);
     const gaugeMinEl = document.getElementById(prefix + '_sensor_gauge_min');
     if (gaugeMinEl) gaugeMinEl.value = '';
     const gaugeMaxEl = document.getElementById(prefix + '_sensor_gauge_max');
@@ -10167,17 +17152,6 @@ function maybeFillTitleFromSensor(tab) {
     const entity = document.getElementById(tab + '_binary_sensor_entity');
     const configured = data.sensor_entity || data.binary_sensor_entity || '';
     if (entity) {
-      if (configured) {
-        entity.dataset.configuredValue = configured;
-        if (!Array.from(entity.options).some(option => option.value === configured)) {
-          const option = document.createElement('option');
-          option.value = configured;
-          option.textContent = configured;
-          entity.appendChild(option);
-        }
-      } else {
-        delete entity.dataset.configuredValue;
-      }
       entity.value = configured;
     }
     const font = document.getElementById(tab + '_binary_sensor_value_font');
@@ -10194,7 +17168,7 @@ function maybeFillTitleFromSensor(tab) {
     saveIconColorFields(tab, formData);
     const entityEl = document.getElementById(tab + '_binary_sensor_entity');
     const entity = entityEl
-      ? (entityEl.value || entityEl.dataset.configuredValue || '') : '';
+      ? entityEl.value : '';
     formData.append('binary_sensor_entity', entity);
     formData.append('sensor_entity', entity);
     formData.append('sensor_value_font', document.getElementById(tab + '_binary_sensor_value_font')?.value || '0');
@@ -10208,10 +17182,7 @@ function maybeFillTitleFromSensor(tab) {
     const font = document.getElementById(tab + '_binary_sensor_value_font');
     if (font) font.value = '0';
     const entity = document.getElementById(tab + '_binary_sensor_entity');
-    if (entity) {
-      entity.value = '';
-      delete entity.dataset.configuredValue;
-    }
+    if (entity) entity.value = '';
     const popup = document.getElementById(
       tab + '_binary_sensor_popup_open_mode');
     if (popup) popup.value = '1';
@@ -10253,16 +17224,7 @@ function maybeFillTitleFromEnergy(tab) {
     const prefix = tab;
     const entityEl = document.getElementById(prefix + '_energy_entity');
     if (entityEl) {
-      const configuredEntity = data.sensor_entity || data.energy_entity || '';
-      entityEl.dataset.configuredValue = configuredEntity;
-      entityEl.value = configuredEntity;
-      if (configuredEntity && entityEl.value !== configuredEntity) {
-        const opt = document.createElement('option');
-        opt.value = configuredEntity;
-        opt.textContent = configuredEntity;
-        entityEl.appendChild(opt);
-        entityEl.value = configuredEntity;
-      }
+      entityEl.value = data.sensor_entity || data.energy_entity || '';
     }
     const unitEl = document.getElementById(prefix + '_energy_unit');
     if (unitEl) unitEl.value = data.sensor_unit || '';
@@ -10270,10 +17232,15 @@ function maybeFillTitleFromEnergy(tab) {
     if (decEl) decEl.value = (data.sensor_decimals !== undefined && data.sensor_decimals >= 0) ? data.sensor_decimals : '1';
     const fontEl = document.getElementById(prefix + '_energy_value_font');
     if (fontEl) fontEl.value = (data.sensor_value_font !== undefined) ? String(data.sensor_value_font) : '0';
+    // The value alone (0) or today's hours as bars below the header (2).
+    const displayEl = document.getElementById(prefix + '_energy_display_mode');
+    if (displayEl) displayEl.value = Number(data.sensor_display_mode) === 2 ? '2' : '0';
     const popupModeEl = document.getElementById(prefix + '_energy_popup_open_mode');
     if (popupModeEl) popupModeEl.value = (data.popup_open_mode !== undefined) ? String(data.popup_open_mode) : '1';
     const valueYOffsetEl = document.getElementById(prefix + '_energy_value_y_offset');
     if (valueYOffsetEl) valueYOffsetEl.value = (data.sensor_value_y_offset !== undefined && data.sensor_value_y_offset !== null) ? String(data.sensor_value_y_offset) : '';
+    // The segmented choices show the loaded values (types/switch/admin.js).
+    if (typeof syncSwitchChoices === 'function') syncSwitchChoices(tab);
     maybeFillTitleFromEnergy(tab);
   }
 
@@ -10281,12 +17248,13 @@ function maybeFillTitleFromEnergy(tab) {
     saveIconColorFields(tab, formData);
     const prefix = tab;
     const entityEl = document.getElementById(prefix + '_energy_entity');
-    const entity = entityEl ? (entityEl.value || entityEl.dataset.configuredValue || '') : '';
+    const entity = entityEl ? entityEl.value : '';
     formData.append('energy_entity', entity);
     formData.append('sensor_entity', entity);
     formData.append('sensor_unit', document.getElementById(prefix + '_energy_unit')?.value || '');
     formData.append('sensor_decimals', document.getElementById(prefix + '_energy_decimals')?.value || '1');
     formData.append('sensor_value_font', document.getElementById(prefix + '_energy_value_font')?.value || '0');
+    formData.append('sensor_display_mode', document.getElementById(prefix + '_energy_display_mode')?.value || '0');
     formData.append('popup_open_mode', document.getElementById(prefix + '_energy_popup_open_mode')?.value || '1');
     formData.append('sensor_value_y_offset', document.getElementById(prefix + '_energy_value_y_offset')?.value || '');
   }
@@ -10302,23 +17270,522 @@ function maybeFillTitleFromEnergy(tab) {
     if (decEl) decEl.value = '1';
     const fontEl = document.getElementById(prefix + '_energy_value_font');
     if (fontEl) fontEl.value = '0';
+    const displayEl = document.getElementById(prefix + '_energy_display_mode');
+    if (displayEl) displayEl.value = '0';
     const popupModeEl = document.getElementById(prefix + '_energy_popup_open_mode');
     if (popupModeEl) popupModeEl.value = '1';
     const valueYOffsetEl = document.getElementById(prefix + '_energy_value_y_offset');
     if (valueYOffsetEl) valueYOffsetEl.value = '';
   }
+  // Power flow tile (types/power_flow): the node sensors, the options and
+  // the previews. The record (Tile::flow_entities) holds one entity per line
+  // in Home Assistant's order; lines after the five pickers are kept.
+  const POWER_FLOW_TILE_TYPE = 28;
+  const POWER_FLOW_FIELDS = Object.freeze(['flow_pv_entity', 'flow_grid_entity', 'flow_battery_entity',
+    'flow_battery_charge_entity', 'flow_home_entity']);
+  // key_code bits (tile_config.h kFlow*Bit); the card checkbox is the
+  // inverse of the stored "no card" bit.
+  const POWER_FLOW_OPTIONS = Object.freeze([['flow_header', 1], ['flow_no_card', 2], ['flow_grid_invert', 4],
+    ['flow_battery_invert', 8]]);
+
+  function powerFlowLines(record) {
+    return String(record || '').split('\n');
+  }
+
+  function powerFlowRecordFromInputs(tab) {
+    const container = document.getElementById(tab + '_power_flow_fields');
+    const lines = powerFlowLines(container?.dataset.flowRecord || '');
+    POWER_FLOW_FIELDS.forEach((field, i) => {
+      lines[i] = String(document.getElementById(tab + '_' + field)?.value || '').trim();
+    });
+    while (lines.length && !lines[lines.length - 1]) lines.pop();
+    return lines.join('\n');
+  }
+
+  function powerFlowOptionsFromInputs(tab) {
+    let bits = 0;
+    if (document.getElementById(tab + '_flow_header')?.checked) bits |= 1;
+    if (document.getElementById(tab + '_flow_card')?.checked === false) bits |= 2;
+    if (document.getElementById(tab + '_flow_grid_invert')?.checked) bits |= 4;
+    if (document.getElementById(tab + '_flow_battery_invert')?.checked) bits |= 8;
+    return bits;
+  }
+
+  function powerFlowSetOptions(tab, bits) {
+    const set = (field, on) => { const box = document.getElementById(tab + '_' + field); if (box) box.checked = on; };
+    set('flow_header', (bits & 1) !== 0);
+    set('flow_card', (bits & 2) === 0);
+    set('flow_grid_invert', (bits & 4) !== 0);
+    set('flow_battery_invert', (bits & 8) !== 0);
+  }
+
+  function loadPowerFlowFields(tab, data) {
+    const record = String(data?.flow_entities || '');
+    const container = document.getElementById(tab + '_power_flow_fields');
+    if (container) container.dataset.flowRecord = record;
+    const lines = powerFlowLines(record);
+    POWER_FLOW_FIELDS.forEach((field, i) => {
+      const input = document.getElementById(tab + '_' + field);
+      if (input) input.value = lines[i] || '';
+    });
+    // Stored tiles carry key_code, copied form data (clipboard.js) the
+    // option fields.
+    powerFlowSetOptions(tab, data && Object.prototype.hasOwnProperty.call(data, 'flow_header')
+      ? powerFlowOptionBits(data) : (Number(data?.key_code) || 0));
+  }
+
+  function savePowerFlowFields(tab, formData) {
+    formData.append('flow_entities', powerFlowRecordFromInputs(tab));
+    const bits = powerFlowOptionsFromInputs(tab);
+    for (const [name, bit] of POWER_FLOW_OPTIONS) formData.append(name, (bits & bit) ? '1' : '0');
+  }
+
+  function resetPowerFlowFields(tab) {
+    const container = document.getElementById(tab + '_power_flow_fields');
+    if (container) delete container.dataset.flowRecord;
+    for (const field of POWER_FLOW_FIELDS) {
+      const input = document.getElementById(tab + '_' + field);
+      if (input) input.value = '';
+    }
+    powerFlowSetOptions(tab, 0);
+  }
+
+  // "Show title and icon" with an empty title puts the type's name in, like
+  // Auto (type-selection.js placeTileTypeParts names it).
+  function powerFlowHeaderTitle(tab) {
+    if (!document.getElementById(tab + '_flow_header')?.checked) return;
+    const title = document.getElementById(tab + '_tile_title');
+    const name = document.getElementById(tab + '_tile_title_auto')?.dataset.autoTitle || '';
+    if (!title || String(title.value || '').trim() || !name) return;
+    title.value = normalizeTileTitle(name);
+    title.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  // The stored key_code of a snapshot's options (snapshots.js, import).
+  function powerFlowOptionBits(source) {
+    let bits = 0;
+    for (const [name, bit] of POWER_FLOW_OPTIONS) {
+      if (['1', 'true', 'on'].includes(String(source?.[name] ?? '0'))) bits |= bit;
+    }
+    return bits;
+  }
+
+  // ----- Geometry: flow_geometry.h line for line --------------------------
+  const POWER_FLOW_BEND_SEGMENTS = 16;
+
+  function powerFlowPolyline() {
+    return { p: [], along: [], bend: null, bendFirst: 0, bendLast: 0 };
+  }
+
+  function powerFlowAdd(line, x, y) {
+    const n = line.p.length;
+    line.along.push(n ? line.along[n - 1] + Math.hypot(x - line.p[n - 1][0], y - line.p[n - 1][1]) : 0);
+    line.p.push([x, y]);
+  }
+
+  function powerFlowCircleOffset(radius, d) {
+    const q = radius * radius - d * d;
+    return q > 0 ? Math.sqrt(q) : 0;
+  }
+
+  // C's lroundf: halves away from zero.
+  function powerFlowRound(value) {
+    return value < 0 ? -Math.round(-value) : Math.round(value);
+  }
+
+  // Down (or up) from the source's disc, a quarter circle on whole pixels,
+  // along the lane to the target's disc.
+  function powerFlowLeg(l, from, dir, to, laneY, spacing) {
+    const line = powerFlowPolyline();
+    const down = from === 'pv';
+    const x = powerFlowRound(l.node.pv[0] + dir * spacing);
+    const lane = powerFlowRound(laneY);
+    const y0 = l.node[from][1] + (down ? 1 : -1) * powerFlowCircleOffset(l.disc, x - l.node[from][0]);
+    const endX = l.node[to][0] - dir * powerFlowCircleOffset(l.disc, lane - l.node[to][1]);
+    const sign = lane >= y0 ? 1 : -1;
+    const radius = powerFlowRound(Math.min(Math.abs(lane - y0), Math.abs(endX - x)));
+    const fromAngle = dir > 0 ? 180 : 0;
+    const toAngle = sign > 0 ? 90 : (dir > 0 ? 270 : -90);
+    const bend = { cx: x + dir * radius, cy: lane - sign * radius, radius, fromAngle, toAngle };
+    powerFlowAdd(line, x, y0);
+    if (Math.abs(bend.cy - y0) > 0.5) powerFlowAdd(line, x, bend.cy);
+    line.bendFirst = line.p.length - 1;
+    if (radius > 0) {
+      line.bend = bend;
+      for (let i = 1; i <= POWER_FLOW_BEND_SEGMENTS; ++i) {
+        const angle = (fromAngle + (toAngle - fromAngle) * i / POWER_FLOW_BEND_SEGMENTS) * Math.PI / 180;
+        powerFlowAdd(line, bend.cx + radius * Math.cos(angle), bend.cy + radius * Math.sin(angle));
+      }
+    }
+    line.bendLast = line.p.length - 1;
+    if (Math.abs(endX - bend.cx) > 0.5) powerFlowAdd(line, endX, lane);
+    return line;
+  }
+
+  // `top`: the header's room (flow_geometry.h header_top), the flow below it.
+  function powerFlowLayout(width, height, m, top = 0) {
+    const ox = width / 2, oy = (top + height) / 2;
+    const l = { width, height, ring: m.ring, disc: m.disc, node: {
+      pv: [ox, top + m.insetY + m.ring], grid: [m.insetX + m.ring, oy],
+      home: [width - m.insetX - m.ring, oy], battery: [ox, height - m.insetY - m.ring] } };
+    const spacing = Math.min(m.spacing, m.disc * 0.8);
+    const gridHome = powerFlowPolyline();
+    powerFlowAdd(gridHome, l.node.grid[0] + m.disc, oy);
+    powerFlowAdd(gridHome, l.node.home[0] - m.disc, oy);
+    const pvBattery = powerFlowPolyline();
+    powerFlowAdd(pvBattery, ox, l.node.pv[1] + m.disc);
+    powerFlowAdd(pvBattery, ox, l.node.battery[1] - m.disc);
+    l.lines = {
+      gridHome, pvBattery,
+      pvHome: powerFlowLeg(l, 'pv', 1, 'home', oy - spacing, spacing),
+      pvGrid: powerFlowLeg(l, 'pv', -1, 'grid', oy - spacing, spacing),
+      batHome: powerFlowLeg(l, 'battery', 1, 'home', oy + spacing, spacing),
+      batGrid: powerFlowLeg(l, 'battery', -1, 'grid', oy + spacing, spacing),
+    };
+    return l;
+  }
+
+  function powerFlowPointAt(line, distance) {
+    const n = line.p.length;
+    if (!n) return [0, 0];
+    if (distance <= 0) return line.p[0];
+    for (let i = 1; i < n; ++i) {
+      if (distance > line.along[i]) continue;
+      const piece = line.along[i] - line.along[i - 1];
+      const t = piece > 0 ? (distance - line.along[i - 1]) / piece : 0;
+      return [line.p[i - 1][0] + (line.p[i][0] - line.p[i - 1][0]) * t,
+        line.p[i - 1][1] + (line.p[i][1] - line.p[i - 1][1]) * t];
+    }
+    return line.p[n - 1];
+  }
+
+  // ----- Flows: flow_model.h ------------------------------------------------
+  const POWER_FLOW_IDLE_WATTS = 10;
+
+  function powerFlowCompute(input) {
+    const pos = v => v > 0 ? v : 0;
+    const solar = input.hasPv ? pos(input.pv) : 0;
+    const gridIn = input.hasGrid ? pos(input.grid) : 0;
+    const gridOut = input.hasGrid ? pos(-input.grid) : 0;
+    const batOut = input.hasBattery ? pos(input.battery) : 0;
+    const batIn = input.hasBattery ? pos(-input.battery) : 0;
+    const pvGrid = Math.min(solar, gridOut);
+    const batGrid = Math.min(batOut, gridOut - pvGrid);
+    const solarLeft = solar - pvGrid;
+    const pvBattery = Math.min(solarLeft, batIn);
+    const gridBattery = Math.min(gridIn, pos(batIn - pvBattery));
+    const pvHome = solarLeft - pvBattery;
+    const gridHome = gridIn - gridBattery;
+    const batHome = batOut - batGrid;
+    const idle = v => v >= POWER_FLOW_IDLE_WATTS ? v : 0;
+    const gridToBattery = gridBattery > batGrid;
+    const into = [['pv', pvHome], ['grid', gridHome], ['battery', batHome]];
+    let best = POWER_FLOW_IDLE_WATTS, homeSource = '';
+    for (const [node, watts] of into) if (watts >= best) { best = watts; homeSource = node; }
+    return {
+      watts: { gridHome: idle(gridHome), pvBattery: idle(pvBattery), pvHome: idle(pvHome), pvGrid: idle(pvGrid),
+        batHome: idle(batHome), batGrid: idle(gridToBattery ? gridBattery : batGrid) },
+      gridToBattery,
+      home: input.hasHome ? pos(input.home) : pvHome + gridHome + batHome,
+      homeKnown: input.hasHome || input.hasPv || input.hasGrid || input.hasBattery,
+      homeSource,
+    };
+  }
+
+  function powerFlowUnitFactor(unit) {
+    const u = String(unit || '').trim();
+    if (/^[kK]W$/.test(u)) return 1000;
+    if (u === 'MW') return 1e6;
+    if (u === 'GW') return 1e9;
+    if (u === 'mW') return 0.001;
+    return 1;
+  }
+
+  function powerFlowNumber(value) {
+    const text = String(value ?? '').trim().replace(',', '.');
+    if (!text) return null;
+    const number = Number.parseFloat(text);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  // A power's amount and unit, as the panel shows them (renderer.cpp
+  // show_power): the unit a step smaller after it (.tile-unit).
+  function powerFlowPower(watts) {
+    const a = Math.abs(watts);
+    if (a >= 999950) return [formatLocalizedNumber(a / 1e6, 1), 'MW'];
+    if (a >= 999.5) return [formatLocalizedNumber(a / 1000, 1), 'kW'];
+    return [formatLocalizedNumber(a, 0), 'W'];
+  }
+
+  // While the battery charges: Home Assistant's charging icon for its level,
+  // as on the panel (renderer.cpp charging_icon).
+  function powerFlowChargingIcon(level) {
+    if (level === null) return 'battery-charging';
+    if (level < 10) return 'battery-charging-outline';
+    return 'battery-charging-' + Math.min(10, Math.round(level / 10)) * 10;
+  }
+
+  // ----- Preview --------------------------------------------------------------
+  const POWER_FLOW_COLORS = Object.freeze({ pv: '#FF9800', grid: '#488FC2', gridReturn: '#8353D1', battery: '#F06292',
+    batteryOut: '#4DB6AC', header: '#F29C06' });
+
+  function powerFlowHexRgb(hex) {
+    return [1, 3, 5].map(i => parseInt(String(hex).slice(i, i + 2), 16));
+  }
+
+  // The plain tile disc of an icon color on the card (tile_icon_disc::tile_fill).
+  function powerFlowDisc(card, hex) {
+    const rgb = powerFlowHexRgb(hex);
+    const glowRaw = String(getComputedStyle(document.documentElement).getPropertyValue('--icon-glow-pct')).trim();
+    const glowValue = glowRaw === '' ? 25 : Number(glowRaw);
+    const glow = Math.min(100, Math.max(0, Number.isFinite(glowValue) ? glowValue : 25));
+    if (panelLight()) {
+      const share = Number(panelVar('--pv-light-circle', '0.8'));
+      const amount = glow * (Number.isFinite(share) ? share : 0.8) / 100;
+      return toneHex(toneBlend(card, toneReadableIcon(rgb), Math.round(Math.min(1, amount) * 255)));
+    }
+    return toneHex(toneFill(card, rgb, true, glow, false).disc);
+  }
+
+  // Draws the tile like render_power_flow_tile() in display pixels, scaled
+  // to the preview tile. `tile`: flow_entities, key_code, span_w, span_h,
+  // title, icon_name.
+  function applyPowerFlowPreview(el, tile, meta) {
+    if (!el || typeof POWER_FLOW_LAYOUT === 'undefined') return;
+    const L = POWER_FLOW_LAYOUT;
+    el.querySelectorAll(':scope > .tile-icon, :scope > .tile-title, :scope > .tile-value, :scope > .power-flow-preview')
+      .forEach(node => node.remove());
+    const rootStyle = getComputedStyle(el.isConnected ? el : document.documentElement);
+    const scale = parseFloat(rootStyle.getPropertyValue('--radius-preview-scale')) || 0.5;
+    const spanW = Math.max(1, Number(tile?.span_w) || 1);
+    const spanH = Math.max(1, Number(tile?.span_h) || 1);
+    const cellW = parseFloat(rootStyle.getPropertyValue('--preview-cell-w'));
+    const cellH = parseFloat(rootStyle.getPropertyValue('--preview-cell-h'));
+    const previewGap = parseFloat(rootStyle.getPropertyValue('--preview-gap')) || 0;
+    const width = (cellW > 0 ? spanW * (cellW + previewGap) - previewGap : el.offsetWidth) / scale;
+    const height = (cellH > 0 ? spanH * (cellH + previewGap) - previewGap : el.offsetHeight) / scale;
+    const bits = Number(tile?.key_code) || 0;
+    const onCard = (bits & 2) === 0;
+    el.classList.add('power-flow-tile');
+    el.classList.toggle('power-flow-no-card', !onCard);
+    if (!onCard) el.style.setProperty('--tile-border-tint', 'transparent');
+
+    const lines = powerFlowLines(tile?.flow_entities);
+    const entity = { pv: lines[0] || '', grid: lines[1] || '', bat: lines[2] || '', charge: lines[3] || '', home: lines[4] || '' };
+    const values = meta?.values || {}, units = meta?.units || {}, icons = meta?.icons || {};
+    const watts = id => {
+      if (!id) return null;
+      const n = powerFlowNumber(values[id]);
+      return n === null ? null : n * powerFlowUnitFactor(units[id]);
+    };
+    const pv = watts(entity.pv), grid = watts(entity.grid), bat = watts(entity.bat), home = watts(entity.home);
+    const input = { hasPv: pv !== null, hasGrid: grid !== null, hasBattery: bat !== null, hasHome: home !== null,
+      pv: pv || 0, grid: ((bits & 4) ? -1 : 1) * (grid || 0), battery: ((bits & 8) ? -1 : 1) * (bat || 0), home: home || 0 };
+    const flows = powerFlowCompute(input);
+
+    const l = powerFlowLayout(width, height, L, (bits & 1) ? 2 * L.ring - L.insetY : 0);
+    const light = panelLight();
+    const cardHex = String(rootStyle.getPropertyValue('--tile-card') || '').trim() || (light ? '#FFFFFF' : '#1A1A1A');
+    const cardRgb = /^#[0-9a-f]{6}$/i.test(cardHex) ? powerFlowHexRgb(cardHex) : (light ? [255, 255, 255] : [26, 26, 26]);
+    const idle = !light ? '#3C3C3C' : onCard ? '#DCDEE2' : '#CDD0D5';
+    const text = panelRoleHex('text', light ? '#1A1A1A' : '#FFFFFF');
+    // The home joins with the first sensor: a tile without any shows no node
+    // (user 2026-10-26).
+    const shown = { pv: !!entity.pv, grid: !!entity.grid, battery: !!(entity.bat || entity.charge),
+      home: Object.values(entity).some(Boolean) };
+    const lineShown = { gridHome: shown.grid, pvBattery: shown.pv && shown.battery, pvHome: shown.pv,
+      pvGrid: shown.pv && shown.grid, batHome: shown.battery, batGrid: shown.battery && shown.grid };
+    const source = { gridHome: 'grid', pvBattery: 'pv', pvHome: 'pv', pvGrid: 'pv', batHome: 'battery',
+      batGrid: flows.gridToBattery ? 'grid' : 'battery' };
+    // A node's color now, like the panel (renderer.cpp node_color): the grid
+    // purple while it takes the feed-in, the battery magenta only while it
+    // charges.
+    const colorOf = { pv: POWER_FLOW_COLORS.pv,
+      grid: input.hasGrid && -input.grid >= POWER_FLOW_IDLE_WATTS ? POWER_FLOW_COLORS.gridReturn : POWER_FLOW_COLORS.grid,
+      battery: input.hasBattery && -input.battery >= POWER_FLOW_IDLE_WATTS ? POWER_FLOW_COLORS.battery : POWER_FLOW_COLORS.batteryOut };
+    const r = n => Math.round(n);
+    let svg = '';
+    // Straight pieces and the bend as a true circle arc, like the panel.
+    const path = line => {
+      const points = line.bend ? [...line.p.slice(0, line.bendFirst + 1), ...line.p.slice(line.bendLast)] : line.p;
+      let d = '';
+      points.forEach((p, i) => {
+        if (line.bend && i === line.bendFirst + 1) {
+          const b = line.bend;
+          d += ' A' + b.radius + ' ' + b.radius + ' 0 0 ' + (b.toAngle > b.fromAngle ? 1 : 0) + ' ' + r(p[0]) + ' ' + r(p[1]);
+          return;
+        }
+        d += (i ? ' L' : 'M') + r(p[0]) + ' ' + r(p[1]);
+      });
+      return d;
+    };
+    const live = name => lineShown[name] && flows.watts[name] > 0;
+    for (const pass of [false, true]) {
+      for (const name of Object.keys(l.lines)) {
+        if (!lineShown[name] || live(name) !== pass) continue;
+        const color = pass ? colorOf[source[name]] : idle;
+        svg += '<path d="' + path(l.lines[name]) + '" fill="none" stroke="' + color + '" stroke-width="' + L.lineWidth +
+          '" stroke-linecap="round" stroke-linejoin="round"/>';
+      }
+    }
+    // One dot halfway along every flow (the device moves it).
+    for (const name of Object.keys(l.lines)) {
+      if (!live(name)) continue;
+      const line = l.lines[name];
+      const p = powerFlowPointAt(line, line.along[line.along.length - 1] / 2);
+      svg += '<circle cx="' + r(p[0]) + '" cy="' + r(p[1]) + '" r="' + L.dotRadius + '" fill="' + colorOf[source[name]] + '"/>';
+    }
+    // The global frame line (display-borders.js marks the grid) on the rings
+    // only without a card.
+    const frame = !onCard && !!el.closest?.('.tile-grid')?.classList.contains('tiles-bordered');
+    const frameColor = light ? '#DDDDDD' : '#292929';
+    let html = '';
+    // A node is the corner of a 1x1 tile (renderer.cpp create_node): the
+    // tile's corner disc in a ring shaped like the card corner.
+    const square = (cx, cy, half, corner, attributes) => {
+      const side = 2 * half;
+      return '<rect x="' + (r(cx) - half) + '" y="' + (r(cy) - half) + '" width="' + side + '" height="' + side +
+        '" rx="' + Math.min(corner, half) + '" ' + attributes + '/>';
+    };
+    const node = (cx, cy, hex, icon, mirrored = false) => {
+      svg += square(cx, cy, L.ring, L.ringCorner, 'fill="' + toneHex(cardRgb) + '"');
+      if (frame) {
+        svg += square(cx, cy, L.ring - 0.5, L.ringCorner - 0.5, 'fill="none" stroke="' + frameColor + '" stroke-width="1"');
+      }
+      svg += square(cx, cy, L.disc, L.discCorner, 'fill="' + powerFlowDisc(cardRgb, hex) + '"');
+      html += '<i class="mdi mdi-' + escapeHtml(icon) + '" style="position:absolute;left:' + r(cx - L.iconPx / 2) +
+        'px;top:' + r(cy - L.iconPx / 2) + 'px;width:' + L.iconPx + 'px;height:' + L.iconPx + 'px;font-size:' + L.iconPx +
+        'px;line-height:' + L.iconPx + 'px;text-align:center;color:' + hex + (mirrored ? ';transform:scaleX(-1)' : '') +
+        '"></i>';
+    };
+    // `parts`: the amount and its unit ('' for none).
+    const label = (x, w, cy, parts, align) => {
+      html += '<div style="position:absolute;left:' + r(x) + 'px;top:' + r(cy - L.valueLine / 2) + 'px;width:' + r(w) +
+        'px;height:' + L.valueLine + 'px;line-height:' + L.valueLine + 'px;font-size:' + L.valuePx + 'px;text-align:' +
+        align + ';color:' + text + ';white-space:nowrap;overflow:hidden">' + escapeHtml(parts[0]) +
+        (parts[1] ? '<span class="tile-unit">' + escapeHtml(parts[1]) + '</span>' : '') + '</div>';
+    };
+    const power = (known, watts) => known ? powerFlowPower(watts) : ['--', ''];
+    const iconOf = id => String(icons[id] || '').replace(/^mdi:/, '');
+    const homeColor = colorOf[flows.homeSource || 'grid'];
+    if (shown.pv) node(l.node.pv[0], l.node.pv[1], POWER_FLOW_COLORS.pv, 'solar-power');
+    // The grid's direction past the idle threshold, as on the panel: while
+    // it supplies "export" (the arrow leaves the mast towards the lines),
+    // while feeding in "import" mirrored (the arrow comes from the lines).
+    const supplying = input.hasGrid && input.grid >= POWER_FLOW_IDLE_WATTS;
+    const feeding = input.hasGrid && -input.grid >= POWER_FLOW_IDLE_WATTS;
+    const gridIcon = supplying ? 'transmission-tower-export' : feeding ? 'transmission-tower-import' : 'transmission-tower';
+    if (shown.grid) node(l.node.grid[0], l.node.grid[1], colorOf.grid, gridIcon, feeding);
+    if (shown.home) node(l.node.home[0], l.node.home[1], homeColor, 'home-lightning-bolt');
+    const level = entity.charge ? powerFlowNumber(values[entity.charge]) : null;
+    const charging = input.hasBattery && -input.battery >= POWER_FLOW_IDLE_WATTS;
+    if (shown.battery) node(l.node.battery[0], l.node.battery[1], colorOf.battery,
+      charging ? powerFlowChargingIcon(level) : iconOf(entity.charge || entity.bat) || 'battery');
+
+    const gap = r(l.ring) + L.valueGap;
+    const below = gap + L.valueBelow - (L.valueLine - L.valueBase) + L.valueLine / 2;
+    if (shown.pv) label(r(l.node.pv[0]) + gap, width - L.edge - r(l.node.pv[0]) - gap, l.node.pv[1],
+      power(input.hasPv, pv), 'left');
+    if (shown.grid) label(L.edge, 2 * (r(l.node.grid[0]) - L.edge), l.node.grid[1] + below,
+      power(input.hasGrid, grid), 'center');
+    const homeHalf = r(width - l.node.home[0]) - L.edge;
+    const homeKnown = entity.home ? input.hasHome : flows.homeKnown;
+    if (shown.home) label(r(l.node.home[0]) - homeHalf, 2 * homeHalf, l.node.home[1] + below,
+      power(homeKnown, flows.home), 'center');
+    if (shown.battery) {
+      label(r(l.node.battery[0]) + gap, width - L.edge - r(l.node.battery[0]) - gap, l.node.battery[1],
+        power(input.hasBattery, bat), 'left');
+      const charge = powerFlowNumber(values[entity.charge]);
+      label(L.edge, r(l.node.battery[0]) - gap - L.edge, l.node.battery[1],
+        entity.charge && charge !== null ? [formatLocalizedNumber(charge, 0), '%'] : ['--', ''], 'right');
+    }
+    if (bits & 1) {
+      node(l.ring, l.ring, POWER_FLOW_COLORS.header,
+        normalizeMdiIconName(tile?.icon_name || '') || 'lightning-bolt');
+      if (tile?.title) {
+        const right = width - L.titleRight;
+        const left = r(l.ring * 2) + L.valueGap;
+        html += '<div style="position:absolute;left:' + r(left) + 'px;top:' + r(L.titleTop) + 'px;width:' +
+          r(right - left) + 'px;line-height:' + L.valueLine + 'px;font-size:' + L.valuePx + 'px;text-align:right;color:' +
+          text + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(tile.title) + '</div>';
+      }
+    }
+    el.insertAdjacentHTML('afterbegin', '<div class="power-flow-preview" style="position:absolute;left:0;top:0;width:' +
+      width.toFixed(2) + 'px;height:' + height.toFixed(2) + 'px;transform:scale(' + scale + ');transform-origin:0 0;' +
+      'pointer-events:none"><svg width="' + width.toFixed(2) + '" height="' + height.toFixed(2) +
+      '" style="position:absolute;left:0;top:0">' + svg + '</svg>' + html + '</div>');
+  }
+// Generated by tools/generate-weather-icon-fonts.mjs from
+// tools/weather-icons/parts.mjs. Do not edit by hand.
+// The device's filled, multi-color weather icons (weather_icon_table.h) as SVG
+// for the Web Admin preview: shared layer paths in the 24-unit MDI grid, and
+// per icon its weather color and its layers bottom to top.
+  const WEATHER_ICON_LAYER_PATHS = Object.freeze([
+    '<path d="M12,7A5,5 0 0,1 17,12A5,5 0 0,1 12,17A5,5 0 0,1 7,12A5,5 0 0,1 12,7Z"/><path d="M12,2L14.39,5.42C13.65,5.15 12.84,5 12,5C11.16,5 10.35,5.15 9.61,5.42L12,2Z"/><path d="M3.34,7L7.5,6.65C6.9,7.16 6.36,7.78 5.94,8.5C5.5,9.24 5.25,10 5.11,10.79L3.34,7Z"/><path d="M3.36,17L5.12,13.23C5.26,14 5.53,14.78 5.95,15.5C6.37,16.24 6.91,16.86 7.5,17.37L3.36,17Z"/><path d="M20.65,7L18.88,10.79C18.74,10 18.47,9.23 18.05,8.5C17.63,7.78 17.1,7.15 16.5,6.64L20.65,7Z"/><path d="M20.64,17L16.5,17.36C17.09,16.85 17.62,16.22 18.04,15.5C18.46,14.77 18.73,14 18.87,13.21L20.64,17Z"/><path d="M12,22L9.59,18.56C10.33,18.83 11.14,19 12,19C12.82,19 13.63,18.83 14.37,18.56L12,22Z"/>',
+    '<path d="M18.97,15.95C19.8,15.87 20.69,17.05 20.16,17.8C19.84,18.25 19.5,18.67 19.08,19.07C15.17,23 8.84,23 4.94,19.07C1.03,15.17 1.03,8.83 4.94,4.93C5.34,4.53 5.76,4.17 6.21,3.85C6.96,3.32 8.14,4.21 8.06,5.04C7.79,7.9 8.75,10.87 10.95,13.06C13.14,15.26 16.1,16.22 18.97,15.95Z"/>',
+    '<path d="M17.75,4.09L15.22,6.03L16.13,9.09L13.5,7.28L10.87,9.09L11.78,6.03L9.25,4.09L12.44,4L13.5,1L14.56,4L17.75,4.09Z"/><path d="M21.25,11L19.61,12.25L20.2,14.23L18.5,13.06L16.8,14.23L17.39,12.25L15.75,11L17.81,10.95L18.5,9L19.19,10.95L21.25,11Z"/>',
+    '<path d="M5,10.5A5.5,5.5 0 1,1 16,10.5A5.5,5.5 0 1,1 5,10.5Z"/><path d="M13.55,3.64C13,3.4 12.45,3.23 11.88,3.12L14.37,1.82L15.27,4.71C14.76,4.29 14.19,3.93 13.55,3.64Z"/><path d="M6.09,4.44C5.6,4.79 5.17,5.19 4.8,5.63L4.91,2.82L7.87,3.5C7.25,3.71 6.65,4.03 6.09,4.44Z"/><path d="M18,9.71C17.91,9.12 17.78,8.55 17.59,8L19.97,9.5L17.92,11.73C18.03,11.08 18.05,10.4 18,9.71Z"/><path d="M3.04,11.3C3.11,11.9 3.24,12.47 3.43,13L1.06,11.5L3.1,9.28C3,9.93 2.97,10.61 3.04,11.3Z"/>',
+    '<path d="M6,16A6,6 0 1,1 18,16A6,6 0 1,1 6,16Z"/><path d="M2,18A4,4 0 1,1 10,18A4,4 0 1,1 2,18Z"/><path d="M16,19A3,3 0 1,1 22,19A3,3 0 1,1 16,19Z"/><path d="M6,18H12V22H6Z"/><path d="M12,16H19V22H12Z"/>',
+    '<path d="M18.97,15.95C19.8,15.87 20.69,17.05 20.16,17.8C19.84,18.25 19.5,18.67 19.08,19.07C15.17,23 8.84,23 4.94,19.07C1.03,15.17 1.03,8.83 4.94,4.93C5.34,4.53 5.76,4.17 6.21,3.85C6.96,3.32 8.14,4.21 8.06,5.04C7.79,7.9 8.75,10.87 10.95,13.06C13.14,15.26 16.1,16.22 18.97,15.95Z" transform="translate(8.26 -1.05) scale(0.62)"/>',
+    '<path d="M6,19A5,5 0 0,1 1,14A5,5 0 0,1 6,9C7,6.65 9.3,5 12,5C15.43,5 18.24,7.66 18.5,11.03L19,11A4,4 0 0,1 23,15A4,4 0 0,1 19,19H6Z" transform="translate(8.88 -0.1) scale(0.62)"/>',
+    '<path d="M6,19A5,5 0 0,1 1,14A5,5 0 0,1 6,9C7,6.65 9.3,5 12,5C15.43,5 18.24,7.66 18.5,11.03L19,11A4,4 0 0,1 23,15A4,4 0 0,1 19,19H6Z" transform="translate(0 1.5) scale(1)"/>',
+    '<path d="M1,12A5,5 0 0,1 6,7C7,4.65 9.3,3 12,3C15.43,3 18.24,5.66 18.5,9.03L19,9C21.19,9 22.97,10.76 23,13H1.1L1,12Z"/>',
+    '<path d="M3,15H13A1,1 0 0,1 14,16A1,1 0 0,1 13,17H3A1,1 0 0,1 2,16A1,1 0 0,1 3,15Z"/><path d="M16,15H21A1,1 0 0,1 22,16A1,1 0 0,1 21,17H16A1,1 0 0,1 15,16A1,1 0 0,1 16,15Z"/><path d="M3,19H5A1,1 0 0,1 6,20A1,1 0 0,1 5,21H3A1,1 0 0,1 2,20A1,1 0 0,1 3,19Z"/><path d="M8,19H21A1,1 0 0,1 22,20A1,1 0 0,1 21,21H8A1,1 0 0,1 7,20A1,1 0 0,1 8,19Z"/>',
+    '<path d="M6,16A5,5 0 0,1 1,11A5,5 0 0,1 6,6C7,3.65 9.3,2 12,2C15.43,2 18.24,4.66 18.5,8.03L19,8A4,4 0 0,1 23,12A4,4 0 0,1 19,16H6Z" transform="translate(1.68 0.28) scale(0.86)"/>',
+    '<path d="M18.5,18.67C18.5,19.96 17.5,21 16.25,21C15,21 14,19.96 14,18.67C14,17.12 16.25,14.5 16.25,14.5C16.25,14.5 18.5,17.12 18.5,18.67Z" transform="translate(-8.25 1.2) scale(1)"/><path d="M18.5,18.67C18.5,19.96 17.5,21 16.25,21C15,21 14,19.96 14,18.67C14,17.12 16.25,14.5 16.25,14.5C16.25,14.5 18.5,17.12 18.5,18.67Z" transform="translate(-2.25 1.2) scale(1)"/>',
+    '<path d="M7.683,15.95L6.483,20.35A0.95,0.95 0 0,0 8.317,20.85L9.517,16.45A0.95,0.95 0 0,0 7.683,15.95Z"/><path d="M11.682,15.955L10.082,21.955A0.95,0.95 0 0,0 11.918,22.445L13.518,16.445A0.95,0.95 0 0,0 11.682,15.955Z"/><path d="M15.683,15.95L14.483,20.35A0.95,0.95 0 0,0 16.317,20.85L17.517,16.45A0.95,0.95 0 0,0 15.683,15.95Z"/>',
+    '<path d="M7.88,18.07L10.07,17.5L8.46,15.88C8.07,15.5 8.07,14.86 8.46,14.46C8.85,14.07 9.5,14.07 9.88,14.46L11.5,16.07L12.07,13.88C12.21,13.34 12.76,13.03 13.29,13.17C13.83,13.31 14.14,13.86 14,14.4L13.41,16.59L15.6,16C16.14,15.86 16.69,16.17 16.83,16.71C16.97,17.24 16.66,17.79 16.12,17.93L13.93,18.5L15.54,20.12C15.93,20.5 15.93,21.15 15.54,21.54C15.15,21.93 14.5,21.93 14.12,21.54L12.5,19.93L11.93,22.12C11.79,22.66 11.24,22.97 10.71,22.83C10.17,22.69 9.86,22.14 10,21.6L10.59,19.41L8.4,20C7.86,20.14 7.31,19.83 7.17,19.29C7.03,18.76 7.34,18.21 7.88,18.07Z" transform="translate(3.36 6.04) scale(0.72)"/>',
+    '<path d="M7.88,18.07L10.07,17.5L8.46,15.88C8.07,15.5 8.07,14.86 8.46,14.46C8.85,14.07 9.5,14.07 9.88,14.46L11.5,16.07L12.07,13.88C12.21,13.34 12.76,13.03 13.29,13.17C13.83,13.31 14.14,13.86 14,14.4L13.41,16.59L15.6,16C16.14,15.86 16.69,16.17 16.83,16.71C16.97,17.24 16.66,17.79 16.12,17.93L13.93,18.5L15.54,20.12C15.93,20.5 15.93,21.15 15.54,21.54C15.15,21.93 14.5,21.93 14.12,21.54L12.5,19.93L11.93,22.12C11.79,22.66 11.24,22.97 10.71,22.83C10.17,22.69 9.86,22.14 10,21.6L10.59,19.41L8.4,20C7.86,20.14 7.31,19.83 7.17,19.29C7.03,18.76 7.34,18.21 7.88,18.07Z" transform="translate(1.36 8.04) scale(0.62)"/>',
+    '<path d="M18.5,18.67C18.5,19.96 17.5,21 16.25,21C15,21 14,19.96 14,18.67C14,17.12 16.25,14.5 16.25,14.5C16.25,14.5 18.5,17.12 18.5,18.67Z" transform="translate(-1 1.2) scale(1)"/>',
+    '<path d="M6.8,19.8A1.7,1.7 0 1,1 10.2,19.8A1.7,1.7 0 1,1 6.8,19.8Z"/><path d="M10.5,17.4A1.5,1.5 0 1,1 13.5,17.4A1.5,1.5 0 1,1 10.5,17.4Z"/><path d="M13.8,19.8A1.7,1.7 0 1,1 17.2,19.8A1.7,1.7 0 1,1 13.8,19.8Z"/>',
+    '<path d="M12,11H15L13,15H15L11.25,22L12,17H9.5L12,11Z" transform="translate(0 1) scale(1)"/>',
+    '<path d="M12,11H15L13,15H15L11.25,22L12,17H9.5L12,11Z" transform="translate(-2.5 1) scale(1)"/>',
+    '<path d="M18.5,18.67C18.5,19.96 17.5,21 16.25,21C15,21 14,19.96 14,18.67C14,17.12 16.25,14.5 16.25,14.5C16.25,14.5 18.5,17.12 18.5,18.67Z" transform="translate(-0.5 1.2) scale(1)"/>',
+    '<path d="M4,10A1,1 0 0,1 3,9A1,1 0 0,1 4,8H12A2,2 0 0,0 14,6A2,2 0 0,0 12,4C11.45,4 10.95,4.22 10.59,4.59C10.2,5 9.56,5 9.17,4.59C8.78,4.2 8.78,3.56 9.17,3.17C9.9,2.45 10.9,2 12,2A4,4 0 0,1 16,6A4,4 0 0,1 12,10H4Z"/><path d="M19,12A1,1 0 0,0 20,11A1,1 0 0,0 19,10C18.72,10 18.47,10.11 18.29,10.29C17.9,10.68 17.27,10.68 16.88,10.29C16.5,9.9 16.5,9.27 16.88,8.88C17.42,8.34 18.17,8 19,8A3,3 0 0,1 22,11A3,3 0 0,1 19,14H5A1,1 0 0,1 4,13A1,1 0 0,1 5,12H19Z"/><path d="M18,18H4A1,1 0 0,1 3,17A1,1 0 0,1 4,16H18A3,3 0 0,1 21,19A3,3 0 0,1 18,22C17.17,22 16.42,21.66 15.88,21.12C15.5,20.73 15.5,20.1 15.88,19.71C16.27,19.32 16.9,19.32 17.29,19.71C17.47,19.89 17.72,20 18,20A1,1 0 0,0 19,19A1,1 0 0,0 18,18Z"/>',
+    '<path d="M6,6L6.69,6.06C7.32,3.72 9.46,2 12,2A5.5,5.5 0 0,1 17.5,7.5L17.42,8.45C17.88,8.16 18.42,8 19,8A3,3 0 0,1 22,11A3,3 0 0,1 19,14H6A4,4 0 0,1 2,10A4,4 0 0,1 6,6Z"/>',
+    '<path d="M18,18H4A1,1 0 0,1 3,17A1,1 0 0,1 4,16H18A3,3 0 0,1 21,19A3,3 0 0,1 18,22C17.17,22 16.42,21.66 15.88,21.12C15.5,20.73 15.5,20.1 15.88,19.71C16.27,19.32 16.9,19.32 17.29,19.71C17.47,19.89 17.72,20 18,20A1,1 0 0,0 19,19A1,1 0 0,0 18,18Z"/>',
+    '<path d="M13,13H11V7H13M13,17H11V15H13M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z"/>',
+  ]);
+  const WEATHER_ICONS = Object.freeze({
+    'weather-sunny': {tint: '#FFB224', layers: [['#FFC53D', 0]]},
+    'weather-night': {tint: '#5E7092', layers: [['#FFE08A', 1], ['#FFFFFF', 2]]},
+    'weather-partly-cloudy': {tint: '#CCAB6B', layers: [['#FFC53D', 3], ['#EEF2F7', 4]]},
+    'weather-night-partly-cloudy': {tint: '#7C8AA2', layers: [['#FFE08A', 5], ['#C3CCD8', 4]]},
+    'weather-cloudy': {tint: '#9AA4B2', layers: [['#8E9BB0', 6], ['#C3CCD8', 7]]},
+    'weather-fog': {tint: '#B8BEC6', layers: [['#C3CCD8', 8], ['#8E9BB0', 9]]},
+    'weather-rainy': {tint: '#4A7FC0', layers: [['#EEF2F7', 10], ['#4DA3FF', 11]]},
+    'weather-pouring': {tint: '#2F5FB0', layers: [['#C3CCD8', 10], ['#4DA3FF', 12]]},
+    'weather-snowy': {tint: '#7CC4F0', layers: [['#EEF2F7', 10], ['#CFE8FF', 13]]},
+    'weather-snowy-rainy': {tint: '#63A2D8', layers: [['#EEF2F7', 10], ['#CFE8FF', 14], ['#4DA3FF', 15]]},
+    'weather-hail': {tint: '#5FB4D8', layers: [['#C3CCD8', 10], ['#CFE8FF', 16]]},
+    'weather-lightning': {tint: '#8B5CF6', layers: [['#9EAABA', 10], ['#FFC53D', 17]]},
+    'weather-lightning-rainy': {tint: '#6B6EDB', layers: [['#9EAABA', 10], ['#FFC53D', 18], ['#4DA3FF', 19]]},
+    'weather-windy': {tint: '#4FB8B0', layers: [['#A9C7E8', 20]]},
+    'weather-windy-variant': {tint: '#75AEB1', layers: [['#C3CCD8', 21], ['#A9C7E8', 22]]},
+    'alert-circle-outline': {tint: '#E5533D', layers: [['#FFB020', 23]]},
+  });
 
 function maybeFillTitleFromWeather(tab) {
     maybeFillTitleFromEntity(tab, '_weather_entity');
   }
+
+  const WEATHER_SENSOR_FIELDS = Object.freeze(['weather_temperature_sensor', 'weather_humidity_sensor']);
 
   function loadWeatherFields(tab, data) {
     loadIconColorFields(tab, data);
     const prefix = tab;
     const el = document.getElementById(prefix + '_weather_entity');
     if (el) el.value = data.sensor_entity || data.weather_entity || '';
+    // Optional temperature/humidity sensors (entity pickers, which show a
+    // configured entity also while it is missing from the list).
+    for (const field of WEATHER_SENSOR_FIELDS) {
+      const input = document.getElementById(prefix + '_' + field);
+      if (input) input.value = String(data[field] || '');
+    }
     const popupModeEl = document.getElementById(prefix + '_weather_popup_open_mode');
     if (popupModeEl) popupModeEl.value = (data.popup_open_mode !== undefined) ? String(data.popup_open_mode) : '1';
+    const colored = document.getElementById(prefix + '_weather_colored_icons');
+    if (colored) colored.checked = data?.weather_colored_icons !== undefined ? !['0', 'false'].includes(String(data.weather_colored_icons)) : Number(data?.sensor_display_mode) !== 1;
     maybeFillTitleFromWeather(tab);
   }
 
@@ -10326,7 +17793,12 @@ function maybeFillTitleFromWeather(tab) {
     saveIconColorFields(tab, formData);
     const prefix = tab;
     formData.append('weather_entity', document.getElementById(prefix + '_weather_entity')?.value || '');
+    for (const field of WEATHER_SENSOR_FIELDS) {
+      formData.append(field, document.getElementById(prefix + '_' + field)?.value || '');
+    }
     formData.append('popup_open_mode', document.getElementById(prefix + '_weather_popup_open_mode')?.value || '1');
+    const colored = document.getElementById(prefix + '_weather_colored_icons');
+    if (colored) formData.append('weather_colored_icons', colored.checked ? '1' : '0');
   }
 
   function resetWeatherFields(tab) {
@@ -10334,9 +17806,422 @@ function maybeFillTitleFromWeather(tab) {
     const prefix = tab;
     const el = document.getElementById(prefix + '_weather_entity');
     if (el) el.value = '';
+    for (const field of WEATHER_SENSOR_FIELDS) {
+      const input = document.getElementById(prefix + '_' + field);
+      if (input) input.value = '';
+    }
     const popupModeEl = document.getElementById(prefix + '_weather_popup_open_mode');
     if (popupModeEl) popupModeEl.value = '1';
+    const colored = document.getElementById(prefix + '_weather_colored_icons');
+    if (colored) colored.checked = true;
   }
+
+  // --- Tile preview -------------------------------------------------------
+  // What types/weather/renderer.cpp builds and update_weather_tile_state()
+  // (tiles/runtime/tile_renderer.cpp) fills from the cached payload, at the
+  // device positions (WEATHER_TILE_LAYOUT, display pixels).
+  const WEATHER_CONDITION_ICONS = Object.freeze({
+    'clear-night': 'weather-night', cloudy: 'weather-cloudy', exceptional: 'alert-circle-outline',
+    fog: 'weather-fog', hail: 'weather-hail', lightning: 'weather-lightning',
+    'lightning-rainy': 'weather-lightning-rainy', partlycloudy: 'weather-partly-cloudy',
+    pouring: 'weather-pouring', rainy: 'weather-rainy', snowy: 'weather-snowy',
+    'snowy-rainy': 'weather-snowy-rainy', sunny: 'weather-sunny', windy: 'weather-windy',
+    'windy-variant': 'weather-windy-variant'
+  });
+
+  // A number or a numeric string (extract_json_number_or_string_field).
+  function weatherPreviewNumber(value) {
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    const text = String(value ?? '').trim().replace(',', '.');
+    const number = text ? parseFloat(text) : NaN;
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function weatherPreviewString(value) {
+    return typeof value === 'string' ? value : '';
+  }
+
+  function weatherIsoParts(iso) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ''));
+    if (!match) return null;
+    const [y, m, d] = match.slice(1).map(Number);
+    return y > 0 && m >= 1 && m <= 12 && d >= 1 && d <= 31 ? Date.UTC(y, m - 1, d) : null;
+  }
+
+  function weatherIsoDate(utcMs) {
+    const date = new Date(utcMs);
+    return date.getUTCFullYear() + '-' + String(date.getUTCMonth() + 1).padStart(2, '0') + '-' +
+      String(date.getUTCDate()).padStart(2, '0');
+  }
+
+  function weatherLocalToday(now) {
+    return now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' +
+      String(now.getDate()).padStart(2, '0');
+  }
+
+  // i18n::weather_weekday_short: the first ten characters as a date.
+  function weatherWeekdayShort(iso) {
+    const day = weatherIsoParts(iso);
+    return day === null ? '' : (WEATHER_I18N.weekdaysShort[new Date(day).getUTCDay()] || '');
+  }
+
+  // i18n::weather_condition_label.
+  function weatherConditionLabel(condition) {
+    const key = String(condition || '').trim().toLowerCase();
+    if (!key) return '--';
+    if (WEATHER_I18N.conditions[key]) return WEATHER_I18N.conditions[key];
+    const text = String(condition).replaceAll('-', ' ').replaceAll('_', ' ').trim();
+    return text || '--';
+  }
+
+  // weather_icons::for_now: partly cloudy and sunny turn into their night
+  // icons between the bridge's sunset and sunrise of today.
+  function weatherIconForNow(name, sun, now) {
+    if (!Array.isArray(sun)) return name;
+    const today = weatherLocalToday(now);
+    const minute = now.getHours() * 60 + now.getMinutes();
+    const days = sun.filter(day => day && typeof day.d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(day.d) &&
+      (day.up !== undefined || (Number.isInteger(day.r) && Number.isInteger(day.s) &&
+                                day.r >= 0 && day.r < day.s && day.s <= 1440))).slice(0, 8);
+    const day = days.find(entry => entry.d === today);
+    if (!day) return name;
+    const night = day.up !== undefined ? day.up !== true : (minute < day.r || minute >= day.s);
+    if (!night) return name;
+    if (name === 'weather-partly-cloudy') return 'weather-night-partly-cloudy';
+    if (name === 'weather-sunny') return 'weather-night';
+    return name;
+  }
+
+  function parseWeatherPreviewPayload(raw) {
+    let data = raw;
+    if (typeof raw === 'string') {
+      if (!raw.trim()) return null;
+      try { data = JSON.parse(raw); } catch (_) { return null; }
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+    // An empty state falls back to the condition (extract_json_string_field).
+    const condition = weatherPreviewString(data.state).trim() || weatherPreviewString(data.condition).trim();
+    let icon = normalizeMdiIconName(weatherPreviewString(data.icon));
+    if (!icon) icon = WEATHER_CONDITION_ICONS[condition.trim().toLowerCase()] || '';
+    const units = data.units && typeof data.units === 'object' ? data.units : null;
+    return {
+      condition,
+      icon: icon ? weatherIconForNow(icon, data.sun, new Date()) : '',
+      temperature: weatherPreviewNumber(data.temperature),
+      unit: units ? weatherPreviewString(units.temperature) : weatherPreviewString(data.temperature_unit),
+      forecast: Array.isArray(data.forecast) ? data.forecast.filter(entry => entry && typeof entry === 'object') : []
+    };
+  }
+
+  // temperature_units.h: 'C', 'F', 'K', or '' for an empty or unknown unit.
+  function temperatureUnitOf(text) {
+    const unit = String(text || '').trim();
+    if (unit === '℃') return 'C';
+    if (unit === '℉') return 'F';
+    const letter = unit.replace(/^°/, '').trim();
+    if (letter === 'C' || letter === 'c') return 'C';
+    if (letter === 'F' || letter === 'f') return 'F';
+    return letter === 'K' ? 'K' : '';
+  }
+
+  // A value from one temperature unit in another; unchanged when either is
+  // unknown (temperature_units.h convert).
+  function convertTemperature(value, from, to) {
+    if (value === null || !from || !to || from === to) return value;
+    const celsius = from === 'F' ? (value - 32) * 5 / 9 : from === 'K' ? value - 273.15 : value;
+    return to === 'F' ? celsius * 9 / 5 + 32 : to === 'K' ? celsius + 273.15 : celsius;
+  }
+
+  // Mirrors weather_sensors.h: a configured temperature sensor replaces the
+  // weather entity's current temperature, in the weather entity's unit (a
+  // sensor in another unit is converted), a humidity sensor adds a humidity
+  // value; without a numeric sensor state the value shows "--". The forecast
+  // stays the weather entity's.
+  function applyWeatherSensorOverrides(state, temperatureEntity, humidityEntity, values, units) {
+    if (!state) return state;
+    if (temperatureEntity) {
+      state.temperature = convertTemperature(weatherPreviewNumber(values?.[temperatureEntity] ?? ''),
+        temperatureUnitOf(units?.[temperatureEntity]), temperatureUnitOf(state.unit));
+    }
+    if (humidityEntity) {
+      const humidity = weatherPreviewNumber(values?.[humidityEntity] ?? '');
+      state.humidity = humidity === null ? '--' : formatLocalizedNumber(humidity, 0, true) + ' %';
+    }
+    return state;
+  }
+
+  function weatherPreviewTemp(value) {
+    return formatLocalizedNumber(value, 1, true);
+  }
+
+  // The device's filled weather icon as SVG layers (admin-icons.js); single
+  // draws every layer in the label color (an icon color the user chose).
+  function weatherIconSvg(name, single) {
+    const entry = WEATHER_ICONS[name];
+    if (!entry) return '';
+    return '<svg class="weather-icon-svg" viewBox="0 0 24 24" aria-hidden="true">' +
+      entry.layers.map(([color, index]) => '<g fill="' + (single ? 'currentColor' : color) + '">' +
+        WEATHER_ICON_LAYER_PATHS[index] + '</g>').join('') + '</svg>';
+  }
+
+  // weather_forecast_gap()/weather_forecast_count() (widgets.h): as many days
+  // as fit the card's real width with even room between and around their
+  // widest text (textW, measured by the device in its language).
+  function weatherForecastGap(textW) {
+    return Math.trunc(textW * 50 / 100);
+  }
+  function weatherForecastCount(cardW, textW) {
+    const gap = weatherForecastGap(textW);
+    const days = textW + gap > 0 ? Math.trunc((cardW - gap) / (textW + gap)) : 1;
+    return Math.max(1, Math.min(8, days));
+  }
+
+  // tile_geometry::extent in display pixels.
+  function weatherExtent(position, span, cell, gap) {
+    const edge = value => Math.round(value * (cell + gap));
+    return edge(position + span) - edge(position) - gap;
+  }
+
+  // Fills a rendered weather preview tile: the header icon, condition |
+  // temperature and the forecast columns. iconName is the tile's initial icon
+  // (before a state arrives), forcedColor an icon color of the user or a rule.
+  // A text's width in display pixels as LVGL lays it out: whole-pixel glyph
+  // advances plus kerning (WEATHER_TILE_LAYOUT adv/kern, lv_text_get_size);
+  // null when the table lacks a glyph.
+  function weatherDeviceTextWidth(text, font) {
+    if (!font?.adv) return null;
+    const chars = [...String(text)];
+    let width = 0;
+    for (let i = 0; i < chars.length; ++i) {
+      const advance = font.adv[chars[i]];
+      if (advance === undefined) return null;
+      width += advance + ((i + 1 < chars.length && font.kern?.[chars[i] + chars[i + 1]]) || 0);
+    }
+    return width;
+  }
+
+  function applyWeatherPreview(el, state, tile, iconName, forcedColor) {
+    if (!el || typeof WEATHER_TILE_LAYOUT === 'undefined') return;
+    const L = WEATHER_TILE_LAYOUT;
+    // The tile's own grid sizes (inherited variables), not the page's.
+    const rootStyle = getComputedStyle(el.isConnected ? el : document.documentElement);
+    const scale = parseFloat(rootStyle.getPropertyValue('--radius-preview-scale')) || 0.5;
+    const colored = Number(tile?.sensor_display_mode) !== 1;
+    const now = new Date();
+
+    // Header icon: the current weather icon, colored in its layers with the
+    // weather color as the label color (disc and Tile color From icon).
+    let icon = el.querySelector(':scope > .tile-icon');
+    const name = state ? state.icon : normalizeMdiIconName(iconName);
+    // A state shows its icon even when the tile's own icon is off.
+    if (!icon && name) {
+      el.insertAdjacentHTML('afterbegin', '<i class="mdi tile-icon"></i>');
+      icon = el.querySelector(':scope > .tile-icon');
+    }
+    if (icon && !name) icon.remove();
+    else if (icon) {
+      const entry = WEATHER_ICONS[name];
+      if (colored && entry) {
+        icon.className = 'mdi tile-icon tile-weather-icon';
+        icon.innerHTML = weatherIconSvg(name, !!forcedColor);
+        icon.style.color = forcedColor || entry.tint;
+      } else {
+        icon.className = 'mdi mdi-' + name + ' tile-icon';
+        icon.innerHTML = '';
+        icon.style.color = forcedColor || '';
+      }
+    }
+
+    // Display pixels of the card and the preview's (border box) size.
+    const col = Number(tile?.col) || 0;
+    const row = Number(tile?.row) || 0;
+    const spanW = Math.max(1, Number(tile?.span_w) || 1);
+    const spanH = Math.max(1, Number(tile?.span_h) || 1);
+    const cellW = parseFloat(rootStyle.getPropertyValue('--preview-cell-w'));
+    const cellH = parseFloat(rootStyle.getPropertyValue('--preview-cell-h'));
+    const previewGap = parseFloat(rootStyle.getPropertyValue('--preview-gap')) || 0;
+    // The tile's own grid in display pixels: the layout window shows other
+    // layouts' cells than this boot's (WEATHER_TILE_LAYOUT).
+    const gridCellW = cellW > 0 ? Math.round(cellW / scale) : L.cellW;
+    const gridCellH = cellH > 0 ? Math.round(cellH / scale) : L.cellH;
+    const gridGap = previewGap > 0 ? Math.round(previewGap / scale) : L.gap;
+    const cardW = weatherExtent(col, spanW, gridCellW, gridGap);
+    const cardH = weatherExtent(row, spanH, gridCellH, gridGap);
+    // The tile's size like the grid gives it (.fractional-tile), never
+    // measured: a re-rendered tile at a half position is placed only after
+    // it is filled.
+    const width = cellW > 0 ? spanW * (cellW + previewGap) - previewGap : el.offsetWidth;
+    const height = cellH > 0 ? Math.max(1, Number(tile?.span_h) || 1) * (cellH + previewGap) - previewGap
+      : el.offsetHeight;
+    const px = value => (value * scale).toFixed(2) + 'px';
+    // Unrounded sizes, the glyphs on the LVGL baseline as this browser draws
+    // them (text-baseline.js).
+    const font = f => {
+      const size = Math.max(6, f.px * scale);
+      const line = f.line * scale;
+      return {size, line, shift: typeof previewBaselineShift === 'function'
+        ? previewBaselineShift(size, line, (f.line - f.base) * scale)
+        : (f.line / 2 - f.base - 0.364 * f.px) * scale};
+    };
+    const fontCss = f => 'font-size:' + f.size.toFixed(2) + 'px;line-height:' + f.line.toFixed(2) + 'px;';
+    const family = getComputedStyle(el).fontFamily || 'sans-serif';
+    const measure = (text, f) => {
+      const context = (weatherPreviewMeasure.context ||= document.createElement('canvas').getContext('2d'));
+      if (!context) return 0;
+      context.font = '400 ' + f.size + 'px ' + family;
+      return context.measureText(text).width;
+    };
+    // Positions below are in the border box; absolute children start inside
+    // the 3 px editor border.
+    const at = (left, top) => 'left:' + (left - 3).toFixed(2) + 'px;top:' + (top - 3).toFixed(2) + 'px;';
+
+    // Condition | temperature.
+    const valueFont = font(L.value);
+    const hasTemp = !!state && state.temperature !== null;
+    let tempText = hasTemp ? weatherPreviewTemp(state.temperature) + (state.unit ? ' ' + state.unit : '') : '--';
+    if (state?.humidity) tempText += ' \u00B7 ' + state.humidity;
+    const conditionText = state ? weatherConditionLabel(state.condition) : '--';
+    // The card's real size decides (widgets.h): the condition whenever it
+    // fits, below the narrow width only completely; the forecast row from
+    // the device's two-row height.
+    let showCondition = conditionText !== '--';
+    let room = 0;
+    if (showCondition) {
+      const gap = L.valueGap * scale;
+      room = width - 2 * L.padH * scale - measure(tempText, valueFont) - measure('|', valueFont) - 2 * gap;
+      const conditionWidth = measure(conditionText, valueFont);
+      if (cardW < L.conditionNarrowW ? conditionWidth > room : room < L.minConditionRoom * scale) showCondition = false;
+    }
+    const showForecast = cardH >= L.forecastMinH;
+    const rowCenter = showForecast ? (gridCellH / 2 + L.valueDy) * scale : height / 2 + L.valueDy * scale;
+    const htmlSpan = (cls, inner, f, extra = '') => '<span class="' + cls + '" style="' + fontCss(f) +
+      'top:' + f.shift.toFixed(2) + 'px;' + extra + '">' + inner + '</span>';
+    const textSpan = (cls, text, f, extra = '') => htmlSpan(cls, escapeHtml(text), f, extra);
+    // The temperature's unit a step smaller after it, as on the panel
+    // (value_unit.h); with the humidity behind it one size for both.
+    const tempHtml = hasTemp && state.unit && !state.humidity
+      ? escapeHtml(weatherPreviewTemp(state.temperature)) + '<span class="tile-unit" style="' + valueUnitStyle(L.value.px) +
+        '">' + escapeHtml(state.unit) + '</span>'
+      : escapeHtml(tempText);
+    let html = '<div class="weather-preview-row" style="top:' + (rowCenter - valueFont.line / 2 - 3).toFixed(2) +
+      'px;height:' + valueFont.line.toFixed(2) + 'px;gap:' + px(L.valueGap) + '">';
+    if (showCondition) {
+      html += textSpan('weather-preview-condition', conditionText, valueFont, 'max-width:' + Math.max(0, room).toFixed(2) + 'px;');
+      if (tempText !== '--') html += textSpan('weather-preview-separator', '|', valueFont);
+    }
+    html += htmlSpan('weather-preview-temp', tempHtml, valueFont) + '</div>';
+
+    // Forecast columns, spread evenly over the card, the row anchored to the
+    // card's bottom like on the device.
+    const count = showForecast ? weatherForecastCount(cardW, L.forecastTextW) : 0;
+    if (count > 0) {
+      const today = weatherLocalToday(now);
+      const slots = Array.from({length: count}, () => null);
+      let base = today;
+      let fallback = 0;
+      for (const entry of state ? state.forecast : []) {
+        const datetime = weatherPreviewString(entry.datetime);
+        let dateLocal = weatherPreviewString(entry.date_local);
+        if (!dateLocal && datetime.length >= 10) dateLocal = datetime.slice(0, 10);
+        const low = ['templow', 'temperature_low', 'temp_low', 'low']
+          .map(key => weatherPreviewNumber(entry[key])).find(value => value !== null) ?? null;
+        const conditionIcon = WEATHER_CONDITION_ICONS[weatherPreviewString(entry.condition).trim().toLowerCase()] || '';
+        const slot = {
+          dateLocal,
+          day: datetime ? weatherWeekdayShort(datetime) : '',
+          icon: normalizeMdiIconName(weatherPreviewString(entry.icon)) || conditionIcon,
+          high: weatherPreviewNumber(entry.temperature),
+          low
+        };
+        let index = -1;
+        const baseDay = weatherIsoParts(base);
+        const day = weatherIsoParts(dateLocal);
+        if (baseDay !== null && day !== null) {
+          const offset = Math.round((day - baseDay) / 86400000);
+          if (offset >= 0 && offset < count) index = offset;
+        }
+        if (index < 0) {
+          while (fallback < count && slots[fallback]) ++fallback;
+          if (fallback < count) index = fallback++;
+        }
+        if (index >= 0) slots[index] = slot;
+      }
+
+      // Even room around the days' widest text, each column centred on its
+      // day (renderer.cpp), in display pixels with the device's integer
+      // division so the columns do not drift apart from the device's.
+      const textW = L.forecastTextW;
+      const spacing = Math.trunc((cardW - count * textW) / (count + 1));
+      const columnLeft = i => (spacing + Math.trunc(textW / 2) + i * (textW + spacing) - Math.trunc(L.colW / 2)) * scale;
+      const rowTop = height - (gridCellH + L.headroom - L.yOffset) * scale;
+      const contentTop = rowTop + L.padV * scale;
+      const contentW = (L.colW - 2 * L.padH) * scale;
+      const dayFont = font(L.day);
+      const tempFont = font(L.temp);
+      const unitFont = font(L.unit);
+      const unitText = L.unitGap + (state?.unit || '°C');
+      const baseDay = weatherIsoParts(base);
+      for (let i = 0; i < count; ++i) {
+        const slot = slots[i];
+        const left = columnLeft(i) + L.padH * scale;
+        const displayDate = slot?.dateLocal || (baseDay !== null ? weatherIsoDate(baseDay + i * 86400000) : '');
+        let dayText = slot?.day || '';
+        if ((i === 0 && (slot || displayDate)) || displayDate === today) dayText = WEATHER_I18N.today;
+        else if (!dayText && displayDate) dayText = weatherWeekdayShort(displayDate);
+        // Until a first state arrives the device shows white placeholders.
+        if (!state) dayText = '';
+        html += '<div class="weather-preview-day" style="' + at(left, contentTop + L.dayTop * scale + dayFont.shift) +
+          'width:' + contentW.toFixed(2) + 'px;' + fontCss(dayFont) +
+          // The text role through CSS: a tile on its own surface (the dark
+          // design) carries its role values, also when a live edit draws the
+          // days outside that tile's surface (they turned black, 2026-10-10).
+          'color:' + (slot || !state ? 'var(--pv-text, #FFFFFF)' : '#7F8BAA') + '">' + escapeHtml(dayText || '--') + '</div>';
+        if (!slot) continue;
+        if (slot.icon) {
+          const svg = colored ? weatherIconSvg(slot.icon, false) : '';
+          html += '<div class="weather-preview-icon" style="' +
+            at(left, contentTop + (L.iconTop + L.iconEmDy) * scale) + 'width:' + contentW.toFixed(2) + 'px;">' +
+            (svg || '<i class="mdi mdi-' + escapeHtml(slot.icon) + '"></i>') + '</div>';
+        }
+        for (const [value, top] of [[slot.high, L.tempTop], [slot.low, L.lowTop]]) {
+          if (value === null) continue;
+          const text = weatherPreviewTemp(value);
+          let valueWidth = measure(text, tempFont);
+          let x;
+          const valueDevice = weatherDeviceTextWidth(text, L.temp);
+          const unitDevice = weatherDeviceTextWidth(unitText, L.unit);
+          if (valueDevice !== null && unitDevice !== null) {
+            // The device's whole-pixel layout (position_tile_value_unit_centered).
+            const contentDevice = L.colW - 2 * L.padH;
+            const total = valueDevice + unitDevice;
+            let xDevice = Math.trunc(contentDevice / 2) - Math.trunc(total / 2);
+            if (xDevice < 0) xDevice = 0;
+            if (xDevice + total > contentDevice) xDevice = contentDevice - total;
+            x = xDevice * scale;
+            valueWidth = valueDevice * scale;
+          } else {
+            const total = valueWidth + measure(unitText, unitFont);
+            x = contentW / 2 - total / 2;
+            if (x < 0) x = 0;
+            if (x + total > contentW) x = contentW - total;
+          }
+          const y = contentTop + top * scale;
+          html += '<div class="weather-preview-temp-value" style="' + at(left + x, y + tempFont.shift) + fontCss(tempFont) + '">' +
+            escapeHtml(text) + '</div>';
+          html += '<div class="weather-preview-temp-unit" style="' +
+            at(left + x + valueWidth, y + L.unitDy * scale + unitFont.shift) + fontCss(unitFont) + '">' +
+            escapeHtml(unitText) + '</div>';
+        }
+      }
+    }
+    el.querySelectorAll(':scope > .weather-preview-row, :scope > .weather-preview-day, ' +
+      ':scope > .weather-preview-icon, :scope > .weather-preview-temp-value, ' +
+      ':scope > .weather-preview-temp-unit').forEach(node => node.remove());
+    const handles = el.querySelector(':scope > .tile-resize-handle');
+    if (handles) handles.insertAdjacentHTML('beforebegin', html);
+    else el.insertAdjacentHTML('beforeend', html);
+  }
+  const weatherPreviewMeasure = {context: null};
 
 function maybeFillTitleFromScene(tab) {
     const prefix = tab;
@@ -10346,10 +18231,8 @@ function maybeFillTitleFromScene(tab) {
     if (!typeSel || !titleInput || !sceneSel) return;
     if (typeSel.value !== '2') return;
     if (titleInput.value && titleInput.value.trim().length) return;
-    const opt = sceneSel.selectedOptions && sceneSel.selectedOptions[0];
-    if (!opt) return;
-    const label = opt.textContent || opt.innerText || '';
-    const title = label.split(' - ')[0] || opt.value || '';
+    if (!sceneSel.value) return;
+    const title = entityPickerName(sceneSel) || sceneSel.value;
     if (title.trim().length) titleInput.value = title.trim();
   }
 
@@ -10397,6 +18280,12 @@ function normalizeIconName(value) {
       if (tabEl) {
         tabEl.dataset.folderName = label;
         tabEl.dataset.folderIcon = iconName;
+        // Its page's head (web_admin_html.cpp) shows the folder's name and icon.
+        const head = tabEl.querySelector('.head-bar-preview');
+        const headTitle = head?.querySelector('.head-title');
+        if (headTitle) headTitle.textContent = label;
+        const headIcon = head?.querySelector('.head-disc > i');
+        if (headIcon) headIcon.className = 'mdi mdi-' + (iconName || 'folder');
       }
       const btn = document.querySelector(
         '.folder-tab-btn[data-folder-id="' + folderNum + '"]') ||
@@ -10405,22 +18294,11 @@ function normalizeIconName(value) {
       if (btn) {
         btn.dataset.folderName = label;
         btn.dataset.folderIcon = iconName;
-        const labelEl = btn.querySelector('span');
+        const labelEl = btn.querySelector('.tab-label');
         if (labelEl) labelEl.textContent = label;
-        let iconEl = btn.querySelector('i.mdi');
-        if (iconName) {
-          if (!iconEl) {
-            iconEl = document.createElement('i');
-            iconEl.className = 'mdi';
-            iconEl.style.fontSize = '24px';
-            if (labelEl) btn.insertBefore(iconEl, labelEl);
-            else btn.appendChild(iconEl);
-          }
-          iconEl.className = 'mdi mdi-' + iconName;
-          iconEl.style.fontSize = '24px';
-        } else if (iconEl) {
-          iconEl.remove();
-        }
+        // The circle always holds an icon; without one the folder icon.
+        const iconEl = btn.querySelector('.tab-disc i.mdi');
+        if (iconEl) iconEl.className = 'mdi mdi-' + (iconName || (folderNum === 0 ? 'home' : 'folder'));
       }
     }
     document.querySelectorAll('select[id$="_navigate_target"]').forEach(select => {
@@ -10492,7 +18370,9 @@ function normalizeIconName(value) {
       targetSelect?.value ?? tile?.navigate_target ??
       tileEl?.dataset.navigateTarget ?? 0);
     const isFolderTile = type === 4 && Number.isInteger(folderId) && folderId > 0;
-    if (fields) fields.classList.toggle('is-hidden', !isFolderTile);
+    // A page has no PIN (user 2026-10-12): no PIN option for it.
+    const isPage = tab === 'folder0' && typeof pageFolders === 'function' && pageFolders().includes(folderId);
+    if (fields) fields.classList.toggle('is-hidden', !isFolderTile || isPage);
 
     const showPinEditor = isFolderTile && toggle?.checked === true;
     label?.classList.toggle('is-hidden', !showPinEditor);
@@ -10557,6 +18437,8 @@ function normalizeIconName(value) {
         tile.folder_pin = storedPin;
       }
       if (tileEl) tileEl.dataset.folderPinEnabled = enabled ? '1' : '0';
+      // The tile shows the lock of a protected Folder (previewTileLocked).
+      if (typeof updateTilePreview === 'function') updateTilePreview(tab);
       syncFolderPinControls(tab);
       if (status) status.textContent = navigateText('folderPinSaved');
       showNotification(navigateText('folderPinSaved'));
@@ -10593,20 +18475,169 @@ function maybeFillTitleFromSwitch(tab) {
     maybeFillTitleFromEntity(tab, '_switch_entity');
   }
 
-  const SWITCH_TOGGLE_ON = '#3B82F6';
   const SWITCH_ICON_ON = '#FFD54F';
   const SWITCH_ICON_OFF = '#B0B0B0';
-  const SWITCH_ICON_NEUTRAL = '#FFFFFF';
+  // Layouts (src/types/switch/layout.h): 0 icon button, 1 switch, 2 dimmer,
+  // 3 automatic. New tiles start with Automatic.
+  const SWITCH_LAYOUT_NEW_TILE = '3';
+  // Home Assistant color modes that dim (every mode except onoff).
+  // Mirrors parse_switch_payload() (tile_renderer.cpp).
+  const SWITCH_DIMMING_MODES = ['brightness', 'color_temp', 'hs', 'rgb', 'xy', 'rgbw', 'rgbww'];
 
-  function syncSwitchPreviewPalette(tileElem) {
-    if (!tileElem) return;
-    const switchEl = tileElem.querySelector('.tile-switch');
-    if (!switchEl) return;
-    const bg = tileElem.style.background || window.getComputedStyle(tileElem).backgroundColor || '#353535';
-    switchEl.style.setProperty('--switch-knob-color', bg);
-    if (tileElem.classList.contains('switch-toggle')) {
-      switchEl.style.setProperty('--switch-on-color', SWITCH_TOGGLE_ON);
+  // The Sensor value size choices (Tile::sensor_value_font 0..5). One row
+  // high the state shows the half-height sizes (compact_sensor_layout::
+  // value_step), from 1.5 rows the full-size ones; the editor offers the
+  // fitting ones (syncCompactValueFontOptions).
+  function switchValueFont(value) {
+    const v = String(value ?? '0');
+    return ['1', '2', '3', '4', '5'].includes(v) ? v : '0';
+  }
+
+  // switch_layout::sensor_look: from 1.5 rows a header layout looks like a
+  // Sensor tile with the bar below.
+  // An upright bar keeps the header beside the disc (bar_orientation.h).
+  function switchSensorLook(style, spanH, upright = false) {
+    return switchLayoutValue(style) !== 0 && Number(spanH) > 1 && !upright;
+  }
+
+  // The segmented choices of the Switch fields (like Tile color). The hidden
+  // select of each keeps the value; a button sets it and fires its change
+  // event, so the existing preview, draft and autosave bindings run.
+  // The Climate tile's Layout and the Camera tile's choices use the same
+  // segmented choice.
+  const SWITCH_CHOICE_FIELDS = ['switch_style', 'switch_value_font', 'switch_popup_open_mode', 'climate_view', 'media_layout',
+    'cover_value_font', 'lock_value_font', 'alarm_value_font', 'fan_value_font', 'vacuum_value_font', 'vacuum_layout',
+    'camera_display', 'camera_fit',
+    'camera_head', 'camera_tap', 'switch_orientation', 'fan_orientation', 'sensor_layout', 'sensor_form',
+    'sensor_orientation', 'sensor_ring', 'sensor_place', 'sensor_value_font', 'sensor_popup_open_mode',
+    'energy_value_font', 'energy_display_mode', 'energy_popup_open_mode'];
+
+  function syncSwitchChoices(tab) {
+    for (const field of SWITCH_CHOICE_FIELDS) {
+      const select = document.getElementById(tab + '_' + field);
+      const group = document.getElementById(tab + '_' + field + '_choices');
+      if (!select || !group?.querySelectorAll) continue;
+      const options = select.options ? Array.from(select.options) : [];
+      for (const button of group.querySelectorAll('button[data-value]')) {
+        button.classList.toggle('active', button.dataset.value === String(select.value));
+        // Value sizes this tile size does not offer stay hidden; the others
+        // carry the size this panel draws (syncCompactValueFontOptions), the
+        // Default button only its word so the row keeps its width.
+        const option = options.find(o => o.value === button.dataset.value);
+        button.classList.toggle('hidden', !!option?.hidden);
+        const name = option?.value === '0' && select.dataset?.defaultLabel ? select.dataset.defaultLabel : option?.textContent;
+        if (name && button.textContent !== name) button.textContent = name;
+      }
     }
+    // The Switch tile's Orientation row only with a bar (not the icon button).
+    const style = document.getElementById(tab + '_switch_style');
+    if (style) {
+      const hide = switchLayoutValue(style.value) === 0;
+      const label = typeof document.querySelector === 'function'
+        ? document.querySelector('label[for="' + tab + '_switch_orientation"]') : null;
+      label?.classList?.toggle('hidden', hide);
+      document.getElementById(tab + '_switch_orientation_choices')?.classList?.toggle('hidden', hide);
+    }
+  }
+
+  function setSwitchChoice(tab, field, value) {
+    const select = document.getElementById(tab + '_' + field);
+    if (!select) return;
+    if (String(select.value) !== String(value)) {
+      select.value = String(value);
+      if (typeof select.dispatchEvent === 'function') select.dispatchEvent(new Event('change', {bubbles: true}));
+    }
+    syncSwitchChoices(tab);
+  }
+
+  function switchLayoutValue(value) {
+    const layout = Number(value);
+    return [0, 1, 2, 3].includes(layout) ? layout : 0;
+  }
+
+  // Header layouts (Switch, Dimmer, Automatic) and every half-height Switch
+  // tile use the Sensor header; only a full-size icon button does not.
+  function switchUsesHeader(style, halfHeight) {
+    return !!halfHeight || switchLayoutValue(style) !== 0;
+  }
+
+  // switch_layout::bar_for(): no bar at half height or for the icon button.
+  function switchBarKind(style, halfHeight, dimmable) {
+    const layout = switchLayoutValue(style);
+    if (halfHeight || layout === 0) return 'none';
+    if (layout === 1) return 'toggle';
+    return dimmable ? 'dimmer' : 'toggle';
+  }
+
+  // Markup after the icon and title of a header layout: the state line and,
+  // at full height, the control bar.
+  function switchPreviewExtraHtml(style, halfHeight) {
+    if (!switchUsesHeader(style, halfHeight)) return '';
+    let html = '<div class="tile-value tile-switch-state">--</div>';
+    if (!halfHeight) {
+      html += '<div class="tile-switch" data-bar="none">' +
+        '<div class="tile-switch-fill"><span class="tile-switch-handle"></span></div>' +
+        '<div class="tile-switch-knob"><i class="mdi mdi-power tile-switch-symbol"></i></div>' +
+        '</div>';
+    }
+    return html;
+  }
+
+  // The tile classes and layout of a Switch preview (live and cached grid).
+  // `upright`: the bar stands below the header (bar_orientation.h).
+  function applySwitchPreviewLayout(tileElem, style, halfHeight, upright = false) {
+    if (!tileElem) return;
+    tileElem.dataset.switchLayout = String(switchLayoutValue(style));
+    const bar = switchUsesHeader(style, halfHeight) && !halfHeight;
+    tileElem.classList.toggle('switch-bar', bar);
+    tileElem.classList.toggle('switch-upright', bar && !!upright);
+  }
+
+  // switch_layout::Dimmer: the fill stays inside the bar's shape; its end
+  // has a quarter of the bar height as rounding, growing into the bar's
+  // radius only near the full end. The smallest piece is the bar radius plus
+  // that rounding wide (tangential, no edge) with the handle in its middle.
+  // `baseHeight`: the one-row bar height; a taller bar keeps its end
+  // rounding and handle width, only the handle grows in height.
+  function switchDimmerGeometry(width, height, radius, baseHeight = 0) {
+    const reference = baseHeight > 0 ? baseHeight : height;
+    const endRadius = Math.floor(reference / 4);
+    const minFill = Math.min(radius + endRadius, width);
+    const margin = Math.floor(minFill / 2);
+    const low = minFill - margin;
+    const high = width - margin;
+    return {
+      margin,
+      minFill,
+      endRadius,
+      handleWidth: Math.max(3, Math.floor(reference * 7 / 100)),
+      handleHeight: Math.floor(height * 42 / 100),
+      handleX(value) {
+        if (value <= 1 || high <= low) return low;
+        if (value >= 100) return high;
+        return low + Math.floor(((value - 1) * (high - low) + 49) / 99);
+      },
+      fillWidth(value) {
+        if (!value) return 0;
+        return Math.min(width, this.handleX(value) + margin);
+      },
+      endRadiusFor(fill) {
+        if (fill <= width - radius || endRadius >= radius) return endRadius;
+        const corner = width - radius;
+        for (let end = endRadius; end < radius; end++) {
+          let inside = true;
+          for (let x = fill - end; x <= fill && inside; x++) {
+            const dxEnd = x - (fill - end);
+            const endTop = end - Math.sqrt(Math.max(0, end * end - dxEnd * dxEnd));
+            const dxBar = x - corner;
+            const barTop = dxBar <= 0 ? 0 : radius - Math.sqrt(Math.max(0, radius * radius - dxBar * dxBar));
+            if (endTop + 0.01 < barTop) inside = false;
+          }
+          if (inside) return end;
+        }
+        return radius;
+      }
+    };
   }
 
   function parseOnOff(text) {
@@ -10663,8 +18694,12 @@ function maybeFillTitleFromSwitch(tab) {
       available: true,
       hasState: false,
       isOn: false,
+      unknown: false,
       hasColor: false,
-      color: null
+      color: null,
+      hasBrightness: false,
+      brightness: 0,
+      supportsBrightness: false
     };
     if (value === undefined || value === null) return out;
     const text = String(value).trim();
@@ -10681,6 +18716,8 @@ function maybeFillTitleFromSwitch(tab) {
             const normalizedState = String(obj.state).trim().toLowerCase();
             if (normalizedState === 'unavailable') {
               out.available = false;
+            } else if (normalizedState === 'unknown') {
+              out.unknown = true;
             } else {
               const on = parseOnOff(obj.state);
               if (on !== null) {
@@ -10707,12 +18744,32 @@ function maybeFillTitleFromSwitch(tab) {
             out.hasColor = true;
             out.color = hsToRgb(Number(obj.hs_color[0]), Number(obj.hs_color[1]));
           }
+          // Like parse_switch_payload(): brightness_pct, else brightness 0..255.
+          const pct = Number(obj.brightness_pct);
+          const raw = Number(obj.brightness);
+          if (obj.brightness_pct !== undefined && obj.brightness_pct !== null && Number.isFinite(pct)) {
+            out.hasBrightness = true;
+            out.brightness = Math.max(0, Math.min(100, Math.round(pct)));
+          } else if (obj.brightness !== undefined && obj.brightness !== null && Number.isFinite(raw)) {
+            out.hasBrightness = true;
+            out.brightness = Math.max(0, Math.min(100, Math.round(raw / 255 * 100)));
+          }
+          // supported_color_modes decides; color_mode only when it is absent.
+          if (Array.isArray(obj.supported_color_modes)) {
+            out.supportsBrightness = obj.supported_color_modes.some(mode =>
+              SWITCH_DIMMING_MODES.includes(String(mode).toLowerCase()));
+          } else if (obj.color_mode) {
+            out.supportsBrightness = SWITCH_DIMMING_MODES.includes(String(obj.color_mode).toLowerCase());
+          }
         }
       } catch (e) {}
     }
 
     if (text.toLowerCase() === 'unavailable') {
       out.available = false;
+    }
+    if (text.toLowerCase() === 'unknown') {
+      out.unknown = true;
     }
 
     if (!out.hasState) {
@@ -10744,49 +18801,182 @@ function maybeFillTitleFromSwitch(tab) {
     return out;
   }
 
-  function applySwitchPreviewState(tileElem, state) {
+  // Resize preview (drag-resize.js): the copy of a Switch tile at its old
+  // size takes the parts of the new size like the device: no bar at half
+  // height, the header and bar of the layout from one row. Before the
+  // compact classes, so the tall look follows too.
+  function prepareSwitchResizePreview(preview, data, layout) {
+    if (!preview || !data) return;
+    const half = Number(layout?.span_h) === 0.5;
+    const oldState = Array.from(preview.children).find(el => el.classList.contains('tile-switch-state'));
+    preview.dataset.switchStateText = oldState ? oldState.textContent : '';
+    for (const el of Array.from(preview.children)) {
+      if (el.classList.contains('tile-switch-state') || el.classList.contains('tile-switch')) el.remove();
+    }
+    preview.insertAdjacentHTML('beforeend', switchPreviewExtraHtml(data.switch_style, half));
+    applySwitchPreviewLayout(preview, data.switch_style, half, Number(data.bar_orientation) === 1);
+  }
+
+  // Once the copy is in the grid (the bar measures itself): the state from
+  // the entity cache, else the text the tile showed.
+  function finishSwitchResizePreview(preview, data) {
+    if (!preview || !data) return;
+    const entity = data.sensor_entity || '';
+    const values = (typeof sensorMetaCache === 'object' && sensorMetaCache?.values) || {};
+    if (entity && values[entity] !== undefined) {
+      applySwitchPreviewState(preview, parseSwitchPayload(values[entity]), entity);
+      return;
+    }
+    const label = Array.from(preview.children).find(el => el.classList.contains('tile-switch-state'));
+    if (label && preview.dataset.switchStateText) label.textContent = preview.dataset.switchStateText;
+  }
+
+  function applySwitchPreviewState(tileElem, state, entity) {
     if (!tileElem) return;
-    applySwitchPreviewColors(tileElem, state);
-    // The icon disc follows the state color like on the device.
-    applyIconDiscTint(tileElem);
+    // On the tile's own surface: the editor applies the state after the meta
+    // fetch, when its surface scope has ended (user 2026-10-11: a filled
+    // Relay showed the light theme's icon and knob after a click).
+    withSurface(surfaceTheme(tileElem.dataset.surface || ''), () => {
+      applySwitchPreviewColors(tileElem, state);
+      // The disc and the control fill follow the state color like the device.
+      applyIconDiscTint(tileElem);
+      applySwitchPreviewBar(tileElem, state, entity);
+    });
   }
 
   function applySwitchPreviewColors(tileElem, state) {
     const iconEl = tileElem.querySelector('.tile-icon');
-    const switchEl = tileElem.querySelector('.tile-switch');
-    const isToggleStyle = tileElem.classList.contains('switch-toggle');
-    syncSwitchPreviewPalette(tileElem);
+    if (!iconEl) return;
     if (state.available === false) {
-      if (iconEl) iconEl.style.color = SWITCH_ICON_OFF;
-      if (switchEl) {
-        switchEl.classList.remove('is-on');
-        if (isToggleStyle) {
-          switchEl.style.setProperty('--switch-on-color', SWITCH_TOGGLE_ON);
-        } else {
-          switchEl.style.removeProperty('--switch-on-color');
+      // Unavailable: fainter than off in the light theme (icon_unavailable).
+      iconEl.style.color = panelRoleHex('icon-unavailable', SWITCH_ICON_OFF);
+      return;
+    }
+    if (!state.hasState && !state.hasColor) return;
+    const isOn = state.hasState ? state.isOn : state.hasColor;
+    const onColor = state.hasColor ? state.color : SWITCH_ICON_ON;
+    iconEl.style.color = isOn ? (typeof toneLightShown === 'function' ? toneLightShown(onColor) : onColor)
+      : panelRoleHex('icon-off', SWITCH_ICON_OFF);
+  }
+
+  // show_state_text(): the same words as the device, from the central
+  // translations (SWITCH_I18N, types/switch/web_scripts.cpp).
+  function switchPreviewStateText(state, dimmable, level, on) {
+    const i18n = typeof SWITCH_I18N === 'object' ? SWITCH_I18N : {};
+    if (state.available === false) return i18n.unavailable || 'Unavailable';
+    if (state.unknown) return i18n.unknown || 'Unknown';
+    if (!state.hasState && !state.hasBrightness) return '--';
+    if (!on) return i18n.off || 'Off';
+    if (dimmable) return level + ' %';
+    return i18n.on || 'On';
+  }
+
+  function applySwitchPreviewBar(tileElem, state, entity) {
+    // Each appears once per tile, directly in it.
+    const label = tileElem.querySelector('.tile-switch-state');
+    const bar = tileElem.querySelector('.tile-switch');
+    if (!label && !bar) return;
+    const halfHeight = tileElem.classList.contains('sensor-half');
+    const style = tileElem.dataset.switchLayout || '0';
+    const dimmable = String(entity || '').startsWith('light.') && !!state.supportsBrightness;
+    const available = state.available !== false;
+    let on = state.hasState ? !!state.isOn : (!!state.hasBrightness && state.brightness > 0);
+    if (!available) on = false;
+    // A dimmable light on without a reported brightness: On without a level.
+    const level = on ? (state.hasBrightness ? Math.max(1, state.brightness) : (dimmable ? 0 : 100)) : 0;
+    if (label) {
+      // A level's percent a step smaller after it (unitTextHtml); words as text.
+      const text = switchPreviewStateText(state, dimmable && level > 0, level, on);
+      const html = unitTextHtml(text);
+      if (html === escapeHtml(text)) label.textContent = text;
+      else label.innerHTML = html;
+    }
+    if (!bar) return;
+    const kind = switchBarKind(style, halfHeight, dimmable);
+    bar.dataset.bar = kind;
+    bar.classList.toggle('is-on', on);
+    bar.classList.toggle('is-unavailable', !available);
+    // Accent = the color the icon shows, card = the tile, thumb off = one
+    // OKLCH step above the control fill (tone_color::lifted).
+    const iconEl = tileElem.querySelector('.tile-icon');
+    // The light theme: the light's own color, a white light in light grey
+    // (accent_color, tone_color::light_accent); marks on it by its lightness.
+    withSurface(surfaceTheme(tileElem.dataset.surface || ''), () => {
+      const givenHex = iconEl?.dataset.toneGiven || '';
+      const shown = iconEl ? cssColorChannels(getComputedStyle(iconEl).color) : null;
+      const given = /^#[0-9a-f]{6}$/i.test(givenHex) ? [1, 3, 5].map(i => parseInt(givenHex.slice(i, i + 2), 16)) : shown;
+      const accentRgb = panelLight() && given ? toneLightAccent(given) : shown;
+      const accent = accentRgb ? toneHex(accentRgb) : (state.hasColor ? state.color : SWITCH_ICON_ON);
+      const card = cssColorChannels(getComputedStyle(tileElem).backgroundColor) || [26, 26, 26];
+      bar.style.setProperty('--switch-accent', accent);
+      bar.style.setProperty('--switch-card', toneHex(card));
+      bar.style.setProperty('--switch-mark', toneHex(accentRgb ? toneMarkOn(accentRgb, card) : card));
+      bar.style.setProperty('--switch-notch', toneHex(accentRgb ? toneNotchOn(accentRgb, card) : card));
+    });
+    const control = cssColorChannels(getComputedStyle(bar).backgroundColor);
+    if (control) {
+      const base = toneOklch(control);
+      bar.style.setProperty('--switch-thumb-off', toneHex(toneRgb(base.L + toneStep(0.06), base.C, base.h)));
+    }
+    const symbol = bar.querySelector('.tile-switch-symbol');
+    if (symbol) symbol.className = 'mdi ' + (on ? 'mdi-power' : 'mdi-circle-outline') + ' tile-switch-symbol';
+    bar.__switchFill = {kind, level};
+    drawSwitchPreviewFill(bar);
+    // The fill is measured in pixels, but the grid gives the tile its size
+    // only after the render (layoutTiles), and a hidden tab measures 0: the
+    // fill used the one-cell bar. It is drawn again whenever the bar's size
+    // changes.
+    if (switchBarObserver && !bar.__switchObserved) {
+      bar.__switchObserved = true;
+      switchBarObserver.observe(bar);
+    }
+  }
+
+  const switchBarObserver = typeof ResizeObserver === 'function'
+    ? new ResizeObserver(entries => {
+      for (const entry of entries) {
+        const bar = entry.target;
+        if (!bar.isConnected) {
+          switchBarObserver.unobserve(bar);
+          bar.__switchObserved = false;
+          continue;
         }
+        // A bar whose content depends on its width (the Alarm panel's
+        // mode slots) rebuilds itself first.
+        if (typeof bar.__onResize === 'function') bar.__onResize();
+        drawSwitchPreviewFill(bar);
       }
-      return;
-    }
-    if (!state.hasState && !state.hasColor) {
-      if (iconEl && isToggleStyle) iconEl.style.color = SWITCH_ICON_NEUTRAL;
-      return;
-    }
-    let isOn = state.hasState ? state.isOn : state.hasColor;
-    let color = SWITCH_ICON_OFF;
-    if (isOn) color = state.hasColor ? state.color : SWITCH_ICON_ON;
-    if (iconEl) iconEl.style.color = isToggleStyle ? SWITCH_ICON_NEUTRAL : color;
-    if (switchEl) {
-      if (isOn) switchEl.classList.add('is-on');
-      else switchEl.classList.remove('is-on');
-      if (isToggleStyle) {
-        switchEl.style.setProperty('--switch-on-color', SWITCH_TOGGLE_ON);
-      } else if (isOn && state.hasColor) {
-        switchEl.style.setProperty('--switch-on-color', state.color);
-      } else {
-        switchEl.style.removeProperty('--switch-on-color');
-      }
-    }
+    })
+    : null;
+
+  function drawSwitchPreviewFill(bar) {
+    const fill = bar?.querySelector('.tile-switch-fill');
+    const drawn = bar?.__switchFill;
+    if (!fill || !drawn) return;
+    const {kind, level} = drawn;
+    const width = bar.clientWidth;
+    const height = bar.clientHeight;
+    const base = parseFloat(getComputedStyle(bar).getPropertyValue('--switch-bar-height')) || height;
+    // An upright bar (level_bar::upright_geometry): along its height, with
+    // the one-row bar as its thickness; the fill rises from the bottom.
+    const upright = !!bar.parentElement?.classList?.contains('switch-upright');
+    const thickness = upright ? Math.min(base, width) : Math.min(base, height);
+    const radius = Math.min(parseFloat(getComputedStyle(bar).borderTopLeftRadius) || 0, (upright ? width : height) / 2);
+    const geometry = upright ? switchDimmerGeometry(height, thickness, radius, thickness)
+      : switchDimmerGeometry(width, height, radius, thickness);
+    const fillWidth = kind === 'dimmer' ? geometry.fillWidth(level) : 0;
+    const endRadius = geometry.endRadiusFor(fillWidth);
+    // The fill element starts one end radius past the bar's start, so only
+    // the bar's round start shows (overflow hidden).
+    const size = (fillWidth ? fillWidth + endRadius : 0) + 'px';
+    fill.style.width = upright ? '' : size;
+    fill.style.height = upright ? size : '';
+    bar.style.setProperty('--switch-end-radius', endRadius + 'px');
+    bar.style.setProperty('--switch-handle-margin', geometry.margin + 'px');
+    bar.style.setProperty('--switch-handle-w', geometry.handleWidth + 'px');
+    // Upright: the Light popup's handle for its slider width
+    // (switch_layout::upright_handle_length).
+    bar.style.setProperty('--switch-handle-h', (upright ? Math.floor(width * 46 / 160) : geometry.handleHeight) + 'px');
   }
 
   function updateSwitchValuePreview(tab) {
@@ -10797,11 +18987,10 @@ function maybeFillTitleFromSwitch(tab) {
     const entity = entitySelect.value;
     const tileElem = document.getElementById(tab + '-tile-' + currentTileIndex);
     if (!entity || !tileElem) return;
-    syncSwitchPreviewPalette(tileElem);
     const applyMeta = (meta) => {
       const values = (meta && meta.values) || {};
       const state = parseSwitchPayload(values[entity] ?? '');
-      applySwitchPreviewState(tileElem, state);
+      applySwitchPreviewState(tileElem, state, entity);
     };
     const metaPromise = isSensorMetaCacheLoaded() ? Promise.resolve(sensorMetaCache) : fetchSensorMetaCache();
     metaPromise
@@ -10816,12 +19005,18 @@ function maybeFillTitleFromSwitch(tab) {
     if (entityEl) entityEl.value = data.sensor_entity || data.switch_entity || '';
     const styleEl = document.getElementById(prefix + '_switch_style');
     if (styleEl) {
-      styleEl.value = (data.switch_style !== undefined && data.switch_style !== null) ? String(data.switch_style) : '0';
+      styleEl.value = (data.switch_style !== undefined && data.switch_style !== null)
+        ? String(switchLayoutValue(data.switch_style)) : '0';
     }
+    const orientationEl = document.getElementById(prefix + '_switch_orientation');
+    if (orientationEl) orientationEl.value = Number(data.bar_orientation) === 1 ? '1' : '0';
+    const fontEl = document.getElementById(prefix + '_switch_value_font');
+    if (fontEl) fontEl.value = switchValueFont(data.sensor_value_font);
     const popupModeEl = document.getElementById(prefix + '_switch_popup_open_mode');
     if (popupModeEl) {
       popupModeEl.value = (data.popup_open_mode !== undefined) ? String(data.popup_open_mode) : '1';
     }
+    syncSwitchChoices(tab);
     maybeFillTitleFromSwitch(tab);
   }
 
@@ -10830,7 +19025,9 @@ function maybeFillTitleFromSwitch(tab) {
     const prefix = tab;
     formData.append('switch_entity', document.getElementById(prefix + '_switch_entity')?.value || '');
     const styleEl = document.getElementById(prefix + '_switch_style');
-    formData.append('switch_style', styleEl ? styleEl.value : '0');
+    formData.append('switch_style', styleEl ? String(switchLayoutValue(styleEl.value)) : '0');
+    formData.append('bar_orientation', document.getElementById(prefix + '_switch_orientation')?.value === '1' ? '1' : '0');
+    formData.append('sensor_value_font', switchValueFont(document.getElementById(prefix + '_switch_value_font')?.value));
     formData.append('popup_open_mode', document.getElementById(prefix + '_switch_popup_open_mode')?.value || '1');
   }
 
@@ -10840,9 +19037,14 @@ function maybeFillTitleFromSwitch(tab) {
     const entityEl = document.getElementById(prefix + '_switch_entity');
     if (entityEl) entityEl.value = '';
     const styleEl = document.getElementById(prefix + '_switch_style');
-    if (styleEl) styleEl.value = '0';
+    if (styleEl) styleEl.value = SWITCH_LAYOUT_NEW_TILE;
+    const orientationEl = document.getElementById(prefix + '_switch_orientation');
+    if (orientationEl) orientationEl.value = '0';
+    const fontEl = document.getElementById(prefix + '_switch_value_font');
+    if (fontEl) fontEl.value = '0';
     const popupModeEl = document.getElementById(prefix + '_switch_popup_open_mode');
     if (popupModeEl) popupModeEl.value = '1';
+    syncSwitchChoices(tab);
   }
 
   function parseCoverPreviewPayload(value) {
@@ -10851,11 +19053,15 @@ function maybeFillTitleFromSwitch(tab) {
       position: null,
       tiltPosition: null,
       deviceClass: '',
-      available: true
+      available: true,
+      // A state was reported (the device's CoverState::valid).
+      reported: false,
+      supportedFeatures: null
     };
     if (value === undefined || value === null) return out;
     const text = String(value).trim();
     if (!text.length) return out;
+    out.reported = true;
     if (!text.startsWith('{')) {
       out.state = text.toLowerCase();
       out.available = out.state !== 'unavailable';
@@ -10879,6 +19085,10 @@ function maybeFillTitleFromSwitch(tab) {
         out.tiltPosition = Math.max(0, Math.min(100, Math.round(Number(tilt))));
       }
       out.deviceClass = String(obj.device_class ?? attrs.device_class ?? '').toLowerCase();
+      const features = obj.supported_features ?? attrs.supported_features;
+      if (features !== undefined && features !== null && Number.isFinite(Number(features))) {
+        out.supportedFeatures = Math.max(0, Math.min(255, Math.round(Number(features))));
+      }
     } catch (e) {}
     return out;
   }
@@ -10927,13 +19137,78 @@ function maybeFillTitleFromSwitch(tab) {
       'arrow-down-box', 'arrow-up-box');
   }
 
+  // The state color of icon and position fill (cover renderer
+  // cover_icon_color): closed keeps the active color, unknown and
+  // unavailable take the inactive grey.
   function coverPreviewColor(state) {
     const value = String(state?.state || 'unknown').toLowerCase();
-    if (state?.available === false ||
-        value === 'closed' || value === 'unknown' || value === 'unavailable') {
-      return '#9e9e9e';
+    if (state?.available === false || value === 'unavailable') {
+      const rest = panelRoleHex('icon-rest', '#9e9e9e');
+      return typeof unavailableIconHex === 'function' ? unavailableIconHex(rest) : rest;
     }
+    if (value === 'unknown') return panelRoleHex('icon-rest', '#9e9e9e');
     return '#926bc7';
+  }
+
+  // A full tile of a Cover with a position (or not reported yet) shows the
+  // header and the position bar (cover renderer show_view); without
+  // supported_features the device assumes open, close and stop, plus the
+  // position when one is reported. Bit 4 is SET_POSITION.
+  function coverPreviewPositionable(state) {
+    if (!state || !state.reported) return true;
+    const features = state.supportedFeatures ?? (11 | (state.position !== null ? 4 : 0));
+    return (features & 4) !== 0;
+  }
+
+  // cover_state_line(): "Open · 58 %".
+  function coverPreviewStateLine(state) {
+    if (!state || !state.reported) return '--';
+    const text = coverPreviewStateText(state);
+    return state.available !== false && state.position !== null ? text + ' \u00B7 ' + state.position + ' %' : text;
+  }
+
+  // Markup after the icon and title: half height and full tiles of a
+  // positionable Cover show the state line beside the disc, full tiles also
+  // the position bar (the Switch preview's bar); other Covers keep the
+  // centered state and position.
+  function coverPreviewExtraHtml(state, halfHeight) {
+    if (!halfHeight && !coverPreviewPositionable(state)) {
+      const value = state?.position !== null && state?.position !== undefined
+        ? String(state.position) + '%' : '--%';
+      return '<div class="tile-value tile-cover-value">' + escapeHtml(coverPreviewStateText(state)) +
+        '<br>' + escapeHtml(value) + '</div>';
+    }
+    let html = '<div class="tile-value tile-switch-state">' + unitTextHtml(coverPreviewStateLine(state)) + '</div>';
+    if (!halfHeight) {
+      html += '<div class="tile-switch" data-bar="dimmer">' +
+        '<div class="tile-switch-fill"><span class="tile-switch-handle"></span></div></div>';
+    }
+    return html;
+  }
+
+  // The header layout class and the position fill, drawn like the Switch
+  // dimmer (drawSwitchPreviewFill) in the state color with the handle in the
+  // tile color.
+  function applyCoverPreview(tileElem, state, halfHeight) {
+    if (!tileElem) return;
+    tileElem.classList.toggle('switch-bar', !halfHeight && coverPreviewPositionable(state));
+    const bar = tileElem.querySelector('.tile-switch');
+    if (!bar) return;
+    const available = state?.available !== false && !!state?.reported;
+    // The closed part like Home Assistant's cover position feature (and the
+    // popup's shutter): 75 % open fills a quarter; fully open keeps the
+    // smallest piece with the handle (cover renderer cover_fill_level).
+    const level = available && state.position !== null ? Math.max(1, 100 - state.position) : 0;
+    bar.dataset.bar = 'dimmer';
+    bar.classList.toggle('is-unavailable', !available);
+    bar.style.setProperty('--switch-accent', coverPreviewColor(state));
+    bar.style.setProperty('--switch-card', getComputedStyle(tileElem).backgroundColor);
+    bar.__switchFill = {kind: 'dimmer', level};
+    drawSwitchPreviewFill(bar);
+    if (switchBarObserver && !bar.__switchObserved) {
+      bar.__switchObserved = true;
+      switchBarObserver.observe(bar);
+    }
   }
 
   function coverPreviewStateText(state) {
@@ -10955,24 +19230,17 @@ function maybeFillTitleFromSwitch(tab) {
     const entity = document.getElementById(tab + '_cover_entity');
     const configured = data.sensor_entity || data.cover_entity || '';
     if (entity) {
-      if (configured) {
-        entity.dataset.configuredValue = configured;
-        if (!Array.from(entity.options).some(option => option.value === configured)) {
-          const option = document.createElement('option');
-          option.value = configured;
-          option.textContent = configured;
-          entity.appendChild(option);
-        }
-      } else {
-        delete entity.dataset.configuredValue;
-      }
       entity.value = configured;
     }
+    // State size like the Switch tile (Tile::sensor_value_font).
+    const font = document.getElementById(tab + '_cover_value_font');
+    if (font) font.value = switchValueFont(data.sensor_value_font);
     const popup = document.getElementById(tab + '_cover_popup_open_mode');
     if (popup) {
       popup.value = data.popup_open_mode !== undefined
         ? String(data.popup_open_mode) : '1';
     }
+    if (typeof syncSwitchChoices === 'function') syncSwitchChoices(tab);
     maybeFillTitleFromEntity(tab, '_cover_entity');
   }
 
@@ -10981,6 +19249,7 @@ function maybeFillTitleFromSwitch(tab) {
     const entity = document.getElementById(tab + '_cover_entity')?.value || '';
     formData.append('cover_entity', entity);
     formData.append('sensor_entity', entity);
+    formData.append('sensor_value_font', switchValueFont(document.getElementById(tab + '_cover_value_font')?.value));
     const popup = document.getElementById(tab + '_cover_popup_open_mode');
     if (popup) formData.append('popup_open_mode', popup.value || '1');
   }
@@ -10988,11 +19257,894 @@ function maybeFillTitleFromSwitch(tab) {
   function resetCoverFields(tab) {
     resetIconColorFields(tab);
     const entity = document.getElementById(tab + '_cover_entity');
-    if (entity) {
-      entity.value = '';
-      delete entity.dataset.configuredValue;
-    }
+    if (entity) entity.value = '';
+    const font = document.getElementById(tab + '_cover_value_font');
+    if (font) font.value = '0';
     const popup = document.getElementById(tab + '_cover_popup_open_mode');
+    if (popup) popup.value = '1';
+    if (typeof syncSwitchChoices === 'function') syncSwitchChoices(tab);
+  }
+  // Lock (24), Alarm panel (25) and Fan (26): the Switch tile's header with
+  // a control bar (types/device/device_tile.cpp); Vacuum (29) with its
+  // buttons and map (types/vacuum/vacuum_tile.cpp). The preview mirrors the
+  // device: the state colors and icons of device_visual.h, the bar of
+  // bar_model() and the words of DEVICE_I18N (types/device/web.cpp).
+  const DEVICE_COLORS = {green: '#4CAF50', red: '#F44336', orange: '#FF9800', grey: '#9E9E9E', cyan: '#00BCD4',
+    vacuum: '#29B6F6'};
+  // Home Assistant's alarm modes: state, feature bit, icon.
+  const DEVICE_ALARM_MODES = [
+    ['armed_home', 1, 'home'], ['armed_away', 2, 'lock'], ['armed_night', 4, 'moon-waning-crescent'],
+    ['armed_vacation', 32, 'airplane'], ['armed_custom_bypass', 16, 'shield']
+  ];
+
+  function devicePreviewKind(type) {
+    const value = String(type);
+    return value === '24' ? 'lock' : (value === '25' ? 'alarm' : (value === '26' ? 'fan' :
+      (value === '29' ? 'vacuum' : '')));
+  }
+
+  // The retained detail state (/api/sensor_values device_values).
+  function deviceDetailPayload(entity, meta = sensorMetaCache) {
+    return entity ? (meta?.deviceValues?.[entity] ?? '') : '';
+  }
+
+  // device_detail::parse(): a missing state stays apart from a known one.
+  function parseDevicePreviewPayload(value) {
+    const out = {valid: false, available: false, state: '', features: 0, percentage: null,
+      step: null, preset: '', battery: null, area: null, areaUnit: ''};
+    const text = value === undefined || value === null ? '' : String(value).trim();
+    if (!text.startsWith('{')) return out;
+    try {
+      const obj = JSON.parse(text);
+      if (!obj || typeof obj !== 'object') return out;
+      out.valid = true;
+      out.state = typeof obj.state === 'string' ? obj.state.toLowerCase() : '';
+      out.available = !!out.state && out.state !== 'unavailable';
+      out.features = Number.isFinite(Number(obj.supported_features)) ? Number(obj.supported_features) : 0;
+      if (typeof obj.percentage === 'number' && Number.isFinite(obj.percentage)) {
+        out.percentage = Math.max(0, Math.min(100, Math.round(obj.percentage)));
+      }
+      if (typeof obj.percentage_step === 'number' && obj.percentage_step > 0 && obj.percentage_step <= 100) {
+        out.step = obj.percentage_step;
+      }
+      out.preset = typeof obj.preset_mode === 'string' ? obj.preset_mode : '';
+      // Vacuum (vacuum_detail::parse): the battery stays apart from 0.
+      if (typeof obj.battery === 'number' && Number.isFinite(obj.battery)) {
+        out.battery = Math.max(0, Math.min(100, Math.round(obj.battery)));
+      }
+      // The cleaned area needs its value and its unit.
+      const area = obj.cleaned_area;
+      if (area && typeof area.value === 'number' && Number.isFinite(area.value) && area.value >= 0 &&
+          typeof area.unit === 'string' && area.unit) {
+        out.area = area.value;
+        out.areaUnit = area.unit;
+      }
+    } catch (e) {}
+    return out;
+  }
+
+  function deviceSpeedCount(d) {
+    if (!d.step) return 100;
+    return Math.max(1, Math.min(100, Math.round(100 / d.step)));
+  }
+
+  function deviceLevelText(count, percentage) {
+    const i18n = typeof DEVICE_I18N === 'object' ? DEVICE_I18N.fan : {};
+    if (count < 100) {
+      const speed = Math.max(1, Math.min(count, Math.round(percentage * count / 100)));
+      return String(i18n.speed || 'Speed %u').replace('%u', String(speed));
+    }
+    return percentage + ' %';
+  }
+
+  // device_visual::visual(): label, icon and state color.
+  function devicePreviewVisual(kind, d) {
+    const words = typeof DEVICE_I18N === 'object' ? (DEVICE_I18N[kind] || {}) : {};
+    const out = {label: '--', icon: kind === 'lock' ? 'lock' : (kind === 'alarm' ? 'shield' :
+      (kind === 'vacuum' ? 'robot-vacuum' : 'fan-off')),
+      color: panelRoleHex('icon-inactive', DEVICE_COLORS.grey), waiting: false};
+    if (!d.valid) return out;
+    const state = d.available ? d.state : 'unavailable';
+    // Unavailable: the light theme's one unavailable grey (unavailable_icon).
+    if (!d.available && typeof unavailableIconHex === 'function') out.color = unavailableIconHex(out.color);
+    if (kind === 'lock') {
+      out.label = words[state] || words.unknown || state;
+      if (!d.available) return out;
+      if (state === 'locked') out.color = DEVICE_COLORS.green;
+      else if (state === 'unlocked' || state === 'open') {
+        out.icon = 'lock-open-variant';
+        out.color = DEVICE_COLORS.red;
+      } else if (['locking', 'unlocking', 'opening'].includes(state)) {
+        out.icon = 'lock-clock';
+        out.color = DEVICE_COLORS.orange;
+        out.waiting = true;
+      } else if (state === 'jammed') {
+        out.icon = 'lock-alert';
+        out.color = DEVICE_COLORS.red;
+        out.waiting = true;
+      }
+      return out;
+    }
+    if (kind === 'vacuum') {
+      // vacuum_visual::visual(): the vacuum's blue in every reported state,
+      // red on an error; the state and the battery, the state alone.
+      out.label = words[state] || words.unknown || state;
+      out.state = out.label;
+      if (!d.available) {
+        out.icon = 'robot-vacuum-off';
+        return out;
+      }
+      out.color = DEVICE_COLORS.vacuum;
+      if (state === 'error') {
+        out.icon = 'robot-vacuum-alert';
+        out.color = DEVICE_COLORS.red;
+      }
+      if (d.battery !== null && d.battery !== undefined) out.label += ' · ' + d.battery + ' %';
+      return out;
+    }
+    if (kind === 'alarm') {
+      out.label = words[state] || words.unknown || state;
+      if (!d.available) return out;
+      const looks = {
+        disarmed: ['shield-off', 'grey'], armed_home: ['shield-home', 'green'], armed_away: ['shield-lock', 'green'],
+        armed_night: ['shield-moon', 'green'], armed_vacation: ['shield-airplane', 'green'],
+        armed_custom_bypass: ['security', 'green'], arming: ['shield', 'orange'], pending: ['shield-outline', 'orange'],
+        disarming: ['shield', 'orange'], triggered: ['bell-ring', 'red']
+      };
+      const look = looks[state];
+      if (look) {
+        out.icon = look[0];
+        out.color = look[1] === 'grey' ? panelRoleHex('icon-inactive', DEVICE_COLORS.grey) : DEVICE_COLORS[look[1]];
+        out.waiting = look[1] === 'orange' || state === 'triggered';
+      }
+      return out;
+    }
+    if (!d.available) {
+      out.label = words.unavailable || 'Unavailable';
+      return out;
+    }
+    if (state === 'unknown') {
+      out.label = words.unknown || 'Unknown';
+      return out;
+    }
+    if (state !== 'on') {
+      out.label = words.off || 'Off';
+      return out;
+    }
+    out.icon = 'fan';
+    out.color = DEVICE_COLORS.cyan;
+    if (d.preset) {
+      const preset = d.preset.replace(/_/g, ' ');
+      out.label = preset.charAt(0).toUpperCase() + preset.slice(1);
+    } else if ((d.features & 1) && d.percentage !== null) {
+      out.label = deviceLevelText(deviceSpeedCount(d), d.percentage);
+    } else {
+      out.label = words.on || 'On';
+    }
+    return out;
+  }
+
+  // The Vacuum's automatic icon is Home Assistant's icon of the entity
+  // (vacuum_visual::icon_name): `entityIcon` when known.
+  function devicePreviewIcon(kind, d, fallback = '', entityIcon = '') {
+    if (kind === 'vacuum' && entityIcon) return entityIcon;
+    return fallback || devicePreviewVisual(kind, d).icon;
+  }
+
+  function devicePreviewColor(kind, d) {
+    return devicePreviewVisual(kind, d).color;
+  }
+
+  // The state line beside the disc and, for full tiles, the bar.
+  function devicePreviewExtraHtml(kind, d, halfHeight) {
+    let html = '<div class="tile-value tile-switch-state">' + unitTextHtml(devicePreviewVisual(kind, d).label) + '</div>';
+    if (kind === 'vacuum') {
+      if (!halfHeight) html += '<div class="tile-vacuum"></div>';
+      return html;
+    }
+    if (!halfHeight) {
+      html += '<div class="tile-switch" data-bar="none">' +
+        '<div class="tile-switch-fill"><span class="tile-switch-handle"></span></div>' +
+        '<div class="tile-switch-knob"><i class="mdi tile-switch-symbol"></i></div>' +
+        '<div class="tile-device-parts"></div></div>';
+    }
+    return html;
+  }
+
+  function devicePart(icon, cls) {
+    return '<span class="tile-device-part' + (cls ? ' ' + cls : '') + '">' +
+      (icon ? '<i class="mdi mdi-' + escapeHtml(icon) + '"></i>' : '') + '</span>';
+  }
+
+  // vacuum_visual::values_line(): the battery and the cleaned area, only
+  // what the vacuum reports.
+  function vacuumValuesLine(d) {
+    if (!d.valid || !d.available) return '';
+    const parts = [];
+    if (d.battery !== null && d.battery !== undefined) parts.push(d.battery + ' %');
+    if (d.area !== null && d.area !== undefined) {
+      const number = localizeNumericText(d.area.toFixed(d.area < 10 ? 1 : 0));
+      parts.push(number + ' ' + d.areaUnit);
+    }
+    return parts.join(' \u00b7 ');
+  }
+
+  // render_vacuum_tile(): equal buttons with icon and text across the row,
+  // one column Clean, two Clean and Dock, from three Clean, Stop and Dock;
+  // two columns and rows the Media tile's arrangement: the title top right,
+  // the map in the cover's place, the state alone and the values line right
+  // of it (placeVacuumMapPreview).
+  function applyVacuumPreview(tileElem, d, halfHeight, spans) {
+    tileElem.classList.toggle('switch-bar', !halfHeight);
+    const box = tileElem.querySelector('.tile-vacuum');
+    const w = Number(spans?.w) || 1;
+    const h = Number(spans?.h) || 1;
+    const withMap = !!box && w >= 2 && h >= 2;
+    tileElem.classList.toggle('vacuum-map', withMap);
+    let mapEl = tileElem.querySelector(':scope > .tile-vacuum-map');
+    let values = tileElem.querySelector(':scope > .tile-vacuum-values');
+    if (!withMap) {
+      mapEl?.remove();
+      values?.remove();
+    }
+    if (!box) return;
+    const words = typeof DEVICE_I18N === 'object' ? (DEVICE_I18N.vacuum || {}) : {};
+    const count = w >= 3 ? 3 : (w >= 2 ? 2 : 1);
+    const pauses = d.state === 'cleaning' && (d.features & 4);
+    const ready = d.valid && d.available;
+    const button = (icon, text, on) => '<span class="tile-vacuum-button' + (on ? '' : ' off') + '">' +
+      '<i class="mdi mdi-' + icon + '"></i><span>' + escapeHtml(text) + '</span></span>';
+    let html = button(pauses ? 'pause' : 'play', pauses ? (words.pause || 'Pause') : (words.clean || 'Clean'),
+      ready && (pauses || (d.features & 8192)));
+    if (count === 3) html += button('stop', words.stop || 'Stop', ready && (d.features & 8));
+    if (count >= 2) html += button('home-import-outline', words.dock || 'Dock', ready && (d.features & 16));
+    box.innerHTML = html;
+    box.dataset.count = String(count);
+    if (!withMap) return;
+    if (!mapEl) {
+      mapEl = document.createElement('span');
+      mapEl.className = 'tile-vacuum-map';
+      mapEl.innerHTML = '<i class="mdi mdi-map-outline"></i>';
+      tileElem.appendChild(mapEl);
+    }
+    if (!values) {
+      values = document.createElement('div');
+      values.className = 'tile-value tile-vacuum-values';
+      tileElem.appendChild(values);
+    }
+    const state = tileElem.querySelector(':scope > .tile-switch-state');
+    if (state) state.innerHTML = unitTextHtml(devicePreviewVisual('vacuum', d).state || '--');
+    const line = vacuumValuesLine(d);
+    values.innerHTML = unitTextHtml(line);
+    values.hidden = !line;
+    placeVacuumMapPreview(tileElem);
+    if (typeof ResizeObserver === 'function' && !tileElem.__vacuumObserved) {
+      tileElem.__vacuumObserved = true;
+      new ResizeObserver(() => {
+        if (tileElem.classList.contains('vacuum-map')) placeVacuumMapPreview(tileElem);
+      }).observe(tileElem);
+    }
+  }
+
+  // render_vacuum_tile's Map layout: the map one inset in from the card,
+  // from the content top down to one gap above the row, at most 42 % of the
+  // card's width (the Media cover's share); state and values one Media
+  // text gap right of it, the two lines centred on the map. Positions from
+  // the card's edge less the preview's 3 px frame line.
+  function placeVacuumMapPreview(tileElem) {
+    const style = getComputedStyle(tileElem);
+    const value = name => parseFloat(style.getPropertyValue(name)) || 0;
+    const inset = value('--climate-margin-x');
+    const button = value('--switch-bar-height');
+    const gap = value('--climate-grid-gap');
+    const top = value('--climate-slots-top');
+    const textGap = value('--vacuum-text-gap');
+    const discInset = value('--compact-inset');
+    const tileWidth = tileElem.offsetWidth;
+    const tileHeight = tileElem.offsetHeight;
+    if (!tileWidth || !tileHeight) return;
+    const rowTop = tileHeight - inset - button;
+    const edge = Math.max(0, Math.min(rowTop - gap - top, Math.floor(tileWidth * 42 / 100)));
+    const map = tileElem.querySelector(':scope > .tile-vacuum-map');
+    if (map) Object.assign(map.style, {left: (inset - 3) + 'px', top: (top - 3) + 'px',
+      width: edge + 'px', height: edge + 'px'});
+    const textX = inset + edge + textGap;
+    const state = tileElem.querySelector(':scope > .tile-switch-state');
+    const values = tileElem.querySelector(':scope > .tile-vacuum-values');
+    const stateH = state ? state.offsetHeight : 0;
+    const valuesH = values && !values.hidden ? values.offsetHeight : 0;
+    const blockTop = top + edge / 2 - (stateH + valuesH) / 2;
+    const right = Math.max(0, 2 * discInset - 3) + 'px';
+    if (state) Object.assign(state.style, {left: (textX - 3) + 'px', right, top: (blockTop - 3) + 'px'});
+    if (values) Object.assign(values.style, {left: (textX - 3) + 'px', right,
+      top: (blockTop + stateH - 3) + 'px'});
+  }
+
+  // bar_model(): the bar the device draws for this state. `upright`: a
+  // Fan's bar stands below the header (bar_orientation.h). `spans`: the
+  // tile's size ({w, h}), for the Vacuum's layouts.
+  function applyDevicePreview(tileElem, kind, d, halfHeight, upright = false, spans = null) {
+    if (!tileElem) return;
+    if (kind === 'vacuum') {
+      applyVacuumPreview(tileElem, d, halfHeight, spans);
+      return;
+    }
+    tileElem.classList.toggle('switch-bar', !halfHeight);
+    tileElem.classList.toggle('switch-upright', !halfHeight && kind === 'fan' && !!upright);
+    const bar = tileElem.querySelector('.tile-switch');
+    if (!bar) return;
+    const visual = devicePreviewVisual(kind, d);
+    const iconEl = tileElem.querySelector('.tile-icon');
+    const accent = iconEl ? getComputedStyle(iconEl).color : visual.color;
+    const card = getComputedStyle(tileElem).backgroundColor;
+    bar.style.setProperty('--switch-accent', accent);
+    bar.style.setProperty('--switch-card', card);
+    const control = cssColorChannels(getComputedStyle(bar).backgroundColor);
+    if (control) {
+      const base = toneOklch(control);
+      bar.style.setProperty('--switch-thumb-off', toneHex(toneRgb(base.L + toneStep(0.06), base.C, base.h)));
+      bar.style.setProperty('--device-button', toneHex(toneRgb(base.L + toneStep(0.04), base.C, base.h)));
+    }
+    bar.classList.toggle('is-unavailable', !d.valid || !d.available);
+    bar.classList.remove('is-on', 'knob-accent');
+    const parts = bar.querySelector('.tile-device-parts');
+    const symbol = bar.querySelector('.tile-switch-symbol');
+    let barKind = 'none';
+    let onResize = null;
+    let partsHtml = '';
+    let gapped = false;
+    let level = 0;
+    if (kind === 'lock') {
+      const s = d.state;
+      if (!['locked', 'locking', 'unlocked', 'unlocking', 'open', 'opening'].includes(s)) {
+        barKind = 'parts';
+        gapped = true;
+        partsHtml = devicePart('lock-open-variant', 'button') + devicePart('lock', 'button');
+      } else {
+        barKind = 'toggle';
+        bar.classList.toggle('is-on', s === 'locked' || s === 'locking');
+        bar.classList.add('knob-accent');
+        if (symbol) symbol.className = 'mdi mdi-' + visual.icon + ' tile-switch-symbol';
+      }
+    } else if (kind === 'alarm') {
+      if (['arming', 'pending', 'triggered'].includes(d.state)) {
+        barKind = 'parts';
+        partsHtml = devicePart('shield-off', 'button');
+      } else {
+        barKind = 'parts';
+        // alarm_slots(): Disarm first, then the supported modes in reverse.
+        const iconWidth = parseFloat(getComputedStyle(tileElem).getPropertyValue('--icon-size')) || 24;
+        const fitNow = () => Math.max(2, Math.min(6, Math.floor((bar.clientWidth || 60) / iconWidth)));
+        const fit = fitNow();
+        // The device counts the slots for the tile's size; here they follow
+        // the bar's width, also when the tile is resized or laid out later
+        // (a 2x1 tile kept the three slots of 1x1 and lit none).
+        onResize = () => {
+          if (fitNow() !== fit) applyDevicePreview(tileElem, kind, d, halfHeight, upright);
+        };
+        const modes = DEVICE_ALARM_MODES.filter(mode => d.features & mode[1]).slice(0, fit - 1);
+        const slots = [['disarmed', 0, 'shield-off'], ...modes.reverse()];
+        partsHtml = slots.map(slot => devicePart(slot[2], slot[0] === d.state ? 'lit' : '')).join('');
+      }
+    } else {
+      const on = d.state === 'on';
+      const percentage = on ? (d.percentage ?? 100) : 0;
+      const count = deviceSpeedCount(d);
+      if (!(d.features & 1)) {
+        barKind = 'toggle';
+        bar.classList.toggle('is-on', on);
+        if (symbol) symbol.className = 'mdi mdi-' + (on ? 'fan' : 'fan-off') + ' tile-switch-symbol';
+      } else if (count >= 2 && count <= 4) {
+        barKind = 'parts';
+        gapped = true;
+        const speed = percentage > 0 ? Math.max(1, Math.min(count, Math.round(percentage * count / 100))) : 0;
+        for (let i = 0; i < count; ++i) partsHtml += devicePart('', i < speed ? 'lit' : 'button');
+      } else {
+        barKind = 'dimmer';
+        level = on ? Math.max(1, percentage) : 0;
+      }
+    }
+    bar.dataset.bar = barKind;
+    if (parts) {
+      parts.classList.toggle('gapped', gapped);
+      parts.innerHTML = partsHtml;
+    }
+    bar.__switchFill = {kind: barKind === 'dimmer' ? 'dimmer' : 'none', level};
+    bar.__onResize = onResize;
+    drawSwitchPreviewFill(bar);
+    if (switchBarObserver && !bar.__switchObserved) {
+      bar.__switchObserved = true;
+      switchBarObserver.observe(bar);
+    }
+  }
+
+  function loadDeviceFields(tab, data, prefix) {
+    loadIconColorFields(tab, data);
+    const entity = document.getElementById(tab + '_' + prefix + '_entity');
+    const configured = data.sensor_entity || data[prefix + '_entity'] || '';
+    if (entity) {
+      entity.value = configured;
+    }
+    // State size like the Switch tile (Tile::sensor_value_font).
+    const font = document.getElementById(tab + '_' + prefix + '_value_font');
+    if (font) font.value = switchValueFont(data.sensor_value_font);
+    const popup = document.getElementById(tab + '_' + prefix + '_popup_open_mode');
+    if (popup) popup.value = data.popup_open_mode !== undefined ? String(data.popup_open_mode) : '1';
+    // A Fan's bar upright (bar_orientation.h).
+    const orientation = document.getElementById(tab + '_' + prefix + '_orientation');
+    if (orientation) orientation.value = Number(data.bar_orientation) === 1 ? '1' : '0';
+    // A Vacuum's popup layout (sensor_display_mode: 0 map left, 1 centred).
+    const layout = document.getElementById(tab + '_' + prefix + '_layout');
+    if (layout) layout.value = Number(data.sensor_display_mode) === 1 ? '1' : '0';
+    // A Vacuum's chosen map (empty: the map the Bridge finds on its device).
+    const map = document.getElementById(tab + '_' + prefix + '_map');
+    if (map) map.value = data.vacuum_map || '';
+    const every = document.getElementById(tab + '_' + prefix + '_every');
+    if (every) every.value = String(Math.max(3, Math.min(60, Number(data.image_slideshow_sec) || 5)));
+    if (typeof syncSwitchChoices === 'function') syncSwitchChoices(tab);
+    maybeFillTitleFromEntity(tab, '_' + prefix + '_entity');
+  }
+
+  function saveDeviceFields(tab, formData, prefix) {
+    saveIconColorFields(tab, formData);
+    const entity = document.getElementById(tab + '_' + prefix + '_entity')?.value || '';
+    formData.append(prefix + '_entity', entity);
+    formData.append('sensor_entity', entity);
+    formData.append('sensor_value_font',
+      switchValueFont(document.getElementById(tab + '_' + prefix + '_value_font')?.value));
+    const popup = document.getElementById(tab + '_' + prefix + '_popup_open_mode');
+    if (popup) formData.append('popup_open_mode', popup.value || '1');
+    const orientation = document.getElementById(tab + '_' + prefix + '_orientation');
+    if (orientation) formData.append('bar_orientation', orientation.value === '1' ? '1' : '0');
+    const layout = document.getElementById(tab + '_' + prefix + '_layout');
+    if (layout) formData.append('vacuum_layout', layout.value === '1' ? '1' : '0');
+    const map = document.getElementById(tab + '_' + prefix + '_map');
+    if (map) formData.append('vacuum_map', map.value || '');
+    const every = document.getElementById(tab + '_' + prefix + '_every');
+    if (every) formData.append('vacuum_every', String(Math.max(3, Math.min(60, Number(every.value) || 5))));
+  }
+
+  function resetDeviceFields(tab, prefix) {
+    resetIconColorFields(tab);
+    const entity = document.getElementById(tab + '_' + prefix + '_entity');
+    if (entity) entity.value = '';
+    const font = document.getElementById(tab + '_' + prefix + '_value_font');
+    if (font) font.value = '0';
+    const popup = document.getElementById(tab + '_' + prefix + '_popup_open_mode');
+    if (popup) popup.value = '1';
+    const orientation = document.getElementById(tab + '_' + prefix + '_orientation');
+    if (orientation) orientation.value = '0';
+    const layout = document.getElementById(tab + '_' + prefix + '_layout');
+    if (layout) layout.value = '0';
+    const map = document.getElementById(tab + '_' + prefix + '_map');
+    if (map) map.value = '';
+    const every = document.getElementById(tab + '_' + prefix + '_every');
+    if (every) every.value = '5';
+    if (typeof syncSwitchChoices === 'function') syncSwitchChoices(tab);
+  }
+
+  // The registry calls these by name (TileTypeDescriptor js_load/js_save/js_reset).
+  function loadLockFields(tab, data) { loadDeviceFields(tab, data, 'lock'); }
+  function saveLockFields(tab, formData) { saveDeviceFields(tab, formData, 'lock'); }
+  function resetLockFields(tab) { resetDeviceFields(tab, 'lock'); }
+  function loadAlarmFields(tab, data) { loadDeviceFields(tab, data, 'alarm'); }
+  function saveAlarmFields(tab, formData) { saveDeviceFields(tab, formData, 'alarm'); }
+  function resetAlarmFields(tab) { resetDeviceFields(tab, 'alarm'); }
+  function loadFanFields(tab, data) { loadDeviceFields(tab, data, 'fan'); }
+  function saveFanFields(tab, formData) { saveDeviceFields(tab, formData, 'fan'); }
+  function resetFanFields(tab) { resetDeviceFields(tab, 'fan'); }
+  function loadVacuumFields(tab, data) { loadDeviceFields(tab, data, 'vacuum'); }
+  function saveVacuumFields(tab, formData) { saveDeviceFields(tab, formData, 'vacuum'); }
+  function resetVacuumFields(tab) { resetDeviceFields(tab, 'vacuum'); }
+  // Calendar (27): up to four Home Assistant calendars in their own colors
+  // (types/calendar/calendar_tile.cpp). The preview mirrors the device: the
+  // events payload of /api/sensor_values calendar_values (calendar_events.h),
+  // the layouts of layout_of() and the words of CALENDAR_I18N (types/calendar/web.cpp).
+  const CALENDAR_FIELDS = ['calendar_entity', 'calendar_entity_2', 'calendar_entity_3', 'calendar_entity_4'];
+  // calendar_model::calendar_color(): dark and light theme.
+  const CALENDAR_COLORS = [['#5B9BF0', '#2F6FD0'], ['#4DB6AC', '#00897B'], ['#B388FF', '#7E57C2'], ['#FFA65C', '#E07020']];
+  // i18n::CalendarLabel order.
+  const CALENDAR_LABEL = {
+    type: 0, entity: 1, calendarN: 2, view: 3, agenda: 4, week: 5, month: 6, weekStart: 7, automatic: 8,
+    allDay: 9, noEvents: 10, nothingPlanned: 11, inDays: 12, inHours: 13, inHoursMinutes: 14, inMinutes: 15,
+    now: 16, until: 17, upNext: 18, eventCount: 19, oneEvent: 20, list: 21, noData: 22, today: 23, next: 24
+  };
+  const CALENDAR_AGENDA_DAYS = 31;
+
+  function calendarI18n() { return typeof CALENDAR_I18N === 'object' ? CALENDAR_I18N : {}; }
+  function calendarLabel(key, ...args) {
+    let text = String(calendarI18n().labels?.[CALENDAR_LABEL[key]] ?? '');
+    for (const arg of args) text = text.replace(/%[us]/, String(arg));
+    return text;
+  }
+  function calendarColor(index) {
+    const light = typeof panelLight === 'function' && panelLight();
+    return CALENDAR_COLORS[index % CALENDAR_COLORS.length][light ? 1 : 0];
+  }
+
+  // calendar_store::split_entities(): at most four calendar ids, no duplicates.
+  function calendarEntitiesOf(list) {
+    const out = [];
+    for (const raw of String(list || '').split(',')) {
+      const id = raw.trim();
+      if (/^calendar\.[a-z0-9_]+$/.test(id) && !out.includes(id) && out.length < 4) out.push(id);
+    }
+    return out;
+  }
+
+  // Days since 1970-01-01 (calendar_events::days_from_civil).
+  function calendarDay(y, m, d) { return Math.floor(Date.UTC(y, m - 1, d) / 86400000); }
+  function calendarCivil(day) {
+    const date = new Date(day * 86400000);
+    return {y: date.getUTCFullYear(), m: date.getUTCMonth() + 1, d: date.getUTCDate()};
+  }
+  function calendarWeekday(day) { return new Date(day * 86400000).getUTCDay(); }
+  // "2026-10-24" or "2026-10-24T10:05" -> {day, minute} (minute -1: all day).
+  function calendarStamp(text) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/.exec(String(text || ''));
+    if (!match) return null;
+    const [y, m, d] = [Number(match[1]), Number(match[2]), Number(match[3])];
+    if (m < 1 || m > 12 || d < 1 || d > new Date(Date.UTC(y, m, 0)).getUTCDate()) return null;
+    if (match[4] === undefined) return {day: calendarDay(y, m, d), minute: -1};
+    const hh = Number(match[4]), mm = Number(match[5]);
+    if (hh > 23 || mm > 59) return null;
+    return {day: calendarDay(y, m, d), minute: hh * 60 + mm};
+  }
+
+  // calendar_events::parse(): a missing payload stays apart from an empty one.
+  function parseCalendarPreviewPayload(value) {
+    const out = {valid: false, available: false, from: 0, to: -1, events: []};
+    const text = value === undefined || value === null ? '' : String(value).trim();
+    if (!text.startsWith('{')) return out;
+    let obj;
+    try { obj = JSON.parse(text); } catch (e) { return out; }
+    if (!obj || obj.v !== 1) return out;
+    const from = calendarStamp(obj.from), to = calendarStamp(obj.to);
+    if (!from || !to || to.day < from.day) return out;
+    out.valid = true;
+    out.available = typeof obj.state === 'string' && obj.state !== 'unavailable';
+    out.from = from.day;
+    out.to = to.day;
+    for (const item of Array.isArray(obj.e) ? obj.e.slice(0, 96) : []) {
+      if (!item || typeof item !== 'object') continue;
+      const s = calendarStamp(item.s), e = calendarStamp(item.e);
+      if (!s || !e || (s.minute < 0) !== (e.minute < 0)) continue;
+      const event = {startDay: s.day, startMin: s.minute, endDay: e.day, endMin: e.minute,
+        title: String(item.t || ''), location: String(item.l || '')};
+      if (s.minute < 0) {
+        event.endDay = e.day > s.day ? e.day - 1 : s.day;
+      } else {
+        if (e.day < s.day || (e.day === s.day && e.minute < s.minute)) { event.endDay = s.day; event.endMin = s.minute; }
+        if (event.endMin === 0 && event.endDay > s.day) { event.endDay -= 1; event.endMin = 1440; }
+      }
+      out.events.push(event);
+    }
+    out.events.sort((a, b) => a.startDay - b.startDay || a.startMin - b.startMin || a.title.localeCompare(b.title));
+    return out;
+  }
+
+  function calendarPreviewSources(entities, meta = sensorMetaCache) {
+    return entities.map(id => parseCalendarPreviewPayload(meta?.calendarValues?.[id] ?? ''));
+  }
+  function calendarItemsOn(sources, day) {
+    const items = [];
+    sources.forEach((source, calendar) => {
+      if (!source.valid) return;
+      for (const event of source.events) {
+        if (event.startDay > day) break;
+        if (event.endDay >= day) items.push({event, calendar});
+      }
+    });
+    const start = item => item.event.startMin < 0 ? -1 : (item.event.startDay === day ? item.event.startMin : 0);
+    return items.sort((a, b) => start(a) - start(b) || a.calendar - b.calendar || a.event.title.localeCompare(b.event.title));
+  }
+  function calendarNow() {
+    const now = new Date();
+    return {today: calendarDay(now.getFullYear(), now.getMonth() + 1, now.getDate()), minute: now.getHours() * 60 + now.getMinutes()};
+  }
+  function calendarClock(minute) {
+    const value = ((minute % 1440) + 1440) % 1440;
+    const pad = n => String(n).padStart(2, '0');
+    return pad(Math.floor(value / 60)) + ':' + pad(value % 60);
+  }
+  function calendarDayLabel(day, now) {
+    const t = calendarI18n();
+    if (day === now.today) return t.today || 'Today';
+    if (day === now.today + 1) return t.tomorrow || 'Tomorrow';
+    const c = calendarCivil(day);
+    const date = String(t.shortDate || '{d} {m}').replace('{d}', String(c.d)).replace('{m}', t.monthsShort?.[c.m - 1] || '');
+    return (t.weekdaysShort?.[calendarWeekday(day)] || '') + ' ' + date;
+  }
+  // calendar_model::next_event() within the agenda's days.
+  function calendarNextEvent(sources, now) {
+    let best = null;
+    const rank = n => n.ongoing && n.event.startMin >= 0 ? 0 : (n.ongoing ? 1 : 2);
+    sources.forEach((source, calendar) => {
+      if (!source.valid) return;
+      for (const event of source.events) {
+        if (event.startDay > now.today + CALENDAR_AGENDA_DAYS) break;
+        if (event.endDay < now.today) continue;
+        if (event.startMin >= 0 && event.endDay === now.today && event.endMin <= now.minute) continue;
+        const ongoing = event.startDay < now.today ||
+          (event.startDay === now.today && (event.startMin < 0 || event.startMin <= now.minute));
+        const candidate = {event, calendar, ongoing, day: ongoing ? now.today : event.startDay};
+        if (!best || rank(candidate) < rank(best) ||
+            (rank(candidate) === rank(best) && rank(candidate) === 2 &&
+             (candidate.day < best.day || (candidate.day === best.day && event.startMin < best.event.startMin)))) {
+          best = candidate;
+        }
+      }
+    });
+    return best;
+  }
+  function calendarCountdown(minutes) {
+    if (minutes < 60) return calendarLabel('inMinutes', Math.max(1, minutes));
+    const h = Math.floor(minutes / 60), m = minutes % 60;
+    return m ? calendarLabel('inHoursMinutes', h, m) : calendarLabel('inHours', h);
+  }
+  // calendar_text::when_line().
+  function calendarWhenLine(next, now, brief) {
+    if (!next) return '';
+    const e = next.event;
+    const dot = ' · ';
+    if (next.ongoing) {
+      if (e.startMin < 0) return e.endDay > now.today ? calendarLabel('until', calendarDayLabel(e.endDay, now)) : calendarLabel('allDay');
+      return calendarLabel('until', e.endDay === now.today ? calendarClock(e.endMin) : calendarDayLabel(e.endDay, now));
+    }
+    const days = next.day - now.today;
+    const time = e.startMin < 0 ? '' : calendarClock(e.startMin);
+    if (days === 0) {
+      if (brief || e.startMin < 0) return e.startMin < 0 ? calendarLabel('allDay') : time;
+      return time + dot + calendarCountdown(e.startMin - now.minute);
+    }
+    if (days === 1) return calendarDayLabel(next.day, now) + (time ? dot + time : '');
+    if (days < 7) return (calendarI18n().weekdaysShort?.[calendarWeekday(next.day)] || '') + (time ? dot + time : '');
+    return brief ? calendarDayLabel(next.day, now) : calendarDayLabel(next.day, now) + dot + calendarLabel('inDays', days);
+  }
+  // calendar_text::event_count().
+  function calendarEventCount(count) {
+    if (!count) return calendarLabel('noEvents');
+    return count === 1 ? calendarLabel('oneEvent') : calendarLabel('eventCount', count);
+  }
+  // calendar_model::remaining_today().
+  function calendarRemainingToday(sources, now) {
+    return calendarItemsOn(sources, now.today).filter(item => !(item.event.startMin >= 0 &&
+      item.event.endDay === now.today && item.event.endMin <= now.minute)).length;
+  }
+  function calendarMinutesUntil(next, now) {
+    const start = next.event.startMin < 0 ? 0 : next.event.startMin;
+    return Math.max(0, (next.day - now.today) * 1440 + start - now.minute);
+  }
+  // calendar_text::chip_lines(): the half-height tile's two lines.
+  function calendarChipLines(next, now, wide) {
+    const e = next.event;
+    const dot = ' · ';
+    const title = e.title || '--';
+    if (next.ongoing || !wide) {
+      return {top: calendarLabel(next.ongoing ? 'now' : 'next') + dot + calendarWhenLine(next, now, true), value: title};
+    }
+    const days = next.day - now.today;
+    let when;
+    if (days === 0) when = calendarCountdown(calendarMinutesUntil(next, now));
+    else if (days === 1) when = calendarDayLabel(next.day, now);
+    else if (days < 7) when = calendarI18n().weekdaysShort?.[calendarWeekday(next.day)] || '';
+    else when = calendarDayLabel(next.day, now) + dot + calendarLabel('inDays', days);
+    return {top: calendarLabel('next') + dot + when, value: e.startMin < 0 ? title : title + dot + calendarClock(e.startMin)};
+  }
+  // calendar_text::countdown_lines(): the 1x1 tile's large day and countdown.
+  function calendarCountdownLines(next, now) {
+    const e = next.event;
+    const days = next.day - now.today;
+    if (next.ongoing) {
+      return {top: e.startMin < 0 ? calendarDayLabel(now.today, now) : calendarLabel('now'), value: calendarWhenLine(next, now, true)};
+    }
+    if (days === 0) return {top: calendarDayLabel(now.today, now), value: calendarCountdown(calendarMinutesUntil(next, now))};
+    if (days === 1) return {top: calendarDayLabel(next.day, now), value: e.startMin < 0 ? calendarLabel('allDay') : calendarClock(e.startMin)};
+    return {
+      top: days < 7 ? (calendarI18n().weekdays?.[calendarWeekday(next.day)] || '') : calendarDayLabel(next.day, now),
+      value: calendarLabel('inDays', days)
+    };
+  }
+  function calendarWeekStart(stored) {
+    const value = Number(stored);
+    if ([0, 1, 6].includes(value)) return value;
+    const fallback = Number(calendarI18n().firstWeekday);
+    return fallback >= 0 && fallback <= 6 ? fallback : 1;
+  }
+
+  // calendar_tile.cpp layout_of().
+  function calendarPreviewLayout(tile) {
+    const w = Number(tile.span_w) || 1, h = Number(tile.span_h) || 1;
+    const view = Number(tile.sensor_display_mode) || 0;
+    if (h === 0.5) return view === 3 ? 'count' : 'compact';
+    if (view === 2 && calendarI18n().monthView && w >= 2 && h >= 2) return 'month';
+    if (view === 1 && w >= 1.5) return 'week';
+    if (h >= 2) return 'agenda';
+    return w >= 2 ? 'next' : 'countdown';
+  }
+  // The title the tile shows: the month's on the month view, the next event's
+  // on the countdown, none at half height.
+  function calendarPreviewTitle(tile, title, meta = sensorMetaCache) {
+    const layout = calendarPreviewLayout(tile);
+    if (layout === 'compact' || layout === 'count') return '';
+    if (layout === 'countdown') {
+      const sources = calendarPreviewSources(calendarEntitiesOf(tile.sensor_entity), meta);
+      const next = sources.some(source => source.valid) ? calendarNextEvent(sources, calendarNow()) : null;
+      return next ? (next.event.title || '--') : title;
+    }
+    if (layout === 'month') {
+      const c = calendarCivil(calendarNow().today);
+      return (calendarI18n().months?.[c.m - 1] || '') + ' ' + c.y;
+    }
+    return title;
+  }
+  function calendarPreviewIconColor(tile) {
+    return calendarEntitiesOf(tile.sensor_entity).length ? calendarColor(0) : '';
+  }
+
+  function calendarGridHtml(sources, first, rows, now, month, weekStart) {
+    const t = calendarI18n();
+    let html = '<div class="calendar-preview-grid' + (month ? ' month' : ' week') + '" style="--calendar-rows:' + rows + '">';
+    if (month) {
+      for (let i = 0; i < 7; ++i) html += '<span class="calendar-preview-dow">' + escapeHtml(t.weekdaysShort?.[(weekStart + i) % 7] || '') + '</span>';
+    }
+    const shownMonth = calendarCivil(now.today).m;
+    for (let i = 0; i < rows * 7; ++i) {
+      const day = first + i;
+      const c = calendarCivil(day);
+      const cls = ['calendar-preview-day'];
+      if (day === now.today) cls.push('today');
+      if (day === now.today && !month) cls.push('strip-today');
+      else if (month && c.m !== shownMonth) cls.push('outside');
+      else if (day < now.today) cls.push('past');
+      const dots = month && c.m !== shownMonth ? [] : [...new Set(calendarItemsOn(sources, day).map(item => item.calendar))]
+        .sort().map(index => '<i style="background:' + calendarColor(index) + '"></i>').join('');
+      const tint = day === now.today && !month && sources.length ? ' style="--calendar-tint:' + calendarColor(0) + '"' : '';
+      html += '<span class="' + cls.join(' ') + '"' + tint + '>' +
+        (month ? '' : '<small>' + escapeHtml(t.weekdaysShort?.[calendarWeekday(day)] || '') + '</small>') +
+        '<b>' + c.d + '</b><span class="calendar-preview-dots">' + dots + '</span></span>';
+    }
+    return html + '</div>';
+  }
+
+  // The content below the header (or the two lines of a half-height tile).
+  function calendarPreviewExtraHtml(tile, meta = sensorMetaCache) {
+    const entities = calendarEntitiesOf(tile.sensor_entity);
+    const sources = calendarPreviewSources(entities, meta);
+    const layout = calendarPreviewLayout(tile);
+    const now = calendarNow();
+    const hasData = sources.some(source => source.valid);
+    const message = !entities.length ? '--' : (!hasData ? calendarLabel('noData') : '');
+    if (layout === 'count') {
+      const what = !entities.length ? '--' : (!hasData ? calendarLabel('noData') : calendarEventCount(calendarRemainingToday(sources, now)));
+      return '<div class="tile-title calendar-preview-when">' + escapeHtml(calendarI18n().today || 'Today') + '</div>' +
+        '<div class="tile-value calendar-preview-what">' + escapeHtml(what) + '</div>';
+    }
+    if (layout === 'compact' || layout === 'next' || layout === 'countdown') {
+      const next = message ? null : calendarNextEvent(sources, now);
+      let what = message || (next ? next.event.title : calendarLabel('nothingPlanned'));
+      let when = next ? calendarWhenLine(next, now, false) : '';
+      if (next && layout === 'compact') {
+        const lines = calendarChipLines(next, now, Number(tile.span_w) >= 2);
+        when = lines.top;
+        what = lines.value;
+      } else if (next && layout === 'countdown') {
+        const lines = calendarCountdownLines(next, now);
+        what = lines.top;
+        when = lines.value;
+      }
+      if (layout === 'compact') {
+        return '<div class="tile-title calendar-preview-when">' + escapeHtml(when) + '</div>' +
+          '<div class="tile-value calendar-preview-what">' + escapeHtml(what) + '</div>';
+      }
+      if (layout === 'countdown') {
+        return '<div class="calendar-preview-body countdown">' +
+          '<div class="calendar-preview-what">' + escapeHtml(what) + '</div>' +
+          '<div class="calendar-preview-when">' + escapeHtml(when) + '</div></div>';
+      }
+      return '<div class="calendar-preview-body next' + (Number(tile.span_w) >= 2 ? ' wide' : '') + '">' +
+        (next ? '<span class="calendar-preview-bar" style="background:' + calendarColor(next.calendar) + '"></span>' : '') +
+        '<div class="calendar-preview-what">' + escapeHtml(what) + '</div>' +
+        '<div class="calendar-preview-when">' + escapeHtml(when) + '</div></div>';
+    }
+    if (layout === 'week' || layout === 'month') {
+      const weekStart = calendarWeekStart(tile.sensor_decimals);
+      let first, rows = 1;
+      if (layout === 'month') {
+        const c = calendarCivil(now.today);
+        const day1 = calendarDay(c.y, c.m, 1);
+        first = day1 - (calendarWeekday(day1) - weekStart + 7) % 7;
+        const last = calendarDay(c.y, c.m, new Date(Date.UTC(c.y, c.m, 0)).getUTCDate());
+        rows = Math.floor((last - first) / 7) + 1;
+      } else if ((Number(tile.span_h) || 1) < 2) {
+        // calendar_model::strip_first_day(): a one-row strip starts today.
+        first = now.today;
+      } else {
+        first = now.today - (calendarWeekday(now.today) - weekStart + 7) % 7;
+      }
+      return '<div class="calendar-preview-body">' + calendarGridHtml(sources, first, rows, now, layout === 'month', weekStart) + '</div>';
+    }
+    // Agenda: the coming days with events (cut by the tile's height in CSS).
+    let html = '<div class="calendar-preview-body agenda">';
+    if (message) return html + '<div class="calendar-preview-message">' + escapeHtml(message) + '</div></div>';
+    let rows = 0;
+    const limit = Math.max(2, Math.round((Number(tile.span_h) || 2) * 3));
+    for (let day = now.today; day <= now.today + CALENDAR_AGENDA_DAYS && rows < limit; ++day) {
+      const items = calendarItemsOn(sources, day).filter(item => !(day === now.today && item.event.startMin >= 0 &&
+        item.event.endDay === day && item.event.endMin <= now.minute));
+      if (!items.length) continue;
+      html += '<div class="calendar-preview-daylabel">' + escapeHtml(calendarDayLabel(day, now)) + '</div>';
+      for (const item of items) {
+        if (rows >= limit) break;
+        const start = item.event.startMin < 0 ? calendarLabel('allDay')
+          : calendarClock(item.event.startDay === day ? item.event.startMin : 0);
+        html += '<div class="calendar-preview-row"><span class="calendar-preview-time">' + escapeHtml(start) + '</span>' +
+          '<span class="calendar-preview-bar" style="background:' + calendarColor(item.calendar) + '"></span>' +
+          '<span class="calendar-preview-title">' + escapeHtml(item.event.title) + '</span></div>';
+        ++rows;
+      }
+    }
+    if (!rows) html += '<div class="calendar-preview-message">' + escapeHtml(calendarLabel('nothingPlanned')) + '</div>';
+    return html + '</div>';
+  }
+
+  // The tile the live preview draws from the open fields.
+  function calendarTileFromInputs(tab, spanW, spanH) {
+    return {
+      sensor_entity: calendarEntityList(tab),
+      sensor_display_mode: Number(document.getElementById(tab + '_calendar_view')?.value || 0),
+      sensor_decimals: Number(document.getElementById(tab + '_calendar_week_start')?.value ?? 255),
+      span_w: spanW,
+      span_h: spanH
+    };
+  }
+
+  function calendarEntityList(tab) {
+    return calendarEntitiesOf(CALENDAR_FIELDS.map(field => document.getElementById(tab + '_' + field)?.value || '').join(','))
+      .join(',');
+  }
+
+  function loadCalendarFields(tab, data) {
+    const entities = calendarEntitiesOf(data.sensor_entity || data.calendar_entities || '');
+    CALENDAR_FIELDS.forEach((field, i) => {
+      const input = document.getElementById(tab + '_' + field);
+      if (input) input.value = entities[i] || '';
+    });
+    const view = document.getElementById(tab + '_calendar_view');
+    if (view) {
+      const value = String(Number(data.sensor_display_mode) || 0);
+      view.value = Array.from(view.options || []).some(option => option.value === value) ? value : '0';
+    }
+    const weekStart = document.getElementById(tab + '_calendar_week_start');
+    if (weekStart) {
+      const value = Number(data.sensor_decimals);
+      weekStart.value = [0, 1, 6].includes(value) ? String(value) : '255';
+    }
+    const popup = document.getElementById(tab + '_calendar_popup_open_mode');
+    if (popup) popup.value = data.popup_open_mode !== undefined ? String(data.popup_open_mode) : '1';
+    maybeFillTitleFromEntity(tab, '_calendar_entity');
+  }
+
+  function saveCalendarFields(tab, formData) {
+    const entities = calendarEntityList(tab).split(',').filter(Boolean);
+    CALENDAR_FIELDS.forEach((field, i) => formData.append(field, entities[i] || ''));
+    formData.append('sensor_entity', entities.join(','));
+    formData.append('calendar_view', document.getElementById(tab + '_calendar_view')?.value || '0');
+    formData.append('calendar_week_start', document.getElementById(tab + '_calendar_week_start')?.value || '255');
+    const popup = document.getElementById(tab + '_calendar_popup_open_mode');
+    if (popup) formData.append('popup_open_mode', popup.value || '1');
+  }
+
+  function resetCalendarFields(tab) {
+    for (const field of CALENDAR_FIELDS) {
+      const input = document.getElementById(tab + '_' + field);
+      if (input) input.value = '';
+    }
+    const view = document.getElementById(tab + '_calendar_view');
+    if (view) view.value = '0';
+    const weekStart = document.getElementById(tab + '_calendar_week_start');
+    if (weekStart) weekStart.value = '255';
+    const popup = document.getElementById(tab + '_calendar_popup_open_mode');
     if (popup) popup.value = '1';
   }
 
@@ -11001,8 +20153,8 @@ function maybeFillTitleFromMedia(tab) {
   }
 
   function updateMediaValuePreview(tab) {
-    // Media tiles stay intentionally simple in the WebUI preview:
-    // only icon and configured tile title are shown.
+    // The tile preview renders the media state with the tile
+    // (applyMediaPreview in updateTilePreview); nothing to refresh here.
   }
 
   function loadMediaFields(tab, data) {
@@ -11010,6 +20162,9 @@ function maybeFillTitleFromMedia(tab) {
     const prefix = tab;
     const el = document.getElementById(prefix + '_media_entity');
     if (el) el.value = data.sensor_entity || data.media_entity || '';
+    const layout = document.getElementById(prefix + '_media_layout');
+    if (layout) layout.value = Number(data.sensor_display_mode) === 1 ? '1' : '0';
+    if (typeof syncSwitchChoices === 'function') syncSwitchChoices(tab);
     maybeFillTitleFromMedia(tab);
     updateMediaValuePreview(tab);
   }
@@ -11020,6 +20175,7 @@ function maybeFillTitleFromMedia(tab) {
     const entity = document.getElementById(prefix + '_media_entity')?.value || '';
     formData.append('media_entity', entity);
     formData.append('sensor_entity', entity);
+    formData.append('media_layout', document.getElementById(prefix + '_media_layout')?.value === '1' ? '1' : '0');
   }
 
   function resetMediaFields(tab) {
@@ -11027,6 +20183,256 @@ function maybeFillTitleFromMedia(tab) {
     const prefix = tab;
     const el = document.getElementById(prefix + '_media_entity');
     if (el) el.value = '';
+    const layout = document.getElementById(prefix + '_media_layout');
+    if (layout) layout.value = '0';
+    if (typeof syncSwitchChoices === 'function') syncSwitchChoices(tab);
+  }
+
+  // --- Tile preview -------------------------------------------------------
+  // What types/media/renderer.cpp builds and update_media_tile_state()
+  // (tiles/runtime/tile_renderer.cpp) fills from the cached payload, placed
+  // by set_media_cover_text_layout() (content_layout.cpp) in display pixels
+  // (MEDIA_TILE_LAYOUT).
+
+  // sanitize_media_display_text().
+  function mediaPreviewText(value) {
+    return typeof value === 'string'
+      ? value.replaceAll('`', "'").replace(/[\r\n]/g, ' ').trim() : '';
+  }
+
+  function parseMediaPreviewPayload(raw) {
+    const text = String(raw ?? '').trim();
+    if (!text) return null;
+    if (!text.startsWith('{')) return {state: text};
+    let data;
+    try { data = JSON.parse(text); } catch (_) { return null; }
+    if (!data || typeof data !== 'object') return null;
+    const field = key => mediaPreviewText(data[key]);
+    return {
+      state: field('state'), title: field('media_title'), artist: field('media_artist'),
+      album: field('media_album_name'), app: field('app_name'), source: field('source'),
+      channel: field('media_channel'),
+      cover: field('entity_picture') || field('media_image_url')
+    };
+  }
+
+  // media/state_icon.h: the player's icon in its state form (speaker-play,
+  // speaker-pause, speaker-off ...) where MDI has one, like the device's
+  // tile; the page's MDI font tells which forms exist (found ones are kept;
+  // a function property, so a preview drawn before this file ran works).
+  function mediaPreviewIcon(state, iconName) {
+    const suffix = {playing: '-play', paused: '-pause', off: '-off', standby: '-off'}[
+      String(state?.state || '').trim().toLowerCase()];
+    if (!iconName || !suffix) return iconName;
+    const mediaKnownIcons = mediaPreviewIcon.known || (mediaPreviewIcon.known = new Set());
+    const variant = iconName + suffix;
+    if (!mediaKnownIcons.has(variant)) {
+      const probe = document.createElement('i');
+      probe.className = 'mdi mdi-' + variant;
+      probe.style.cssText = 'position:absolute;visibility:hidden';
+      document.body.appendChild(probe);
+      const glyph = getComputedStyle(probe, '::before').content;
+      probe.remove();
+      if (glyph && glyph !== 'none' && glyph !== 'normal' && glyph !== '""') mediaKnownIcons.add(variant);
+    }
+    return mediaKnownIcons.has(variant) ? variant : iconName;
+  }
+
+  // media_empty_title_label(): like Home Assistant, "Unavailable" and
+  // "Unknown", else the player state or "No playback".
+  function mediaPreviewEmptyTitle(state) {
+    const key = String(state || '').trim().toLowerCase();
+    const labels = {unavailable: 'unavailable', unknown: 'unknown', playing: 'playing', paused: 'paused',
+                    idle: 'idle', standby: 'standby', off: 'off'};
+    return MEDIA_I18N[labels[key]] || MEDIA_I18N.noPlayback;
+  }
+
+  // Positions the title and subtitle like set_media_cover_text_layout().
+  // The playing bars stand over the title in the same centred block.
+  function mediaPreviewTextLayout(L, width, height, large, coverVisible, hasSubtitle, hasBars = false) {
+    const top = large ? L.coverTop : L.coverTopSmall;
+    const footer = L.button - L.buttonBottom + L.footerGap;
+    const side = Math.max(1, Math.min(L.maxCover, Math.trunc(width * 42 / 100), height - top - footer));
+    const textX = coverVisible ? side + L.textAfterCover : L.textLeft;
+    const titleHeight = (large ? L.title : L.titleSmall).line;
+    const gap = hasSubtitle ? L.subtitleGap : 0;
+    const barsHeight = hasBars ? L.barsHeight + L.barsGap : 0;
+    const block = barsHeight + titleHeight + gap + (hasSubtitle ? L.subtitle.line : 0);
+    const center = coverVisible ? top + Math.trunc(side / 2) : Math.trunc((top + height - footer) / 2);
+    const barsY = Math.max(top, Math.min(center - Math.trunc(block / 2), height - footer - block));
+    const titleY = barsY + barsHeight;
+    return {side, top, textX, textWidth: Math.max(1, width - textX - L.textRight), barsY, titleY,
+            subtitleY: titleY + titleHeight + gap};
+  }
+
+  // "From cover" (tile_icon_source.cpp apply_cover): the icon takes the color
+  // the panel sampled from the cover it shows (a former cover tile tint too,
+  // tile_icon_colors::cover_colors_icon); a rule's icon color wins. "Fill"
+  // then follows the icon (applyIconDiscTint), the cover never tints the
+  // tile itself (user 2026-10-11).
+  function applyMediaCoverTint(el, record, coverColor) {
+    mediaPreviewBarsColor(el);
+    if (!el || !coverColor || typeof parseIconColorRecord !== 'function') return;
+    const parsed = parseIconColorRecord(record || '');
+    const cover = parsed.cover || {icon: false, tile: 0};
+    const layer = typeof iconColorRecordSource === 'function' ? iconColorRecordSource(record || '') : null;
+    const ruleIcon = layer && layer.enabled && typeof iconColorRuleColorsIcon === 'function' && iconColorRuleColorsIcon(layer);
+    if ((cover.icon || cover.tile > 0) && !ruleIcon) {
+      const icon = el.querySelector(':scope > .tile-icon');
+      if (icon) icon.style.color = coverColor;
+    }
+    mediaPreviewBarsColor(el);
+  }
+
+  // The playing bars take the tile icon's color like on the panel (its
+  // label's color): set after the preview is filled and after every tint.
+  function mediaPreviewBarsColor(el) {
+    const icon = el?.querySelector(':scope > .tile-icon');
+    if (icon) el.style.setProperty('--media-bars', getComputedStyle(icon).color);
+  }
+
+  // An artwork loaded: the texts move beside it like on the device.
+  function mediaPreviewCoverLoaded(image) {
+    const tile = image?.closest('.tile');
+    const cover = image?.parentElement;
+    if (!tile || !cover) return;
+    cover.hidden = false;
+    tile.querySelectorAll(':scope > [data-cover-style]').forEach(node => {
+      node.setAttribute('style', node.dataset.coverStyle);
+    });
+  }
+
+  // Fills a rendered media preview tile: header fallbacks, title, subtitle,
+  // artwork and the three controls. iconName is the tile's resolved icon,
+  // displayName the entity's name for a tile without its own title.
+  function applyMediaPreview(el, state, tile, iconName, displayName) {
+    if (!el || typeof MEDIA_TILE_LAYOUT === 'undefined') return;
+    const L = MEDIA_TILE_LAYOUT;
+    // The tile's own grid sizes (inherited variables), not the page's: a grid
+    // such as the screensaver's has its own cells.
+    const rootStyle = getComputedStyle(el.isConnected ? el : document.documentElement);
+    const scale = parseFloat(rootStyle.getPropertyValue('--radius-preview-scale')) || 0.5;
+    const entity = String(tile?.sensor_entity || '');
+
+    // Header: the television icon and the entity's name stand in like on
+    // the device.
+    if (!iconName && !el.querySelector(':scope > .tile-icon')) {
+      el.insertAdjacentHTML('afterbegin',
+        '<i class="mdi mdi-' + mediaPreviewIcon(state, 'television') + ' tile-icon"></i>');
+    }
+    if (!el.querySelector(':scope > .tile-title')) {
+      const name = displayName || (entity && typeof titleFromEntity === 'function' ? titleFromEntity(entity) : '') ||
+        'Media';
+      const icon = el.querySelector(':scope > .tile-icon');
+      const title = '<div class="tile-title">' + tileTitleHtml(name) + '</div>';
+      if (icon) icon.insertAdjacentHTML('afterend', title);
+      else el.insertAdjacentHTML('afterbegin', title);
+    }
+
+    const spanW = Math.max(1, Number(tile?.span_w) || 1);
+    const spanH = Math.max(1, Number(tile?.span_h) || 1);
+    const large = spanW > 1 || spanH > 1;
+    const cellW = parseFloat(rootStyle.getPropertyValue('--preview-cell-w'));
+    const cellH = parseFloat(rootStyle.getPropertyValue('--preview-cell-h'));
+    const previewGap = parseFloat(rootStyle.getPropertyValue('--preview-gap')) || 0;
+    // The card in display pixels, from the preview tile's size like the grid
+    // gives it (.fractional-tile), never measured: a re-rendered tile at a
+    // half position is placed only after it is filled.
+    const cardW = Math.round((cellW > 0 ? spanW * (cellW + previewGap) - previewGap : el.offsetWidth) / scale);
+    const cardH = Math.round((cellH > 0 ? spanH * (cellH + previewGap) - previewGap : el.offsetHeight) / scale);
+    const width = cardW - 2 * L.padH;
+    const height = cardH - 2 * L.padV;
+    // Unrounded sizes, the glyphs on the LVGL baseline as this browser draws
+    // them (text-baseline.js).
+    const font = f => {
+      const size = Math.max(6, f.px * scale);
+      const line = f.line * scale;
+      return {size, line, shift: typeof previewBaselineShift === 'function'
+        ? previewBaselineShift(size, line, (f.line - f.base) * scale)
+        : (f.line / 2 - f.base - 0.364 * f.px) * scale};
+    };
+    const fontCss = f => 'font-size:' + f.size.toFixed(2) + 'px;line-height:' + f.line.toFixed(2) + 'px;';
+    // Display pixels in the content area to the preview's absolute position
+    // inside the 3 px editor border.
+    const at = (x, y) => 'left:' + ((L.padH + x) * scale - 3).toFixed(2) + 'px;top:' +
+      ((L.padV + y) * scale - 3).toFixed(2) + 'px;';
+
+    const titleText = state ? (state.title || state.channel) : '';
+    const mainText = titleText || mediaPreviewEmptyTitle(state?.state);
+    let subtitle = state ? (state.artist || state.album || state.app || state.source) : '';
+    if (subtitle && subtitle.toLowerCase() === mainText.trim().toLowerCase()) subtitle = '';
+    const titleFont = font(large ? L.title : L.titleSmall);
+    const subtitleFont = font(L.subtitle);
+    // The playing bars while a song plays or pauses (update_media_tile_state).
+    const playerState = String(state?.state || '').trim().toLowerCase();
+    const hasBars = playerState === 'playing' || playerState === 'paused';
+    const plain = mediaPreviewTextLayout(L, width, height, large, false, !!subtitle, hasBars);
+    const covered = mediaPreviewTextLayout(L, width, height, large, true, !!subtitle, hasBars);
+    const textStyle = (layout, y, f) => at(layout.textX, y) + 'width:' + (layout.textWidth * scale).toFixed(2) + 'px;' +
+      fontCss(f) + 'margin-top:' + f.shift.toFixed(2) + 'px;';
+
+    let html = '';
+    const hasCover = !!state?.cover && /^(https?:|data:image\/)/i.test(state.cover);
+    // The artwork already shown stays: a re-render (sensor refresh, layout)
+    // only moves it, so it never blinks away until a new copy has loaded
+    // (user 2026-10-08). A new artwork shows once it loaded.
+    const shownCover = hasCover ? [...el.querySelectorAll(':scope > .media-preview-cover:not([hidden])')]
+      .find(node => node.querySelector('img')?.getAttribute('src') === state.cover &&
+        node.querySelector('img')?.complete) : null;
+    const coverStyle = hasCover ? at(L.coverLeft, plain.top) + 'width:' + (plain.side * scale).toFixed(2) + 'px;height:' +
+      (plain.side * scale).toFixed(2) + 'px;border-radius:' + (L.coverRadius * scale).toFixed(2) + 'px' : '';
+    if (hasCover && !shownCover) {
+      html += '<div class="media-preview-cover" hidden style="' + coverStyle + '">' +
+        '<img src="' + escapeHtml(state.cover) + '" alt="" referrerpolicy="no-referrer" ' +
+        'onload="mediaPreviewCoverLoaded(this)" onerror="this.parentElement.remove()"></div>';
+    }
+    const titleLayout = shownCover ? covered : plain;
+    html += '<div class="media-preview-title' + (titleText ? '' : ' media-preview-state') + '" style="' +
+      textStyle(titleLayout, titleLayout.titleY, titleFont) + '" data-cover-style="' +
+      escapeHtml(textStyle(covered, covered.titleY, titleFont)) + '">' + escapeHtml(mainText) + '</div>';
+    if (subtitle) {
+      html += '<div class="media-preview-subtitle" style="' +
+        textStyle(titleLayout, titleLayout.subtitleY, subtitleFont) +
+        '" data-cover-style="' + escapeHtml(textStyle(covered, covered.subtitleY, subtitleFont)) + '">' +
+        escapeHtml(subtitle) + '</div>';
+    }
+    // The bars stand like a paused player's (playing_bars.h kStill); the
+    // panel moves them while it plays.
+    if (hasBars) {
+      const barsStyle = layout => at(layout.textX, layout.barsY) + 'width:' +
+        ((4 * L.barWidth + 3 * L.barGap) * scale).toFixed(2) + 'px;height:' + (L.barsHeight * scale).toFixed(2) +
+        'px;gap:' + (L.barGap * scale).toFixed(2) + 'px;';
+      html += '<div class="media-preview-bars" style="' + barsStyle(titleLayout) + '" data-cover-style="' +
+        escapeHtml(barsStyle(covered)) + '">' + [35, 70, 50, 85].map(level => '<i style="width:' +
+          (L.barWidth * scale).toFixed(2) + 'px;height:' +
+          (Math.max(L.barWidth, Math.trunc(L.barsHeight * level / 100 + 0.5)) * scale).toFixed(2) +
+          'px;border-radius:' + (L.barWidth / 2 * scale).toFixed(2) + 'px"></i>').join('') + '</div>';
+    }
+
+    // Previous, play/pause and next at the bottom middle; an unavailable
+    // player dims them. Play is a white circle with the icon in the tile color.
+    if (entity) {
+      const unavailable = String(state?.state || '').trim().toLowerCase() === 'unavailable';
+      const playing = String(state?.state || '').trim().toLowerCase() === 'playing';
+      const buttonY = height - L.button + L.buttonBottom;
+      const iconTop = (Math.trunc((L.button - L.iconLine) / 2) + L.iconEmDy) * scale;
+      for (const [offset, icon, primary] of [[-L.buttonSide, 'skip-previous', false],
+        [0, playing ? 'pause' : 'play', true], [L.buttonSide, 'skip-next', false]]) {
+        const x = Math.trunc((width - L.button) / 2) + offset;
+        html += '<div class="media-preview-control' + (primary ? ' media-preview-play' : '') +
+          (unavailable ? ' media-preview-disabled' : '') + '" style="' + at(x, buttonY) +
+          'width:' + (L.button * scale).toFixed(2) + 'px;height:' + (L.button * scale).toFixed(2) + 'px;' +
+          '">' +
+          '<i class="mdi mdi-' + icon + '" style="top:' + iconTop.toFixed(2) + 'px"></i></div>';
+      }
+    }
+    el.querySelectorAll(':scope > :is(.media-preview-cover, .media-preview-title, .media-preview-subtitle, ' +
+      '.media-preview-bars, .media-preview-control)').forEach(node => { if (node !== shownCover) node.remove(); });
+    if (shownCover) shownCover.setAttribute('style', coverStyle);
+    const handles = el.querySelector(':scope > .tile-resize-handle');
+    if (handles) handles.insertAdjacentHTML('beforebegin', html);
+    else el.insertAdjacentHTML('beforeend', html);
+    mediaPreviewBarsColor(el);
   }
 
   const CLIMATE_TILE_CONTENT = Object.freeze({
@@ -11497,7 +20903,8 @@ function maybeFillTitleFromMedia(tab) {
       spanH,
       configured,
       state.layouts,
-      state.geometry);
+      state.geometry,
+      document.getElementById(tab + '_climate_view')?.value === '1');
   }
 
   function requestClimatePreviewSelection(
@@ -11761,6 +21168,7 @@ function maybeFillTitleFromMedia(tab) {
 
   function climateAutomaticEditorKinds(tab) {
     const state = climateEditorState(tab);
+    const header = document.getElementById(tab + '_climate_view')?.value === '1';
     const spanW = Math.max(1, Math.floor(Number(
       document.getElementById(
         tab + '_tile_span_w')?.value) || 1));
@@ -11789,18 +21197,18 @@ function maybeFillTitleFromMedia(tab) {
     };
 
     if (spanW === 1 && rows === 1) {
-      if (!state.valid || state.current !== '--') {
+      if (!header && (!state.valid || state.current !== '--')) {
         add(CLIMATE_TILE_CONTENT.CURRENT_TEMPERATURE);
       } else {
         addPrimaryTarget();
       }
     } else if (spanW >= 2 && rows === 1) {
-      if (!state.valid || state.current !== '--') {
+      if (!header && (!state.valid || state.current !== '--')) {
         add(CLIMATE_TILE_CONTENT.CURRENT_TEMPERATURE);
       }
       addPrimaryTarget();
     } else if (spanW === 1) {
-      if (!state.valid || state.current !== '--') {
+      if (!header && (!state.valid || state.current !== '--')) {
         add(CLIMATE_TILE_CONTENT.CURRENT_TEMPERATURE);
       }
       addPrimaryTarget();
@@ -11812,7 +21220,7 @@ function maybeFillTitleFromMedia(tab) {
         add(CLIMATE_TILE_CONTENT.TARGET_HUMIDITY);
       }
     } else {
-      if (!state.valid || state.current !== '--') {
+      if (!header && (!state.valid || state.current !== '--')) {
         add(CLIMATE_TILE_CONTENT.CURRENT_TEMPERATURE);
       }
       if (state.currentHumidity !== null) {
@@ -12961,18 +22369,13 @@ function maybeFillTitleFromMedia(tab) {
           ? (data.sensor_entity || '')
           : (data.climate_entity || '');
       entity.value = configuredEntity;
-      if (configuredEntity) {
-        entity.dataset.configuredValue = configuredEntity;
-      } else {
-        // The option list is rebuilt asynchronously. Do not let a value from
-        // the previously edited climate tile come back when this tile
-        // explicitly has no entity configured.
-        delete entity.dataset.configuredValue;
-      }
     }
     const popup = document.getElementById(tab + '_climate_popup_open_mode');
     if (popup) popup.value = (data.popup_open_mode !== undefined)
       ? String(data.popup_open_mode) : '1';
+    const view = document.getElementById(tab + '_climate_view');
+    if (view) view.value = Number(data.sensor_display_mode) === 1 ? '1' : '0';
+    if (typeof syncSwitchChoices === 'function') syncSwitchChoices(tab);
     const slots = decodeClimateSlotConfig(
       data.climate_slots_packed ?? data.sensor_gauge_min ?? 0);
     slots.forEach((value, index) => {
@@ -13123,15 +22526,18 @@ function maybeFillTitleFromMedia(tab) {
   function climatePreviewColor(state) {
     const action = String(state?.action || '').toLowerCase();
     const mode = String(state?.mode || '').toLowerCase();
+    // Unavailable: the light theme's faint grey (climate_visual_color);
+    // unknown and the dark theme the inactive grey (climate_visuals).
     if (state?.available === false || mode === 'unavailable') {
-      return '#9e9e9e';
+      return panelLight() ? panelRoleHex('icon-unavailable', '#bdbdbd') : panelRoleHex('icon-rest', '#9e9e9e');
     }
+    if (mode === 'unknown') return panelRoleHex('icon-rest', '#9e9e9e');
     if (action === 'heating' || action === 'preheating') return '#ff8a3d';
     if (action === 'cooling') return '#4fc3f7';
     if (action === 'drying') return '#ffd54f';
     if (action === 'fan') return '#4db6ac';
     if (action === 'defrosting') return '#81d4fa';
-    if (mode === 'off' || action === 'idle' || action === 'off') return '#9e9e9e';
+    if (mode === 'off' || action === 'idle' || action === 'off') return panelRoleHex('icon-rest', '#9e9e9e');
     if (!action && mode === 'heat') return '#ff8a3d';
     if (!action && mode === 'cool') return '#4fc3f7';
     if (!action && mode === 'dry') return '#ffd54f';
@@ -13139,9 +22545,27 @@ function maybeFillTitleFromMedia(tab) {
     return '#ffffff';
   }
 
+  // The header value pair of the Layout "with value" and half height
+  // (climate_header_text): the action or mode and the current temperature.
+  function climatePreviewHeaderText(state) {
+    if (!state?.valid) return '--';
+    const actions = {
+      heating: CLIMATE_I18N.heating, preheating: CLIMATE_I18N.preheating, cooling: CLIMATE_I18N.cooling,
+      drying: CLIMATE_I18N.drying, fan: CLIMATE_I18N.fan, defrosting: CLIMATE_I18N.defrosting,
+      idle: CLIMATE_I18N.idle
+    };
+    const action = String(state.action || '').toLowerCase();
+    const label = state.available !== false && actions[action] ? actions[action] : climateModeText(state);
+    if (state.available === false || state.current === '--') return label;
+    return label + ' \u00B7 ' + state.current + ' ' + state.unit;
+  }
+
+  // `header`: the Layout "with value" shows the current temperature in the
+  // header, so the automatic fields start with the target
+  // (build_automatic_slot_kinds).
   function climatePreviewSlots(
       state, spanW, spanH, slotConfig = null,
-      targetLayoutConfig = null, geometryConfig = null) {
+      targetLayoutConfig = null, geometryConfig = null, header = false) {
     // Layout variants follow whole cells in width and mini-grid rows in
     // height (half steps add a row), like build_automatic_slot_kinds.
     const w = Math.max(1, Math.floor(Number(spanW) || 1));
@@ -13195,18 +22619,18 @@ function maybeFillTitleFromMedia(tab) {
         entityState === 'unknown') {
       addAutomatic(CLIMATE_TILE_CONTENT.HVAC_MODE);
     } else if (w === 1 && rows === 1) {
-      if (!state.valid || state.current !== '--') {
+      if (!header && (!state.valid || state.current !== '--')) {
         addAutomatic(CLIMATE_TILE_CONTENT.CURRENT_TEMPERATURE);
       } else {
         addPrimaryTarget();
       }
     } else if (w >= 2 && rows === 1) {
-      if (!state.valid || state.current !== '--') {
+      if (!header && (!state.valid || state.current !== '--')) {
         addAutomatic(CLIMATE_TILE_CONTENT.CURRENT_TEMPERATURE);
       }
       addPrimaryTarget();
     } else if (w === 1) {
-      if (!state.valid || state.current !== '--') {
+      if (!header && (!state.valid || state.current !== '--')) {
         addAutomatic(CLIMATE_TILE_CONTENT.CURRENT_TEMPERATURE);
       }
       addPrimaryTarget();
@@ -13218,7 +22642,7 @@ function maybeFillTitleFromMedia(tab) {
         addAutomatic(CLIMATE_TILE_CONTENT.TARGET_HUMIDITY);
       }
     } else {
-      if (!state.valid || state.current !== '--') {
+      if (!header && (!state.valid || state.current !== '--')) {
         addAutomatic(CLIMATE_TILE_CONTENT.CURRENT_TEMPERATURE);
       }
       if (state.currentHumidity !== null) {
@@ -13509,6 +22933,9 @@ function maybeFillTitleFromMedia(tab) {
       document.getElementById(tab + '_climate_entity')?.value || '');
     formData.append('popup_open_mode',
       document.getElementById(tab + '_climate_popup_open_mode')?.value || '1');
+    const view = document.getElementById(tab + '_climate_view')?.value === '1' ? '1' : '0';
+    formData.append('climate_view', view);
+    formData.append('sensor_display_mode', view);
     formData.append('climate_slots_packed', String(packed));
     formData.append('climate_layouts_packed', String(packedLayouts));
     formData.append('climate_geometry', geometry);
@@ -13524,12 +22951,12 @@ function maybeFillTitleFromMedia(tab) {
   function resetClimateFields(tab) {
     resetIconColorFields(tab);
     const entity = document.getElementById(tab + '_climate_entity');
-    if (entity) {
-      entity.value = '';
-      delete entity.dataset.configuredValue;
-    }
+    if (entity) entity.value = '';
     const popup = document.getElementById(tab + '_climate_popup_open_mode');
     if (popup) popup.value = '1';
+    const view = document.getElementById(tab + '_climate_view');
+    if (view) view.value = '0';
+    if (typeof syncSwitchChoices === 'function') syncSwitchChoices(tab);
     const geometry = document.getElementById(
       tab + '_climate_geometry');
     if (geometry) geometry.value = '';
@@ -13546,25 +22973,107 @@ function maybeFillTitleFromMedia(tab) {
     syncClimateSlotFields(tab);
   }
   bindClimatePreviewSelection();
+  // The Camera tile's picture (src/types/camera/picture.h), kept in fields
+  // the tile does not use otherwise: sensor_display_mode 1 = the picture,
+  // sensor_decimals its placement (0 fill, 1 fit, 2 original), image_slideshow_sec
+  // a camera's interval, key_code the transparency of the circle and the
+  // title pill, key_modifier bit 0 a tap opens the full screen, bit 1 the
+  // light and bit 2 the dark head (neither: the design's). The form sends camera_display, camera_fit,
+  // camera_every, camera_transparency, camera_head and camera_tap
+  // (web_handler.cpp).
+  const CAMERA_FITS = ['fill', 'fit', 'original'];
+  const CAMERA_TAP_FULL = 1;
+  const CAMERA_HEAD_LIGHT = 2;
+  const CAMERA_HEAD_DARK = 4;
 
-function loadCameraFields(tab, data) {
+  function cameraEvery(value) {
+    const seconds = Math.round(Number(value));
+    return seconds >= 3 && seconds <= 60 ? seconds : 10;
+  }
+
+  function cameraTransparency(value) {
+    const percent = Math.round(Number(value));
+    return Number.isFinite(percent) ? Math.min(100, Math.max(0, percent)) : 0;
+  }
+
+  // The picture options of stored tile data (GET /api/tiles, drafts, imports).
+  function cameraPictureOptionsOf(tile) {
+    // A copied tile and a draft carry the editor's field names
+    // (saveCameraFields); a stored tile its packed fields.
+    if (tile && tile.camera_display !== undefined) {
+      return {
+        picture: String(tile.camera_display) === '1',
+        fit: CAMERA_FITS.includes(tile.camera_fit) ? tile.camera_fit : 'fill',
+        every: cameraEvery(tile.camera_every),
+        transparency: cameraTransparency(tile.camera_transparency),
+        head: ['dark', 'light'].includes(tile.camera_head) ? tile.camera_head : 'auto',
+        tap: String(tile.camera_tap) === '1' ? '1' : '0'
+      };
+    }
+    const flags = Number(tile?.key_modifier) || 0;
+    return {
+      picture: Number(tile?.sensor_display_mode) === 1,
+      fit: CAMERA_FITS[Number(tile?.sensor_decimals)] || 'fill',
+      every: cameraEvery(tile?.image_slideshow_sec),
+      transparency: cameraTransparency(tile?.key_code),
+      head: (flags & CAMERA_HEAD_LIGHT) ? 'light' : (flags & CAMERA_HEAD_DARK) ? 'dark' : 'auto',
+      tap: (flags & CAMERA_TAP_FULL) ? '1' : '0'
+    };
+  }
+
+  // key_modifier of the options (picture.h kTapFullScreen, kHeadLight, kHeadDark).
+  function cameraOptionFlags(options) {
+    return (options?.tap === '1' ? CAMERA_TAP_FULL : 0) |
+      (options?.head === 'light' ? CAMERA_HEAD_LIGHT : options?.head === 'dark' ? CAMERA_HEAD_DARK : 0);
+  }
+
+  // The picture options in the editor's fields.
+  function cameraPictureOptions(tab) {
+    const value = field => document.getElementById(tab + '_' + field)?.value;
+    const fit = value('camera_fit');
+    return {
+      picture: value('camera_display') === '1',
+      fit: CAMERA_FITS.includes(fit) ? fit : 'fill',
+      every: cameraEvery(value('camera_every')),
+      transparency: cameraTransparency(value('camera_transparency')),
+      head: ['dark', 'light'].includes(value('camera_head')) ? value('camera_head') : 'auto',
+      tap: value('camera_tap') === '1' ? '1' : '0'
+    };
+  }
+
+  // The rows of a picture show only with "Picture"; the interval and what a
+  // tap opens only for a camera (an image entity sends each new picture at
+  // once and has no popup).
+  function syncCameraFields(tab) {
+    const options = cameraPictureOptions(tab);
+    const entity = document.getElementById(tab + '_camera_entity')?.value || '';
+    document.getElementById(tab + '_camera_picture_fields')?.classList.toggle('hidden', !options.picture);
+    document.getElementById(tab + '_camera_every_row')?.classList.toggle('hidden', !entity.startsWith('camera.'));
+    document.getElementById(tab + '_camera_tap_row')?.classList.toggle('hidden', entity.startsWith('image.'));
+    const output = document.getElementById(tab + '_camera_transparency_value');
+    if (output) output.textContent = options.transparency + ' %';
+    if (typeof syncSwitchChoices === 'function') syncSwitchChoices(tab);
+  }
+
+  function loadCameraFields(tab, data) {
     loadIconColorFields(tab, data);
     const el = document.getElementById(tab + '_camera_entity');
     const configured = data.sensor_entity || data.camera_entity || '';
     if (el) {
-      if (configured) {
-        el.dataset.configuredValue = configured;
-        if (!Array.from(el.options).some(opt => opt.value === configured)) {
-          const opt = document.createElement('option');
-          opt.value = configured;
-          opt.textContent = configured;
-          el.appendChild(opt);
-        }
-      } else {
-        delete el.dataset.configuredValue;
-      }
       el.value = configured;
     }
+    const options = cameraPictureOptionsOf(data);
+    const set = (field, value) => {
+      const input = document.getElementById(tab + '_' + field);
+      if (input) input.value = String(value);
+    };
+    set('camera_display', options.picture ? '1' : '0');
+    set('camera_fit', options.fit);
+    set('camera_every', options.every);
+    set('camera_transparency', options.transparency);
+    set('camera_head', options.head);
+    set('camera_tap', options.tap);
+    syncCameraFields(tab);
     maybeFillTitleFromEntity(tab, '_camera_entity');
   }
   function saveCameraFields(tab, formData) {
@@ -13572,15 +23081,115 @@ function loadCameraFields(tab, data) {
       document.getElementById(tab + '_camera_entity')?.value || '';
     formData.append('camera_entity', entity);
     formData.append('sensor_entity', entity);
+    const options = cameraPictureOptions(tab);
+    formData.append('camera_display', options.picture ? '1' : '0');
+    formData.append('camera_fit', options.fit);
+    formData.append('camera_every', String(options.every));
+    formData.append('camera_transparency', String(options.transparency));
+    formData.append('camera_head', options.head);
+    formData.append('camera_tap', options.tap);
     saveIconColorFields(tab, formData);
   }
   function resetCameraFields(tab) {
     resetIconColorFields(tab);
     const el = document.getElementById(tab + '_camera_entity');
-    if (el) {
-      el.value = '';
-      delete el.dataset.configuredValue;
+    if (el) el.value = '';
+    const set = (field, value) => {
+      const input = document.getElementById(tab + '_' + field);
+      if (input) input.value = value;
+    };
+    set('camera_display', '0');
+    set('camera_fit', 'fill');
+    set('camera_every', '10');
+    set('camera_transparency', '0');
+    set('camera_head', 'auto');
+    set('camera_tap', '0');
+    syncCameraFields(tab);
+  }
+
+  // The head over the picture (camera_picture_layout::head): the circle in
+  // the corner, the title on a pill mirrored into the other corner, or one
+  // shared pill when less than a grid gap would stay free between them or the
+  // title does not fit its pill.
+  function cameraPictureHead(cardW, inset, disc, shrink, pad, gap, text) {
+    text = Math.max(0, text);
+    const boxW = text + 2 * (pad + shrink);
+    const pillX = cardW - inset - boxW;
+    const circleRight = inset + disc - shrink;
+    if (pillX + shrink - circleRight >= gap) {
+      return {shared: false, pillX, pillW: boxW, textX: pillX + shrink + pad, textW: text};
     }
+    const textX = inset + disc;
+    return {shared: true, pillX: inset, pillW: cardW - 2 * inset, textX,
+            textW: Math.max(0, cardW - inset - shrink - pad - textX)};
+  }
+
+  let cameraMeasureContext = null;
+  function cameraTextWidth(element, text) {
+    if (!cameraMeasureContext && typeof document.createElement === 'function') {
+      cameraMeasureContext = document.createElement('canvas').getContext?.('2d') || null;
+    }
+    if (!cameraMeasureContext || typeof getComputedStyle !== 'function') return 0;
+    cameraMeasureContext.font = getComputedStyle(element).font;
+    return cameraMeasureContext.measureText(text).width;
+  }
+
+  // The head rule's title width in display pixels (camera_picture_layout::
+  // title_metric): the panel's whole-pixel advances of its title font
+  // (CAMERA_TILE_LAYOUT.adv), so panel and preview choose the same head. A
+  // character outside that table is measured in the browser and scaled.
+  function cameraTitleMetric(layout, text, element, scale) {
+    let width = 0;
+    for (const char of String(text)) {
+      const advance = layout?.adv?.[char.codePointAt(0) - layout.first];
+      width += advance ? advance : (element ? cameraTextWidth(element, char) / (scale || 1) : 0);
+    }
+    return width;
+  }
+
+  // tile_geometry::extent in display pixels.
+  function cameraExtent(position, span, cell, gap) {
+    const edge = value => Math.round(value * (cell + gap));
+    return edge(position + span) - edge(position) - gap;
+  }
+
+  // picture.h head_over_picture: the head over the picture follows the
+  // design ('auto') or draws dark or light in either design ('' without a
+  // picture); its card takes that design's tile color, never an own color
+  // (cameraHeadBackground).
+  function cameraHeadSurface(options, halfHeight) {
+    if (!options?.picture || halfHeight) return '';
+    return ['dark', 'light'].includes(options.head) ? options.head : 'auto';
+  }
+  function cameraHeadBackground(surface) {
+    return surface === 'light' ? 'var(--pvl-card)' : surface === 'dark' ? 'var(--tile-default-bg)' : 'var(--tile-card)';
+  }
+
+  // The preview of a Camera tile showing its picture (live and cached grid):
+  // the browser has no picture, so a neutral stand-in fills the card; the
+  // head sits like on the panel, chosen in display pixels from the tile's
+  // column and span (`place`). Half-height tiles keep the icon look.
+  function applyCameraPicturePreview(tileElem, options, halfHeight, place) {
+    if (!tileElem) return;
+    const on = !!options?.picture && !halfHeight;
+    tileElem.classList.toggle('camera-picture', on);
+    tileElem.classList.remove('camera-head-shared');
+    if (!on) return;
+    tileElem.style.setProperty('--camera-head-opa', String((100 - cameraTransparency(options.transparency)) / 100));
+    const title = tileElem.querySelector(':scope > .tile-title');
+    if (!title || typeof getComputedStyle !== 'function') return;
+    // One line, like the panel (hometiles_title single_line).
+    const lines = title.querySelectorAll ? [...title.querySelectorAll('.tile-title-line')] : [];
+    const text = lines.length ? lines.map(line => line.textContent).join(' ') : String(title.textContent || '');
+    title.textContent = text;
+    const layout = typeof CAMERA_TILE_LAYOUT === 'object' ? CAMERA_TILE_LAYOUT : null;
+    if (!layout) return;
+    const scale = parseFloat(getComputedStyle(tileElem).getPropertyValue('--radius-preview-scale')) || 0;
+    const cardW = cameraExtent(Number(place?.col) || 0, Math.max(1, Number(place?.span_w) || 1),
+                               layout.cellW, layout.gap);
+    const head = cameraPictureHead(cardW, layout.inset, layout.disc, layout.shrink, layout.pad, layout.gap,
+                                   cameraTitleMetric(layout, text, title, scale));
+    tileElem.classList.toggle('camera-head-shared', head.shared);
   }
 
 function loadAnimationFields(tab, data) {
@@ -13592,10 +23201,12 @@ function loadAnimationFields(tab, data) {
       el.value = val;
       if (el.value !== val) el.value = '';  // saved file gone from SD -> none
     }
-    // Speed (fps) is stored in image_slideshow_sec for this tile type.
+    // Speed (fps) is stored in image_slideshow_sec for this tile type; a
+    // copied tile or a draft carries the field's own name.
     const fps = document.getElementById(tab + '_animation_fps');
     if (fps) {
-      let v = data && data.image_slideshow_sec ? parseInt(data.image_slideshow_sec, 10) : 10;
+      const raw = data && data.animation_fps !== undefined ? data.animation_fps : data && data.image_slideshow_sec;
+      let v = raw ? parseInt(raw, 10) : 10;
       if (!(v >= 1 && v <= 30)) v = 10;
       fps.value = v;
       const lbl = document.getElementById(tab + '_animation_fps_val');
@@ -13658,44 +23269,113 @@ function getClockPreviewLanguage() {
 
   function normalizeClockDateFormat(raw) {
     const num = Number(raw);
-    return (num === 1 || num === 2 || num === 3) ? num : 0;
+    return (Number.isInteger(num) && num >= 1 && num <= 7) ? num : 0;
   }
 
+  // clock_tile::unpack_date_options / pack_date_options: bits 0-7 the date
+  // format, 8-9 the weekday (0 none, 1 short, 2 long), bit 10 rolling digits,
+  // 11-12 the alignment (0 centered, 1 left, 2 right).
+  // 13-15 the style (0 digital, 1 analog, 2 wall clock; 3, the removed big
+  // date, shows the digital clock), 16-18 the wall
+  // clock's dial color, 19-20 its hands' color (clock_face.h).
+  function clockDateOptions(raw) {
+    const num = Number(raw);
+    if (!Number.isFinite(num) || num < 0) return {format: 0, weekday: 0, roll: false, align: 0, style: 0, dial: 0, hands: 0};
+    const weekday = (num >> 8) & 3;
+    const align = (num >> 11) & 3;
+    const style = (num >> 13) & 7;
+    const dial = (num >> 16) & 7;
+    return {format: normalizeClockDateFormat(num & 0xFF), weekday: weekday <= 2 ? weekday : 0,
+      roll: ((num >> 10) & 1) === 1, align: align <= 2 ? align : 0, style: style < 3 ? style : 0,
+      dial: dial < 6 ? dial : 0, hands: (num >> 19) & 3};
+  }
+  function packClockDateOptions(format, weekday, roll, align = 0, style = 0, dial = 0, hands = 0) {
+    const day = Number(weekday), side = Number(align), kind = Number(style), face = Number(dial), ink = Number(hands);
+    return normalizeClockDateFormat(format) | ((day === 1 || day === 2 ? day : 0) << 8) | (roll ? 1024 : 0)
+      | ((side === 1 || side === 2 ? side : 0) << 11) | ((kind >= 1 && kind <= 2 ? kind : 0) << 13)
+      | ((face >= 0 && face < 6 ? face : 0) << 16) | ((ink >= 0 && ink < 4 ? ink : 0) << 19);
+  }
+  // The tile's alignment in the preview (renderer.cpp render_clock_tile).
+  function applyClockPreviewAlign(tileElem, align) {
+    if (!tileElem || !tileElem.classList) return;
+    tileElem.classList.toggle('clock-align-left', Number(align) === 1);
+    tileElem.classList.toggle('clock-align-right', Number(align) === 2);
+  }
+
+  // "Auto" shows the panel's format (Settings, Localization), like the
+  // device (clock_tile::resolve_time_format); the language only without it.
   function resolveClockTimeFormat(raw) {
     const safe = normalizeClockTimeFormat(raw);
     if (safe !== 0) return safe;
+    if (typeof PANEL_TIME_FORMAT === 'number' && [1, 2].includes(PANEL_TIME_FORMAT)) return PANEL_TIME_FORMAT;
     return getClockPreviewLanguage().toLowerCase().startsWith('de') ? 1 : 2;
   }
 
   function resolveClockDateFormat(raw) {
     const safe = normalizeClockDateFormat(raw);
     if (safe !== 0) return safe;
+    if (typeof PANEL_DATE_FORMAT === 'number' && [1, 2, 3].includes(PANEL_DATE_FORMAT)) return PANEL_DATE_FORMAT;
     return getClockPreviewLanguage().toLowerCase().startsWith('de') ? 1 : 2;
+  }
+
+  // tabular_digits (src/ui/shared/tabular_digits.cpp): every digit as wide as
+  // the widest one and centered in it, so the time never shifts. The Admin's
+  // Inter has no tabular figures (a subset without features): a box per digit
+  // (.tnum, the width of Inter's widest digit, the 4) does it like the panel;
+  // A and P before M in a box as wide as the A (.tap), so AM and PM match.
+  const CLOCK_HTML_ESCAPES = {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'};
+  function clockDigitsHtml(text) {
+    const chars = Array.from(String(text));
+    return chars.map((ch, i) => (ch >= '0' && ch <= '9' ? '<span class="tnum">' + ch + '</span>'
+      : (ch === 'A' || ch === 'P') && chars[i + 1] === 'M' ? '<span class="tap">' + ch + '</span>'
+        : (CLOCK_HTML_ESCAPES[ch] || ch))).join('');
+  }
+  function setClockDigits(el, text) {
+    if (!el) return;
+    const html = clockDigitsHtml(text);
+    if (el.innerHTML !== html) el.innerHTML = html;
   }
 
   function getClockPreviewTime(rawFormat) {
     const now = new Date();
     const format = resolveClockTimeFormat(rawFormat);
     if (format === 2) {
-      let hh = now.getHours() % 12;
-      if (hh === 0) hh = 12;
+      // Two-digit hours like the panel (clock_tile::format_time).
+      const hh = String(now.getHours() % 12 || 12).padStart(2, '0');
       const mm = String(now.getMinutes()).padStart(2, '0');
-      return String(hh) + ':' + mm + (now.getHours() < 12 ? ' AM' : ' PM');
+      return hh + ':' + mm + (now.getHours() < 12 ? ' AM' : ' PM');
     }
     const hh = String(now.getHours()).padStart(2, '0');
     const mm = String(now.getMinutes()).padStart(2, '0');
     return hh + ':' + mm;
   }
 
-  function getClockPreviewDate(rawFormat) {
+  // clock_tile::format_date_line: the weekday (CLOCK_I18N, the panel's
+  // language) and the date in its format.
+  function getClockPreviewDate(rawFormat, weekday = 0, showDate = true) {
     const now = new Date();
     const format = resolveClockDateFormat(rawFormat);
+    const texts = typeof CLOCK_I18N === 'object' && CLOCK_I18N ? CLOCK_I18N : null;
     const dd = String(now.getDate()).padStart(2, '0');
     const mm = String(now.getMonth() + 1).padStart(2, '0');
     const yyyy = String(now.getFullYear());
-    if (format === 2) return mm + '/' + dd + '/' + yyyy;
-    if (format === 3) return yyyy + '/' + mm + '/' + dd;
-    return dd + '.' + mm + '.' + yyyy;
+    let date = '';
+    if (showDate) {
+      if (format === 2) date = mm + '/' + dd + '/' + yyyy;
+      else if (format === 3) date = yyyy + '/' + mm + '/' + dd;
+      else if (format === 4) date = dd + '/' + mm + '/' + yyyy;
+      else if (format === 5) date = dd + '.' + mm + '.';
+      else if (format === 6 || format === 7) {
+        // clock_tile::long_date_pattern: the locale's order with or without the year.
+        const month = (texts && texts.months && texts.months[now.getMonth()]) || mm;
+        const pattern = format === 7 ? (texts && texts.patternYear) || '{d} {M} {Y}' : (texts && texts.pattern) || '{d} {M}';
+        date = String(pattern).replace('{d}', String(now.getDate())).replace('{M}', month).replace('{Y}', yyyy);
+      } else date = dd + '.' + mm + '.' + yyyy;
+    }
+    const day = Number(weekday);
+    const list = day === 2 ? texts?.weekdays : day === 1 ? texts?.weekdaysShort : null;
+    const name = (list && list[now.getDay()]) || '';
+    return name && date ? name + ', ' + date : (name || date);
   }
 
   function normalizeClockPreviewFont(raw, fallback) {
@@ -13718,27 +23398,40 @@ function getClockPreviewLanguage() {
     }
   }
 
-  function getClockPreviewCssPx(raw, fallback) {
+  function getClockPreviewCssPx(raw, fallback, el) {
     const n = normalizeClockPreviewFont(raw, fallback);
-    // Same scaling as the CSS variables (LVGL pixels * preview factor).
-    const v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--fs' + n));
+    // Same scaling as the CSS variables (LVGL pixels * preview factor), as the
+    // tile's own grid sets them (a grid may scale its preview).
+    const v = parseFloat(getComputedStyle(el?.isConnected ? el : document.documentElement).getPropertyValue('--fs' + n));
     return (v > 0) ? v : Math.round(n / 2);
   }
 
-  function getClockPreviewTextStyle(raw, fallback, color) {
-    const size = getClockPreviewCssPx(raw, fallback);
-    const safeColor = color || '#fff';
-    return 'data-clock-font="' + normalizeClockPreviewFont(raw, fallback) +
-      '" style="font-size:' + size + 'px; line-height:1; color:' + safeColor + ';"';
+  // Each clock line is as tall as its LVGL font's line height, with the
+  // glyphs on the LVGL baseline (--lh/--ldy, web_admin_styles.cpp).
+  function clockPreviewLineCss(size) {
+    return 'line-height:var(--lh' + size + '); top:var(--ldy' + size + ', 0px);';
   }
 
-  function applyClockPreviewTextStyle(el, raw, fallback, color, lineHeight) {
-    if (!el) return;
+  function applyClockPreviewLine(el, size, px) {
+    el.style.fontSize = px + 'px';
+    el.style.lineHeight = 'var(--lh' + size + ')';
+    el.style.top = 'var(--ldy' + size + ', 0px)';
+  }
+
+  function getClockPreviewTextStyle(raw, fallback, color) {
+    const font = normalizeClockPreviewFont(raw, fallback);
     const size = getClockPreviewCssPx(raw, fallback);
-    el.dataset.clockFont = String(normalizeClockPreviewFont(raw, fallback));
-    el.style.fontSize = size + 'px';
-    el.style.color = color || '#fff';
-    el.style.lineHeight = lineHeight || '1';
+    const safeColor = color || panelRoleHex('text', '#fff');
+    return 'data-clock-font="' + font + '" style="font-size:' + size + 'px; ' +
+      clockPreviewLineCss(font) + ' color:' + safeColor + ';"';
+  }
+
+  function applyClockPreviewTextStyle(el, raw, fallback, color) {
+    if (!el) return;
+    const font = normalizeClockPreviewFont(raw, fallback);
+    el.dataset.clockFont = String(font);
+    applyClockPreviewLine(el, font, getClockPreviewCssPx(raw, fallback, el));
+    el.style.color = color || panelRoleHex('text', '#fff');
   }
 
   function normalizeClockFlags(raw) {
@@ -13794,11 +23487,24 @@ function getClockPreviewLanguage() {
       const timeFormat = (data && data.sensor_gauge_min !== undefined) ? data.sensor_gauge_min : (data ? data.clock_time_format : 0);
       timeFormatEl.value = String(timeFormat !== undefined ? timeFormat : 0);
     }
+    // The date format, the weekday and rolling digits in one value.
+    const dateOptions = clockDateOptions((data && data.sensor_gauge_max !== undefined)
+      ? data.sensor_gauge_max : (data ? data.clock_date_format : 0));
     const dateFormatEl = document.getElementById(tab + '_clock_date_format');
-    if (dateFormatEl) {
-      const dateFormat = (data && data.sensor_gauge_max !== undefined) ? data.sensor_gauge_max : (data ? data.clock_date_format : 0);
-      dateFormatEl.value = String(dateFormat !== undefined ? dateFormat : 0);
-    }
+    if (dateFormatEl) dateFormatEl.value = String(dateOptions.format);
+    const weekdayEl = document.getElementById(tab + '_clock_weekday');
+    if (weekdayEl) weekdayEl.value = String(dateOptions.weekday);
+    const rollEl = document.getElementById(tab + '_clock_roll');
+    if (rollEl) rollEl.checked = dateOptions.roll;
+    const alignEl = document.getElementById(tab + '_clock_align');
+    if (alignEl) alignEl.value = String(dateOptions.align);
+    const styleEl = document.getElementById(tab + '_clock_style');
+    if (styleEl) styleEl.value = String(dateOptions.style);
+    const dialEl = document.getElementById(tab + '_clock_dial');
+    if (dialEl) dialEl.value = String(dateOptions.dial);
+    const handsEl = document.getElementById(tab + '_clock_hands');
+    if (handsEl) handsEl.value = String(dateOptions.hands);
+    syncClockStyleFields(tab);
     if (data && (data.clock_show_time !== undefined || data.clock_show_date !== undefined)) {
       const showTime = String(data.clock_show_time || '0') === '1';
       const showDate = String(data.clock_show_date || '0') === '1';
@@ -13828,25 +23534,29 @@ function getClockPreviewLanguage() {
       Number(document.getElementById(prefix + '_clock_date_font')?.value || 20));
     const timeFormat = document.getElementById(prefix + '_clock_time_format')?.value || '0';
     const dateFormat = document.getElementById(prefix + '_clock_date_format')?.value || '0';
+    const weekday = Number(document.getElementById(prefix + '_clock_weekday')?.value || 0);
     const timeEl = tileElem.querySelector('.tile-clock-time');
     const dateEl = tileElem.querySelector('.tile-clock-date');
 
     const needsTime = (flags & 1) !== 0;
-    const needsDate = (flags & 2) !== 0;
+    // The date line also holds a weekday alone.
+    const needsDate = (flags & 2) !== 0 || weekday !== 0;
     if ((needsTime && !timeEl) || (needsDate && !dateEl) || (!needsTime && timeEl) || (!needsDate && dateEl)) {
       updateTilePreview(tab);
       return;
     }
 
     if (timeEl) {
-      timeEl.textContent = getClockPreviewTime(timeFormat);
-      applyClockPreviewTextStyle(timeEl, timeFont, 40, '#fff', '1');
+      setClockDigits(timeEl, getClockPreviewTime(timeFormat));
+      applyClockPreviewTextStyle(timeEl, timeFont, 40, panelRoleHex('text', '#fff'));
     }
     if (dateEl) {
-      dateEl.textContent = getClockPreviewDate(dateFormat);
-      applyClockPreviewTextStyle(dateEl, dateFont, 24, '#fff', '1.1');
+      // The panel's date digits are fixed-width too (tabular_digits, both lines).
+      setClockDigits(dateEl, getClockPreviewDate(dateFormat, weekday, (flags & 2) !== 0));
+      applyClockPreviewTextStyle(dateEl, dateFont, 20, panelRoleHex('text', '#fff'));
     }
     fitCompactClockPreview(tileElem);
+    layoutClockFacePreview(tileElem);
   }
 
   const CLOCK_PREVIEW_FONT_SIZES = [20, 24, 28, 32, 40, 48, 56, 64, 72, 80, 96];
@@ -13861,6 +23571,19 @@ function getClockPreviewLanguage() {
     return clockPreviewMeasureContext.measureText(text).width;
   }
 
+  // The panel's width of a text in the preview: the browser width scaled by
+  // the LVGL width of the sample "88:88 PM" in that font (--tw<size>,
+  // web_admin_styles.cpp). The browser's Inter runs a few percent wider than
+  // the panel's (user 2026-10-11: "8:01 PM" wrapped only in the preview).
+  const CLOCK_WIDTH_SAMPLE = '88:88 PM';
+  function clockPanelTextWidth(el, text, size, px, scope) {
+    const browser = measureClockPreviewText(el, text, px);
+    const lvgl = parseFloat(getComputedStyle(scope?.isConnected ? scope : document.documentElement)
+      .getPropertyValue('--tw' + size));
+    const sample = measureClockPreviewText(el, CLOCK_WIDTH_SAMPLE, px);
+    return lvgl > 0 && sample > 0 ? browser * lvgl / sample : browser;
+  }
+
   // Worst-case samples keep the chosen size stable while the time changes.
   function clockPreviewSample(el, isTime) {
     return isTime ? (/[AP]M/.test(el.textContent) ? '88:88 PM' : '88:88')
@@ -13872,16 +23595,17 @@ function getClockPreviewLanguage() {
   // The date follows only from width 2 and only when it still fits.
   // The firmware applies the same rule (fit_compact_clock in clock/renderer.cpp).
   function fitCompactClockPreview(tileElem) {
-    if (!tileElem) return;
+    if (!tileElem || tileElem.querySelector(':scope > .tile-clock-face')) return;
     const lines = [tileElem.querySelector('.tile-clock-time'), tileElem.querySelector('.tile-clock-date')];
     lines.forEach(el => {
       if (!el) return;
       el.hidden = false;
-      el.style.fontSize = getClockPreviewCssPx(el.dataset.clockFont, 40) + 'px';
+      const font = normalizeClockPreviewFont(el.dataset.clockFont, 40);
+      applyClockPreviewLine(el, font, getClockPreviewCssPx(font, 40, tileElem));
     });
-    if (!tileElem.classList.contains('clock-compact')) return;
     const style = getComputedStyle(tileElem);
-    const root = getComputedStyle(document.documentElement);
+    // The tile's own grid sizes (inherited variables), not the page's.
+    const root = tileElem.isConnected ? style : getComputedStyle(document.documentElement);
     const cellW = parseFloat(root.getPropertyValue('--preview-cell-w'));
     const cellH = parseFloat(root.getPropertyValue('--preview-cell-h'));
     const gridGap = parseFloat(root.getPropertyValue('--preview-gap')) || 0;
@@ -13890,6 +23614,16 @@ function getClockPreviewLanguage() {
     const tileW = cellW > 0 ? span(tileElem.dataset.spanW, cellW) : tileElem.clientWidth;
     const tileH = cellH > 0 ? span(tileElem.dataset.spanH, cellH) : tileElem.clientHeight;
     const availW = tileW - parseFloat(style.paddingLeft || 0) - parseFloat(style.paddingRight || 0);
+    if (!tileElem.classList.contains('clock-compact')) {
+      // A line wraps where the panel's label (as wide as the card) wraps.
+      lines.forEach(el => {
+        if (!el) return;
+        const font = normalizeClockPreviewFont(el.dataset.clockFont, 40);
+        const width = clockPanelTextWidth(el, el.textContent, font, getClockPreviewCssPx(font, 40, tileElem), tileElem);
+        el.style.whiteSpace = width <= availW + 0.5 ? 'nowrap' : '';
+      });
+      return;
+    }
     const maxPx = tileH * 0.8;
     const gap = parseFloat(style.columnGap || 0) || 0;
     const [time, date] = lines;
@@ -13900,18 +23634,18 @@ function getClockPreviewLanguage() {
     const fit = (el, capPx, usedW) => {
       const sample = clockPreviewSample(el, el === time);
       for (const size of [...CLOCK_PREVIEW_FONT_SIZES].reverse()) {
-        const px = getClockPreviewCssPx(size, size);
+        const px = getClockPreviewCssPx(size, size, tileElem);
         if (size > Number(el.dataset.clockFont || 40) || px > capPx) continue;
-        const width = measureClockPreviewText(el, sample, px);
-        if (usedW + width <= availW) return { px, width };
+        const width = clockPanelTextWidth(el, sample, size, px, tileElem);
+        if (usedW + width <= availW) return { size, px, width };
       }
       return null;
     };
-    const first = fit(primary, maxPx, 0) || { px: getClockPreviewCssPx(20, 20), width: 0 };
-    primary.style.fontSize = first.px + 'px';
+    const first = fit(primary, maxPx, 0) || { size: 20, px: getClockPreviewCssPx(20, 20, tileElem), width: 0 };
+    applyClockPreviewLine(primary, first.size, first.px);
     if (!secondary) return;
     const second = fit(secondary, first.px, first.width + gap);
-    if (second) secondary.style.fontSize = second.px + 'px';
+    if (second) applyClockPreviewLine(secondary, second.size, second.px);
     else secondary.hidden = true;
   }
 
@@ -13925,7 +23659,14 @@ function getClockPreviewLanguage() {
     formData.append('key_code', document.getElementById(tab + '_clock_time_font')?.value || '40');
     formData.append('key_modifier', document.getElementById(tab + '_clock_date_font')?.value || '20');
     formData.append('clock_time_format', document.getElementById(tab + '_clock_time_format')?.value || '0');
-    formData.append('clock_date_format', document.getElementById(tab + '_clock_date_format')?.value || '0');
+    formData.append('clock_date_format', String(packClockDateOptions(
+      document.getElementById(tab + '_clock_date_format')?.value || '0',
+      document.getElementById(tab + '_clock_weekday')?.value || '0',
+      document.getElementById(tab + '_clock_roll')?.checked === true,
+      document.getElementById(tab + '_clock_align')?.value || '0',
+      document.getElementById(tab + '_clock_style')?.value || '0',
+      document.getElementById(tab + '_clock_dial')?.value || '0',
+      document.getElementById(tab + '_clock_hands')?.value || '0')));
   }
 
   function resetClockFields(tab) {
@@ -13941,9 +23682,274 @@ function getClockPreviewLanguage() {
     if (timeFormatEl) timeFormatEl.value = '0';
     const dateFormatEl = document.getElementById(tab + '_clock_date_format');
     if (dateFormatEl) dateFormatEl.value = '0';
+    const weekdayEl = document.getElementById(tab + '_clock_weekday');
+    if (weekdayEl) weekdayEl.value = '0';
+    const rollEl = document.getElementById(tab + '_clock_roll');
+    if (rollEl) rollEl.checked = false;
+    const alignEl = document.getElementById(tab + '_clock_align');
+    if (alignEl) alignEl.value = '0';
+    for (const id of ['_clock_style', '_clock_dial', '_clock_hands']) {
+      const el = document.getElementById(tab + id);
+      if (el) el.value = '0';
+    }
+    syncClockStyleFields(tab);
   }
 
-function normalizeTextValueFont(value) {
+  // The wall clock's colors only with the wall clock; the time and date
+  // sizes only with the digital one (the faces size their lines by the tile;
+  // user 2026-10-12: confusing).
+  function syncClockStyleFields(tab) {
+    const style = document.getElementById(tab + '_clock_style')?.value || '0';
+    const wall = document.getElementById(tab + '_clock_wall_colors');
+    if (wall) wall.classList.toggle('hidden', style !== '2');
+    for (const id of ['_clock_time_font', '_clock_date_font']) {
+      const select = document.getElementById(tab + id);
+      if (!select) continue;
+      select.classList.toggle('hidden', style !== '0');
+      select.previousElementSibling?.classList.toggle('hidden', style !== '0');
+    }
+  }
+
+  // clock_face.h: the wall clock's colors; the analog clock takes the theme.
+  const CLOCK_DIAL_COLORS = ['#5E6C82', '#1E1F22', '#F4F4F2', '#7C8C74', '#26364F', '#B86B4B'];
+  const CLOCK_HAND_COLORS = ['#C9A45C', '#C3C7CC', '#1A1A1A', '#FFFFFF'];
+
+  // The analog face's circle: the theme's icon circle over the card
+  // (tile_icon_disc::tile_fill for the untinted theme icon): the light theme
+  // blends the icon grey over the card, the dark one lifts the card.
+  function clockDialColor(tileElem) {
+    // A Transparent clock (no card): the theme's card in the dark theme, the
+    // screen in the light one (renderer.cpp render_clock_face).
+    const card = tileElem.classList.contains('tile-transparent')
+      ? (panelLight() ? panelRole('screen') : panelRole('card')) || [26, 26, 26]
+      : cssColorChannels(getComputedStyle(tileElem).backgroundColor) || [0, 0, 0];
+    const glowRaw = String(getComputedStyle(document.documentElement).getPropertyValue('--icon-glow-pct')).trim();
+    const glowValue = glowRaw === '' ? 25 : Number(glowRaw);
+    const glowPct = Math.min(100, Math.max(0, Number.isFinite(glowValue) ? glowValue : 25));
+    const icon = panelRole('icon') || [255, 255, 255];
+    if (panelLight()) {
+      const over = toneNoColor(icon) ? [189, 189, 189] : icon;
+      const share = Number(panelVar('--pv-light-circle', '0.8'));
+      const amount = glowPct * (Number.isFinite(share) ? share : 0.8) / 100;
+      return toneHex(glowPct ? toneBlend(card, over, Math.round(Math.min(1, amount) * 255)) : card);
+    }
+    return toneHex(toneFill(card, icon, false, glowPct).disc);
+  }
+
+  // The face (clock_face::create) as SVG in device pixels.
+  function clockFaceSvg(size, options, small, dialColor) {
+    const r = size / 2, wall = options.style === 2;
+    const ink = CLOCK_HAND_COLORS[options.hands] || CLOCK_HAND_COLORS[0];
+    const dial = wall ? (CLOCK_DIAL_COLORS[options.dial] || CLOCK_DIAL_COLORS[0]) : dialColor;
+    const major = wall ? ink : panelRoleHex('text', '#FFFFFF'), minor = wall ? ink : panelRoleHex('icon-off', '#B0B0B0');
+    const at = (deg, share) => [r + share * r * Math.sin(deg * Math.PI / 180), r - share * r * Math.cos(deg * Math.PI / 180)];
+    let marks = '';
+    for (let i = 0; i < 12; i++) {
+      const quarter = i % 3 === 0;
+      if (wall) {
+        const [x0, y0] = at(i * 30, small ? 0.62 : 0.68), [x1, y1] = at(i * 30, 0.86);
+        marks += `<line x1="${x0.toFixed(1)}" y1="${y0.toFixed(1)}" x2="${x1.toFixed(1)}" y2="${y1.toFixed(1)}" stroke="${ink}" stroke-width="${Math.max(1, Math.floor(size / 50))}" stroke-linecap="round"/>`;
+      } else if (quarter || !small) {
+        const [x, y] = at(i * 30, 0.8), d = Math.max(3, Math.floor(size * (quarter ? 0.048 : 0.028)));
+        marks += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${d / 2}" fill="${quarter ? major : minor}"/>`;
+      }
+    }
+    const now = new Date();
+    const hourDeg = ((now.getHours() % 12) + now.getMinutes() / 60) * 30, minDeg = now.getMinutes() * 6;
+    const hand = (deg, share, width) => {
+      const [x, y] = at(deg, share);
+      return `<line x1="${r}" y1="${r}" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}" stroke="${wall ? ink : major}" stroke-width="${width}" stroke-linecap="round"/>`;
+    };
+    const hw = Math.max(2, Math.floor(size * (wall ? 0.022 : 0.05))), mw = Math.max(2, Math.floor(size * (wall ? 0.016 : 0.032)));
+    const center = Math.max(4, Math.floor(size * (wall ? 0.036 : 0.09)));
+    return `<circle cx="${r}" cy="${r}" r="${r}" fill="${dial}"/>${marks}`
+      + hand(hourDeg, wall ? 0.5 : 0.45, hw) + hand(minDeg, wall ? 0.78 : 0.66, mw)
+      + `<circle cx="${r}" cy="${r}" r="${center / 2}" fill="${wall ? ink : major}"/>`;
+  }
+
+  // clock/renderer.cpp clock_face_layout in device pixels (m, gap: the
+  // margins of clock_face.h, --clock-face-*; fonts: the widths of the clock
+  // sample and the line heights per time size, --tw / --lh): the face and its
+  // lines beside or below it, or the face alone.
+  const CLOCK_FACE_TIME_SIZES = [56, 40, 32, 24, 20];
+  function clockFaceTimeFit(fonts, maxSize, width, height, below) {
+    for (let i = 0; i < CLOCK_FACE_TIME_SIZES.length; i++) {
+      if (CLOCK_FACE_TIME_SIZES[i] > maxSize) continue;
+      if (fonts.timeW[i] <= width && fonts.timeH[i] + below <= height) return i;
+    }
+    return -1;
+  }
+  function clockFaceLayout(w, h, top, compact, timeLine, dateLine, fonts, m, gap) {
+    const areaH = h - top, y = top + m;
+    if (compact) {
+      const size = areaH - 2 * m, textX = size + 2 * m + gap, textW = w - textX - m;
+      const date = dateLine && textW >= 2 * size;
+      const fit = timeLine ? clockFaceTimeFit(fonts, 24, textW, areaH, date ? fonts.date20H : 0) : -1;
+      return {x: m, y, size, beside: true, textX, textY: top, textW, textH: areaH, showTime: fit >= 0,
+        showDate: date && (fit >= 0 || fonts.date20H <= areaH), timeSize: fit >= 0 ? CLOCK_FACE_TIME_SIZES[fit] : 0, dateSize: 20};
+    }
+    if ((timeLine || dateLine) && w >= 2 * areaH) {
+      const size = areaH - 2 * m, textW = w - size - 3 * m, dateH = dateLine ? fonts.date20H : 0;
+      const fit = timeLine ? clockFaceTimeFit(fonts, 56, textW, areaH, dateH) : -1;
+      if (timeLine ? fit >= 0 : dateH <= areaH) {
+        return {x: m, y, size, beside: true, textX: size + 2 * m, textY: top, textW, textH: areaH,
+          showTime: timeLine, showDate: dateLine, timeSize: fit >= 0 ? CLOCK_FACE_TIME_SIZES[fit] : 0, dateSize: 20};
+      }
+    }
+    if ((timeLine || dateLine) && areaH * 2 >= w * 3) {
+      const size = w - 2 * m, textY = y + size, dateH = dateLine ? fonts.date20H : 0;
+      const fit = timeLine ? clockFaceTimeFit(fonts, 40, w - 2 * m, h - textY, dateH) : -1;
+      if (timeLine ? fit >= 0 : dateH <= h - textY) {
+        return {x: m, y, size, beside: false, textX: 0, textY, textW: w, textH: h - textY,
+          showTime: timeLine, showDate: dateLine, timeSize: fit >= 0 ? CLOCK_FACE_TIME_SIZES[fit] : 0, dateSize: 20};
+      }
+    }
+    const full = Math.min(w, areaH) - 2 * m;
+    if (dateLine) {
+      const withDate = Math.min(w - 2 * m, areaH - 3 * m - fonts.date24H);
+      if (withDate * 10 >= full * 7) {
+        return {x: Math.trunc((w - withDate) / 2), y, size: withDate, beside: false, textX: 0, textY: y + withDate,
+          textW: w, textH: h - y - withDate, showTime: false, showDate: true, dateSize: 24};
+      }
+    }
+    return {x: Math.trunc((w - full) / 2), y, size: full, showTime: false, showDate: false};
+  }
+
+  // The grid gives a tile its size only after the render (layoutTiles), a
+  // hidden tab measures 0 and a resized tile kept its old places (user
+  // 2026-10-12: a 1.5x2 analog clock showed its 1x1 face without the date):
+  // a clock's lines and face are placed again whenever the tile's
+  // size changes (like the switch bar's fill, switchBarObserver).
+  const clockTileObserver = typeof ResizeObserver === 'function'
+    ? new ResizeObserver(entries => {
+      for (const entry of entries) {
+        const tile = entry.target;
+        if (!tile.isConnected || !tile.classList.contains('clock')) {
+          clockTileObserver.unobserve(tile);
+          tile.__clockObserved = false;
+          continue;
+        }
+        fitCompactClockPreview(tile);
+        layoutClockFacePreview(tile);
+      }
+    })
+    : null;
+  function observeClockTile(tileElem) {
+    if (!clockTileObserver || !tileElem || tileElem.__clockObserved) return;
+    tileElem.__clockObserved = true;
+    clockTileObserver.observe(tileElem);
+  }
+
+  // The panel's width of a clock line in preview pixels: the line's browser
+  // width as drawn (.tnum, .tap) scaled by the LVGL width of the clock sample
+  // in its font (--tw<size>) over the browser's.
+  function clockLinePanelWidth(el, size, scope) {
+    const text = el.textContent;
+    const probe = document.createElement('span');
+    probe.style.cssText = 'position:absolute;left:0;top:0;visibility:hidden;white-space:nowrap';
+    el.appendChild(probe);
+    probe.innerHTML = clockDigitsHtml(CLOCK_WIDTH_SAMPLE);
+    const sample = probe.getBoundingClientRect().width;
+    probe.innerHTML = clockDigitsHtml(text);
+    const width = probe.getBoundingClientRect().width;
+    probe.remove();
+    const lvgl = parseFloat(getComputedStyle(scope).getPropertyValue('--tw' + size));
+    return lvgl > 0 && sample > 0 ? width * lvgl / sample : width;
+  }
+
+  // The analog and the wall clock in the preview, placed after the tile has
+  // its size: the device layout in device pixels, scaled like the grid
+  // (--radius-preview-scale), inside the 3 px editor border.
+  function layoutClockFacePreview(tileElem) {
+    if (tileElem?.classList?.contains('clock')) observeClockTile(tileElem);
+    const face = tileElem?.querySelector(':scope > .tile-clock-face');
+    if (!face) return;
+    // On a page not shown (another tab, Settings) the tile measures 0 x 0 and
+    // the face came out negative (console: viewBox "0 0 -32 -32"); the resize
+    // observer lays it out once the page shows.
+    if (!tileElem.offsetWidth || !tileElem.offsetHeight) return;
+    const options = clockDateOptions(face.dataset.options);
+    // The tile's alignment (0 centered, 1 left, 2 right): the live editor
+    // keeps it on the tile (its face options leave it out).
+    const align = clockDateOptions(tileElem.dataset.clockOptions ?? face.dataset.options).align;
+    const style = getComputedStyle(tileElem);
+    const devicePx = (name, fallback) => {
+      const v = parseFloat(style.getPropertyValue(name));
+      return Number.isFinite(v) ? v : fallback;
+    };
+    const scale = devicePx('--radius-preview-scale', 0.5) || 0.5;
+    const w = Math.round(tileElem.offsetWidth / scale), h = Math.round(tileElem.offsetHeight / scale);
+    const compact = tileElem.classList.contains('clock-compact');
+    const top = tileElem.classList.contains('clock-has-header') ? devicePx('--clock-face-header', 0) : 0;
+    const text = tileElem.querySelector(':scope > .tile-clock-face-text');
+    const time = text?.querySelector('.tile-clock-time'), date = text?.querySelector('.tile-clock-date');
+    // The panel's measures per nominal size, scaled (web_admin_styles.cpp).
+    const measure = (name, fallback) => Math.round(devicePx(name, fallback * scale) / scale);
+    const fonts = {timeW: CLOCK_FACE_TIME_SIZES.map(n => measure('--tw' + n, n * 4)),
+      timeH: CLOCK_FACE_TIME_SIZES.map(n => measure('--lh' + n, n * 1.21)),
+      date20H: measure('--lh20', 24), date24H: measure('--lh24', 29)};
+    const m = devicePx(compact ? '--clock-face-m-compact' : '--clock-face-m', compact ? 6 : 16);
+    const l = clockFaceLayout(w, h, top, compact, !!time, !!date, fonts, m, devicePx('--clock-face-gap', 6));
+    const border = tileElem.clientLeft || 0;
+    const lines = !!text && (l.showTime || l.showDate);
+    let linesW = 0;
+    if (text) {
+      text.hidden = !lines;
+      if (time) {
+        time.hidden = !l.showTime;
+        applyClockPreviewTextStyle(time, l.timeSize || 40, 40, panelRoleHex('text', '#fff'));
+      }
+      if (date) {
+        date.hidden = !l.showDate;
+        applyClockPreviewTextStyle(date, l.dateSize || 20, 20, panelRoleHex('text', '#fff'));
+      }
+      for (const [el, size] of [[time, l.timeSize], [date, l.dateSize]]) {
+        if (lines && el && !el.hidden) linesW = Math.max(linesW, clockLinePanelWidth(el, size, tileElem) / scale);
+      }
+    }
+    // The face and its lines as one block, moved by the alignment
+    // (renderer.cpp render_clock_face): the lines one gap beside the face,
+    // left-aligned, or centered on it below.
+    const gap = l.textX - l.x - l.size;
+    const blockW = l.beside ? l.size + (lines ? gap + linesW : 0) : Math.max(l.size, lines ? linesW : 0);
+    const blockX = align === 1 ? m : align === 2 ? w - m - blockW : (w - blockW) / 2;
+    face.style.left = ((l.beside ? blockX : blockX + (blockW - l.size) / 2) * scale - border) + 'px';
+    face.style.top = (l.y * scale - border) + 'px';
+    face.style.width = face.style.height = (l.size * scale) + 'px';
+    face.setAttribute('viewBox', `0 0 ${l.size} ${l.size}`);
+    face.innerHTML = clockFaceSvg(l.size, options, compact, clockDialColor(tileElem));
+    if (!lines) return;
+    text.style.alignItems = l.beside ? 'flex-start' : 'center';
+    text.style.left = ((l.beside ? blockX + l.size + gap : blockX) * scale - border) + 'px';
+    text.style.top = (l.textY * scale - border) + 'px';
+    text.style.width = ((l.beside ? linesW : blockW) * scale) + 'px';
+    text.style.height = (l.textH * scale) + 'px';
+  }
+
+// types/text/text_options.h: the alignment in sensor_gauge_max, bits 11-12
+  // horizontal (0 centered, 1 left, 2 right), 13-14 vertical (0 middle,
+  // 1 top, 2 bottom); the low bits keep 100 (a tile saved before).
+  function textTileOptions(raw) {
+    const num = Number(raw);
+    if (!Number.isFinite(num) || num < 0) return {h: 0, v: 0};
+    const h = (num >> 11) & 3, v = (num >> 13) & 3;
+    return {h: h <= 2 ? h : 0, v: v <= 2 ? v : 0};
+  }
+  function packTextTileOptions(h, v) {
+    const x = Number(h), y = Number(v);
+    return 100 | ((x === 1 || x === 2 ? x : 0) << 11) | ((y === 1 || y === 2 ? y : 0) << 13);
+  }
+  // The preview's alignment classes (admin.css .text-h-* / .text-v-*).
+  function applyTextPreviewAlign(tileElem, raw) {
+    if (!tileElem?.classList) return;
+    const options = textTileOptions(raw);
+    tileElem.classList.toggle('text-h-left', options.h === 1);
+    tileElem.classList.toggle('text-h-right', options.h === 2);
+    tileElem.classList.toggle('text-v-top', options.v === 1);
+    tileElem.classList.toggle('text-v-bottom', options.v === 2);
+  }
+
+  function normalizeTextValueFont(value) {
     const v = String(value || '0');
     return (['1','2','3','4'].includes(v)) ? v : '0';
   }
@@ -13965,6 +23971,12 @@ function normalizeTextValueFont(value) {
     } else {
       textEl.value = '';
     }
+    const options = textTileOptions(data?.text_options !== undefined ? data.text_options
+      : (data?.sensor_gauge_max !== undefined ? data.sensor_gauge_max : 100));
+    const alignEl = document.getElementById(prefix + '_text_align');
+    if (alignEl) alignEl.value = String(options.h);
+    const valignEl = document.getElementById(prefix + '_text_valign');
+    if (valignEl) valignEl.value = String(options.v);
     if (fontEl) {
       if (data && data.text_value_font !== undefined) {
         fontEl.value = normalizeTextValueFont(data.text_value_font);
@@ -13982,6 +23994,8 @@ function normalizeTextValueFont(value) {
     const prefix = tab;
     formData.append('text_value', document.getElementById(prefix + '_text_value')?.value || '');
     formData.append('text_value_font', document.getElementById(prefix + '_text_value_font')?.value || '0');
+    formData.append('text_options', String(packTextTileOptions(document.getElementById(prefix + '_text_align')?.value || '0',
+      document.getElementById(prefix + '_text_valign')?.value || '0')));
   }
 
   function resetTextFields(tab) {
@@ -13993,8 +24007,24 @@ function normalizeTextValueFont(value) {
     if (textEl) textEl.value = '';
     const fontEl = document.getElementById(prefix + '_text_value_font');
     if (fontEl) fontEl.value = '0';
+    for (const id of ['_text_align', '_text_valign']) {
+      const el = document.getElementById(prefix + id);
+      if (el) el.value = '0';
+    }
   }
   function isEditablePreview(kind) { return ['number', 'select', 'datetime'].includes(kind); }
+  // The preview's value as HTML: a number's unit a step smaller after it
+  // (.tile-unit, like the panel's value_unit::show).
+  function editablePreviewHtml(entity, kind, meta = sensorMetaCache) {
+    let value = meta?.editableValues?.[entity];
+    if (typeof value === 'string') { try { value = JSON.parse(value); } catch (_) { value = null; } }
+    const text = editablePreviewText(entity, kind, meta);
+    const unit = value && value.kind === 'number' && value.unit && value.available && value.state !== 'unavailable' &&
+      value.state !== 'unknown' && String(value.state).trim() && Number.isFinite(Number(value.state)) ? String(value.unit) : '';
+    if (!unit || !text.endsWith(' ' + unit)) return escapeHtml(text);
+    return escapeHtml(text.slice(0, -unit.length - 1)) + '<span class="tile-unit">' + escapeHtml(unit) + '</span>';
+  }
+
   function editablePreviewText(entity, kind, meta = sensorMetaCache) {
     let value = meta?.editableValues?.[entity];
     if (typeof value === 'string') { try { value = JSON.parse(value); } catch (_) { return '--'; } }
@@ -14016,17 +24046,6 @@ function normalizeTextValueFont(value) {
     const entity = document.getElementById(tab + '_number_entity');
     const configured = data.sensor_entity || data.number_entity || '';
     if (entity) {
-      if (configured) {
-        entity.dataset.configuredValue = configured;
-        if (!Array.from(entity.options).some(option => option.value === configured)) {
-          const option = document.createElement('option');
-          option.value = configured;
-          option.textContent = configured;
-          entity.appendChild(option);
-        }
-      } else {
-        delete entity.dataset.configuredValue;
-      }
       entity.value = configured;
     }
     const popup = document.getElementById(
@@ -14042,7 +24061,7 @@ function normalizeTextValueFont(value) {
     formData.append('sensor_value_font', document.getElementById(tab + '_number_value_font')?.value ?? '2');
     const entityEl = document.getElementById(tab + '_number_entity');
     const entity = entityEl
-      ? (entityEl.value || entityEl.dataset.configuredValue || '') : '';
+      ? entityEl.value : '';
     formData.append('number_entity', entity);
     formData.append('sensor_entity', entity);
     const popup = document.getElementById(
@@ -14055,10 +24074,7 @@ function normalizeTextValueFont(value) {
     const font = document.getElementById(tab + '_number_value_font');
     if (font) font.value = '2';
     const entity = document.getElementById(tab + '_number_entity');
-    if (entity) {
-      entity.value = '';
-      delete entity.dataset.configuredValue;
-    }
+    if (entity) entity.value = '';
     const popup = document.getElementById(
       tab + '_number_popup_open_mode');
     if (popup) popup.value = '1';
@@ -14071,17 +24087,6 @@ function normalizeTextValueFont(value) {
     const entity = document.getElementById(tab + '_select_entity');
     const configured = data.sensor_entity || data.select_entity || '';
     if (entity) {
-      if (configured) {
-        entity.dataset.configuredValue = configured;
-        if (!Array.from(entity.options).some(option => option.value === configured)) {
-          const option = document.createElement('option');
-          option.value = configured;
-          option.textContent = configured;
-          entity.appendChild(option);
-        }
-      } else {
-        delete entity.dataset.configuredValue;
-      }
       entity.value = configured;
     }
     const popup = document.getElementById(
@@ -14099,7 +24104,7 @@ function normalizeTextValueFont(value) {
     formData.append('sensor_value_font', document.getElementById(tab + '_select_value_font')?.value ?? '2');
     const entityEl = document.getElementById(tab + '_select_entity');
     const entity = entityEl
-      ? (entityEl.value || entityEl.dataset.configuredValue || '') : '';
+      ? entityEl.value : '';
     formData.append('select_entity', entity);
     formData.append('sensor_entity', entity);
     const popup = document.getElementById(
@@ -14112,10 +24117,7 @@ function normalizeTextValueFont(value) {
     const font = document.getElementById(tab + '_select_value_font');
     if (font) font.value = '2';
     const entity = document.getElementById(tab + '_select_entity');
-    if (entity) {
-      entity.value = '';
-      delete entity.dataset.configuredValue;
-    }
+    if (entity) entity.value = '';
     const popup = document.getElementById(
       tab + '_select_popup_open_mode');
     if (popup) popup.value = '1';
@@ -14128,17 +24130,6 @@ function normalizeTextValueFont(value) {
     const entity = document.getElementById(tab + '_datetime_entity');
     const configured = data.sensor_entity || data.datetime_entity || '';
     if (entity) {
-      if (configured) {
-        entity.dataset.configuredValue = configured;
-        if (!Array.from(entity.options).some(option => option.value === configured)) {
-          const option = document.createElement('option');
-          option.value = configured;
-          option.textContent = configured;
-          entity.appendChild(option);
-        }
-      } else {
-        delete entity.dataset.configuredValue;
-      }
       entity.value = configured;
     }
     const popup = document.getElementById(
@@ -14156,7 +24147,7 @@ function normalizeTextValueFont(value) {
     formData.append('sensor_value_font', document.getElementById(tab + '_datetime_value_font')?.value ?? '2');
     const entityEl = document.getElementById(tab + '_datetime_entity');
     const entity = entityEl
-      ? (entityEl.value || entityEl.dataset.configuredValue || '') : '';
+      ? entityEl.value : '';
     formData.append('datetime_entity', entity);
     formData.append('sensor_entity', entity);
     const popup = document.getElementById(
@@ -14169,10 +24160,7 @@ function normalizeTextValueFont(value) {
     const font = document.getElementById(tab + '_datetime_value_font');
     if (font) font.value = '2';
     const entity = document.getElementById(tab + '_datetime_entity');
-    if (entity) {
-      entity.value = '';
-      delete entity.dataset.configuredValue;
-    }
+    if (entity) entity.value = '';
     const popup = document.getElementById(
       tab + '_datetime_popup_open_mode');
     if (popup) popup.value = '1';

@@ -55,7 +55,9 @@ void apply_clock_fields_from_request(WebServer& server, Tile& tile) {
   tile.sensor_gauge_min = server.hasArg("clock_time_format")
                               ? clock_tile::normalize_time_format(server.arg("clock_time_format").toInt())
                               : clock_tile::TIME_FORMAT_AUTO;
+  // The date format, the weekday and rolling digits in one value
+  // (clock_tile::pack_date_options); older clients send the format alone.
   tile.sensor_gauge_max = server.hasArg("clock_date_format")
-                              ? clock_tile::normalize_date_format(server.arg("clock_date_format").toInt())
+                              ? clock_tile::normalize_date_options(server.arg("clock_date_format").toInt())
                               : clock_tile::DATE_FORMAT_AUTO;
 }

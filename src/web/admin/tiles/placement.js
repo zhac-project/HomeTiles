@@ -42,11 +42,11 @@
       getTileLayoutFromData(tab, tileIndex));
     const active = new Set();
     tiles.forEach((tile, tileIndex) => {
-      if (tile && Number(tile.type || 0) !== 0) active.add(tileIndex);
+      if (tileTakesRoom(tile)) active.add(tileIndex);
     });
     return canPlaceGridLayout(
       layouts, active, index, candidateLayout,
-      GRID_COLS, GRID_ROWS, firstAllowedGridRow(tab));
+      placeCols(tab), placeRows(tab), firstAllowedGridRow(tab));
   }
 
   function canPlaceHiddenSettingsLayout(tab, candidateLayout) {
@@ -58,7 +58,8 @@
     const active = new Set();
     document.querySelectorAll('#tab-tiles-' + tab + ' .tile').forEach(tile => {
       const index = Number(tile.dataset.index);
-      if (!Number.isInteger(index) || Number(tile.dataset.type || 0) === 0) return;
+      if (!Number.isInteger(index) || Number(tile.dataset.type || 0) === 0 ||
+          tile.classList.contains('tile-unplaced') || tile.classList.contains('page-field-tile')) return;
       const layout = getTileElementLayout(tab, index);
       if (!layout) return;
       layouts[index] = layout;
@@ -66,7 +67,7 @@
     });
     return canPlaceGridLayout(
       layouts, active, -1, candidateLayout,
-      GRID_COLS, GRID_ROWS, firstAllowedGridRow(tab));
+      placeCols(tab), placeRows(tab), firstAllowedGridRow(tab));
   }
 
   function manhattanDistance(colA, rowA, colB, rowB) {
@@ -98,7 +99,7 @@
   function buildPlacementCandidates(
       tab, spanW, spanH, preferredCol, preferredRow) {
     return buildGridPlacementCandidates(
-      GRID_COLS, GRID_ROWS, firstAllowedGridRow(tab),
+      placeCols(tab), placeRows(tab), firstAllowedGridRow(tab),
       spanW, spanH, preferredCol, preferredRow);
   }
 
@@ -203,10 +204,10 @@
 
     const active = new Set();
     tiles.forEach((tile, index) => {
-      if (tile && Number(tile.type || 0) !== 0) active.add(index);
+      if (tileTakesRoom(tile)) active.add(index);
     });
     return simulateGridReorderLayouts(
       baseLayouts, active, fromIdx,
       targetCol, targetRow,
-      GRID_COLS, GRID_ROWS, firstAllowedGridRow(tab), tiles.map(tile => tile?.type));
+      placeCols(tab), placeRows(tab), firstAllowedGridRow(tab), tiles.map(tile => tile?.type));
   }

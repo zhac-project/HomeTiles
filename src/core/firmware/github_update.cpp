@@ -309,8 +309,8 @@ bool releaseAssetDeviceKey(String& key_out, String& error_out) {
     return false;
   }
 #if defined(DEVICE_WAVESHARE_TOUCH_LCD_7B)
-  if (strcmp(silicon.variant, "rev3_1") == 0) {
-    key_out = "waveshare_touch_lcd_7b_rev3_1";
+  if (strcmp(silicon.variant, "post_v3") == 0) {
+    key_out = "waveshare_touch_lcd_7b_rev3";
   } else if (strcmp(silicon.variant, "pre_v3") != 0) {
     error_out = String("unknown firmware silicon variant ") + silicon.variant;
     return false;
@@ -318,6 +318,35 @@ bool releaseAssetDeviceKey(String& key_out, String& error_out) {
 #elif defined(DEVICE_WAVESHARE_TOUCH_LCD_10_1)
   if (strcmp(silicon.variant, "post_v3") == 0) {
     key_out = "waveshare_touch_lcd_10_1_rev3";
+  } else if (strcmp(silicon.variant, "pre_v3") != 0) {
+    error_out = String("unknown firmware silicon variant ") + silicon.variant;
+    return false;
+  }
+#elif defined(DEVICE_WAVESHARE_TOUCH_LCD_4_3)
+  if (strcmp(silicon.variant, "post_v3") == 0) {
+    key_out = "waveshare_touch_lcd_4_3_rev3";
+  } else if (strcmp(silicon.variant, "pre_v3") != 0) {
+    error_out = String("unknown firmware silicon variant ") + silicon.variant;
+    return false;
+  }
+#elif defined(DEVICE_WAVESHARE_TOUCH_LCD_8)
+  if (strcmp(silicon.variant, "post_v3") == 0) {
+    key_out = "waveshare_touch_lcd_8_rev3";
+  } else if (strcmp(silicon.variant, "pre_v3") != 0) {
+    error_out = String("unknown firmware silicon variant ") + silicon.variant;
+    return false;
+  }
+#elif defined(DEVICE_WAVESHARE_TOUCH_LCD_5)
+  if (strcmp(silicon.variant, "post_v3") == 0) {
+    key_out = "waveshare_touch_lcd_5_rev3";
+  } else if (strcmp(silicon.variant, "pre_v3") != 0) {
+    error_out = String("unknown firmware silicon variant ") + silicon.variant;
+    return false;
+  }
+#elif defined(DEVICE_GUITION_JC8012P4A1_V2)
+  // The V3 board runs the V2 code on ESP32-P4 v3 silicon.
+  if (strcmp(silicon.variant, "post_v3") == 0) {
+    key_out = "guition_jc8012p4a1_v3";
   } else if (strcmp(silicon.variant, "pre_v3") != 0) {
     error_out = String("unknown firmware silicon variant ") + silicon.variant;
     return false;
@@ -1298,6 +1327,93 @@ bool install(const char* tag, ProgressFn progress, String& error_out) {
   GuitionS3Diagnostics::logOtaPartitions("github-end");
   Serial.printf("[Update] %u bytes installed - ready to restart\n",
                 static_cast<unsigned>(total_sz));
+  return true;
+}
+
+bool downloadReleaseFile(const char* tag, const char* file_name,
+                         size_t expected_bytes, FileWriteFn write, void* ctx,
+                         ProgressFn progress, String& error_out) {
+  error_out = "";
+  if (!tag || !*tag || !file_name || !*file_name || !expected_bytes || !write) {
+    error_out = "invalid request";
+    return false;
+  }
+  if (!networkTransport.isConnected()) {
+    error_out = "no network";
+    return false;
+  }
+  String url = String(kReleaseFilesRepoUrl) + "/releases/download/" + tag + "/" + file_name;
+  Serial.printf("[Update] Downloading %s (%u bytes)\n", url.c_str(),
+                static_cast<unsigned>(expected_bytes));
+
+  uint8_t* net_buf = static_cast<uint8_t*>(
+      heap_caps_malloc(kInstallReadChunk, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (!net_buf) net_buf = static_cast<uint8_t*>(malloc(kInstallReadChunk));
+  PsramStageBuffer stage;
+  if (!net_buf || !stage.allocate(expected_bytes)) {
+    if (net_buf) free(net_buf);
+    error_out = "not enough PSRAM";
+    return false;
+  }
+
+  // One range per stage block, as install() stages a P4 image.
+  bool failed = false;
+  bool first_range = true;
+  size_t staged = 0;
+  for (size_t block = 0; block < stage.blockCount() && !failed; ++block) {
+    const size_t range_start = staged;
+    const size_t range_len = stage.blockSize(block);
+    const size_t range_end = range_start + range_len - 1;
+    bool range_ok = false;
+    for (uint8_t attempt = 1; attempt <= kStageRangeAttempts; ++attempt) {
+      size_t total = 0;
+      HeadBufferCtx range_ctx{stage.block(block), range_len, 0};
+      range_ctx.progress_base = range_start;
+      range_ctx.progress_total = expected_bytes;
+      range_ctx.progress = progress;
+      String resolved_url;
+      error_out = "";
+      Serial.printf("[Update] Downloading range %u-%u (attempt %u/%u)\n",
+                    static_cast<unsigned>(range_start), static_cast<unsigned>(range_end),
+                    static_cast<unsigned>(attempt), static_cast<unsigned>(kStageRangeAttempts));
+      const bool fetched = fetchHttpRange(url, range_start, range_end, net_buf, kInstallReadChunk,
+                                          storeBufferBytes, &range_ctx, total, error_out,
+                                          first_range ? &resolved_url : nullptr);
+      if (fetched && total == expected_bytes && range_ctx.len == range_len) {
+        // Later ranges go straight to the resolved CDN URL.
+        if (first_range && resolved_url.length()) url = resolved_url;
+        first_range = false;
+        range_ok = true;
+        break;
+      }
+      if (total && total != expected_bytes) {
+        // A file of another length belongs to another release; no retry.
+        error_out = String("file has ") + total + " bytes, expected " + expected_bytes;
+        break;
+      }
+      if (fetched || !error_out.length()) error_out = "range incomplete";
+      Serial.printf("[Update] Range failed: %s\n", error_out.c_str());
+      if (error_out == "HTTP 404") break;  // not published for this release
+      if (attempt < kStageRangeAttempts) delay(3000);
+    }
+    if (!range_ok) {
+      failed = true;
+      break;
+    }
+    staged += range_len;
+    if (progress) progress(staged, expected_bytes);
+    if (staged < expected_bytes) delay(kStageCompleteImage ? kStageRangePauseMs : 20);
+  }
+  free(net_buf);
+  if (failed) return false;
+
+  Serial.printf("[Update] Download complete in PSRAM: %u bytes\n", static_cast<unsigned>(staged));
+  for (size_t block = 0; block < stage.blockCount(); ++block) {
+    if (!write(stage.block(block), stage.blockSize(block), ctx)) {
+      if (!error_out.length()) error_out = "write failed";
+      return false;
+    }
+  }
   return true;
 }
 

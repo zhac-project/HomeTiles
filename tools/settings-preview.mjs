@@ -1,0 +1,630 @@
+// Renders the firmware's Settings screen (src/ui/tabs/settings: settings_screen,
+// settings_parts, settings_style) with real LVGL and the firmware fonts on the
+// host, for every panel layout, and lays it beside the approved mockup
+// (build/design-mockups/settings/settings-menu.html) with a difference image.
+// The mockup's example values stand in for the configuration
+// (settings_model.h), so both show the same state.
+//
+// Usage: node tools/settings-preview.mjs [p8 p7 p1024 p43 p4b s3 p4880]
+//        [--page=display|wifi|localization|system|setup] [--open=<row>] [--press=<row>]
+//        [--state=off|new|ap|eth|ethwifi|online|wait|code|ok|guide|mqtt] [--step=0..3]
+//        [--dialog=github|restart|unpair|password|pairing|leave]
+//        [--entry=manual|join] [--scroll=bottom] [--drag=up] [--no-mockup]
+// --scroll=bottom shows a page taller than its area scrolled to its end;
+// --drag=up drags a finger 200 px up from a row of the page (real LVGL
+// input) and prints the page's scroll ("page scroll N"); with --page=setup
+// from a row with a switch in the step's list that scrolls in itself.
+// --page=setup shows the first-start setup at --step (mockup wiz=A&step=):
+// step 1 lists the networks (--state=online: connected, ap: the phone
+// setup's hotspot on); steps 2 and 3 are online, step 2 offers Pair
+// (--state=wait: findable with the time left, code: the number, ok: paired,
+// guide: the Bridge guide);
+// --dialog=leave asks to leave it.
+// --open shows the option list of a Localization row (1 = time zone), like
+// the mockup's dd=<row>; --press shows that row pressed. System: --state=off
+// = not paired and the first-password window open (mockup enc=0&pw=win),
+// new = not paired and no password (mockup enc=0&pw=0);
+// --dialog opens a dialog (mockup dlg=git|restart|encOff|pwOff|code).
+// WiFi: --state=ap = the hotspot on, eth / ethwifi = a panel that can use
+// Ethernet in Ethernet or WiFi mode (mockup eth=eth|wifi); --entry opens the
+// network entry (mockup sheet=manual|pass).
+// Output: build/settings-preview/<panel>-<page>.png (firmware render) and
+//         build/settings-preview/<panel>-<page>-compare.png (mockup | firmware | difference).
+import fs from 'node:fs';
+import path from 'node:path';
+import zlib from 'node:zlib';
+import {spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
+
+import {lvglHost} from './lib/lvgl-host.mjs';
+import {decodePng} from './lib/png-decode.mjs';
+import {radiusPolicyHost, surfaceStyleHost} from './lib/surface-style-host.mjs';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const read = file => fs.readFileSync(path.join(root, file), 'utf8').replace(/\r\n/g, '\n');
+const strip = source => source.replace(/^#include.*$/gm, '').replaceAll('#pragma once', '');
+const out = path.join(root, 'build/settings-preview');
+fs.mkdirSync(out, {recursive: true});
+
+// The seven panel layouts (src/devices/*, kProfile), as in the mockup's
+// device menu: screen, Home grid, layout class, rotation steps.
+const PANELS = {
+  p8: {W: 1280, H: 800, cols: 7, rows: 5, cw: 168, ch: 145, gap: 16, pad: 4, cls: 'big', quarter: false, name: 'Guition JC8012P4A1 V2'},
+  p7: {W: 1280, H: 720, cols: 7, rows: 4, cw: 168, ch: 166, gap: 16, pad: 4, cls: 'big', quarter: false, name: 'M5Stack Tab5'},
+  p1024: {W: 1024, H: 600, cols: 6, rows: 4, cw: 156, ch: 136, gap: 16, pad: 4, cls: 'mid', quarter: false, name: 'Guition JC1060P470C'},
+  p43: {W: 800, H: 480, cols: 5, rows: 4, cw: 150, ch: 111, gap: 10, pad: 3, cls: 'small', quarter: false, name: 'Waveshare Touch LCD 4.3'},
+  p4b: {W: 720, H: 720, cols: 4, rows: 4, cw: 166, ch: 166, gap: 16, pad: 4, cls: 'big', quarter: true, name: 'Waveshare 4B'},
+  s3: {W: 480, H: 480, cols: 4, rows: 4, cw: 111, ch: 111, gap: 10, pad: 3, cls: 'small', quarter: true, name: 'Guition ESP32-S3 4\\"'},
+  p4880: {W: 480, H: 800, cols: 4, rows: 6, cw: 111, ch: 124, gap: 10, pad: 3, cls: 'small', quarter: false, name: 'Guition JC4880P443'},
+};
+// Since b300 every layout keeps one grid gap to the screen edge
+// (device.h kGridPad = kGridGap) and the cells take what is left.
+for (const p of Object.values(PANELS)) {
+  p.pad = p.gap;
+  p.cw = Math.floor((p.W - (p.cols + 1) * p.gap) / p.cols);
+  p.ch = Math.floor((p.H - (p.rows + 1) * p.gap) / p.rows);
+}
+const args = process.argv.slice(2);
+const noMockup = args.includes('--no-mockup');
+// --upright: a landscape panel showing an upright layout (grid_layout
+// kPortrait): the screen turned, the Settings and the setup by the shown size.
+const upright = args.includes('--upright');
+const selected = args.filter(a => PANELS[a]);
+const option = name => (args.find(a => a.startsWith(`--${name}=`)) || '').split('=')[1];
+const page = option('page') || 'display';
+const open = option('open');
+const press = option('press');
+const state = option('state');
+const dialog = option('dialog');
+const entry = option('entry');
+const step = Number(option('step') || 0);
+// --lang=<code> renders the firmware in that language, any registered one
+// (the mockup stays English).
+const language = option('lang') || 'en';
+// --keys=accents shows the keyboard's accent page, latin the QWERTY page of
+// a layout with its own alphabet (Russian), shift the capitals (with --entry).
+const keys = option('keys');
+const keysCode = {accents: 'settings_keyboard::g_kb.accents = true;', latin: 'settings_keyboard::g_kb.latin = true;',
+  shift: 'settings_keyboard::g_kb.shift = true;'}[keys];
+if (keys !== undefined && !keysCode) throw new Error(`unknown keys ${keys}`);
+const dialogs = {github: 'git', restart: 'restart', unpair: 'encOff', password: 'pwOff', pairing: 'code', leave: 'wzExit'};
+if (dialog !== undefined && !(dialog in dialogs)) throw new Error(`unknown dialog ${dialog}`);
+const categories = {display: 0, wifi: 1, localization: 2, system: 3, setup: 0};
+if (!(page in categories)) throw new Error(`unknown page ${page}`);
+const setup = page === 'setup';
+// The setup's network: step 1 searches unless --state=online (or ap); later steps are online.
+const online = setup ? state === 'online' || (step >= 2 && state !== 'new') : state !== 'ap';
+const shot = page + (setup ? step : '') + (open === undefined ? '' : `-open${open}`) +
+  (press === undefined ? '' : `-press${press}`) + (state === undefined ? '' : `-${state}`) +
+  (dialog === undefined ? '' : `-${dialog}`) + (entry === undefined ? '' : `-${entry}`) +
+  (language === 'en' ? '' : `-${language}`) + (keys === undefined ? '' : `-${keys}`) + (upright ? '-upright' : '');
+// The mockup's hash for the same state.
+const mockupState = (open === undefined ? '' : `&dd=${open}`) + (state === 'off' ? '&enc=0&pw=win' : state === 'new' && !setup ? '&enc=0&pw=0' : '') +
+  (state === 'eth' ? '&eth=eth' : state === 'ethwifi' ? '&eth=wifi' : '') +
+  (dialog === undefined ? '' : `&dlg=${dialogs[dialog]}`) +
+  (entry === undefined ? '' : `&sheet=${entry === 'manual' ? 'manual' : 'pass'}`);
+const mockupView = setup
+  ? `wiz=A&step=${step}${online ? '&wifi=1' : ''}${state === 'ap' ? '&apqr=1' : ''}${state === 'code' || state === 'ok' ? `&ha=${state}` : ''}`
+  // Settings: the popup head with the headings in the groups (2026-10-07).
+  : `view=settings&cat=${page}&head=row&secin=1`;
+const panels = selected.length ? selected : Object.keys(PANELS);
+
+// The time the mockup shows (Berlin, en-US 12 h), so both lines read the same.
+const time = new Intl.DateTimeFormat('en-US', {timeZone: 'Europe/Berlin', hour: 'numeric', minute: '2-digit', hour12: true})
+  .format(new Date());
+
+// MDI codepoints of the icons the screen uses, from the firmware's table.
+const mdi = read('src/tiles/icons/mdi_icons.cpp');
+const icons = ['cog', 'window-close', 'monitor', 'wifi', 'wifi-off', 'access-point', 'translate', 'chip',
+  'brightness-6', 'power-sleep', 'screen-rotation', 'timer-outline', 'brightness-4', 'earth', 'clock-outline',
+  'calendar-blank-outline', 'keyboard-outline', 'chevron-down', 'chevron-up', 'chevron-right', 'check', 'lan-connect',
+  'link-variant', 'link-variant-off', 'form-textbox-password', 'rocket-launch-outline', 'restart', 'github', 'magnify',
+  'download', 'wifi-strength-1-lock', 'wifi-strength-2', 'wifi-strength-2-lock', 'wifi-strength-3-lock',
+  'wifi-strength-4', 'wifi-strength-lock-outline', 'plus', 'refresh', 'lan', 'ethernet', 'ip-network-outline',
+  'pencil-outline', 'eye', 'eye-off', 'lock-outline', 'apple-keyboard-shift', 'apple-keyboard-caps',
+  'backspace-outline', 'check-bold', 'shield-check', 'loading', 'cellphone-wireless', 'book-open-variant', 'qrcode',
+  'view-grid-plus-outline', 'chevron-left', 'wifi-lock', 'wifi-strength-4-lock', 'wifi-strength-outline',
+  'theme-light-dark', 'page-layout-header', 'tune-variant', 'volume-high', 'microphone', 'monitor-speaker'];
+const iconTable = icons.map(name => {
+  const match = mdi.match(new RegExp(`\\{"${name}", (0x[0-9A-Fa-f]+)\\}`));
+  if (!match) throw new Error(`MDI icon ${name} missing`);
+  return `{"${name}", ${match[1]}}`;
+}).join(', ');
+
+// The firmware's strings tables: English shows, every language counts for
+// sizes that must not change with the language.
+const i18nSource = read('src/core/i18n/i18n.cpp');
+const table = name => {
+  const start = i18nSource.indexOf(`static const Strings ${name} = {`);
+  return i18nSource.slice(start, i18nSource.indexOf('};', start) + 2);
+};
+// Every registered language (kLanguages), in its order.
+const codes = [...i18nSource.matchAll(/\{&kStrings(\w+), &kLocale\w+\}/g)].map(match => match[1]);
+const Code = language[0].toUpperCase() + language.slice(1);
+if (!codes.includes(Code)) throw new Error(`unknown language ${language}`);
+const enTable = codes.map(code => table(`kStrings${code}`)).join('\n');
+// A language's name and keyboard from its LocaleProfile: the second entry
+// and keyboard_layout, keyboard_letters (before the Energy period labels).
+const localeOf = code => {
+  const start = i18nSource.indexOf(`static const LocaleProfile kLocale${code} = {`);
+  const body = i18nSource.slice(start, i18nSource.indexOf('static const ', start + 10));
+  const name = /=\s*\{\s*"[^"]*",\s*("[^"]*")/.exec(body)[1];
+  const tail = /\s(\d+),(?:\s*\/\/[^\n]*)?\s*("(?:[^"\\]|\\.)*")\s*,?\s*(?:\{[^{}]*\}\s*)?\};/.exec(body);
+  return {name, layout: Number(tail[1]), letters: tail[2]};
+};
+const locales = codes.map(localeOf);
+const shown = locales[codes.indexOf(Code)];
+// The English time zone names (LocaleProfile kLocaleEn timezone_labels).
+const enLocale = i18nSource.slice(i18nSource.indexOf('static const LocaleProfile kLocaleEn = {'));
+const zonesStart = enLocale.indexOf('{"UTC+0 - UTC"');
+const zones = enLocale.slice(zonesStart, enLocale.indexOf('}', zonesStart) + 1);
+
+function harness(p) {
+  const fontPx = {big: 48, mid: 40, small: 32}[p.cls];
+  return String.raw`
+#include <lvgl.h>
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <string>
+#include <vector>
+#include "src/ui/shared/title_label.h"
+// Arduino stand-ins.
+struct String {
+  std::string s;
+  String() {}
+  String(const char* c) : s(c ? c : "") {}
+  const char* c_str() const { return s.c_str(); }
+  size_t length() const { return s.size(); }
+};
+extern "C" {
+LV_FONT_DECLARE(ui_font_12); LV_FONT_DECLARE(ui_font_14); LV_FONT_DECLARE(ui_font_16); LV_FONT_DECLARE(ui_font_20);
+LV_FONT_DECLARE(ui_font_24); LV_FONT_DECLARE(ui_font_28); LV_FONT_DECLARE(ui_font_32); LV_FONT_DECLARE(ui_font_40);
+LV_FONT_DECLARE(ui_font_48); LV_FONT_DECLARE(ui_font_56); LV_FONT_DECLARE(ui_font_64); LV_FONT_DECLARE(ui_font_72);
+LV_FONT_DECLARE(ui_font_80); LV_FONT_DECLARE(ui_font_96); LV_FONT_DECLARE(ui_symbols_20); LV_FONT_DECLARE(ui_symbols_24);
+LV_FONT_DECLARE(mdi_icons_${fontPx});
+}
+#define FONT_MDI_ICONS (&mdi_icons_${fontPx})
+String getMdiChar(const char* name) {
+  static const struct { const char* name; uint32_t code; } kIcons[] = {${iconTable}};
+  for (const auto& icon : kIcons) {
+    if (strcmp(icon.name, name) == 0) {
+      const uint32_t c = icon.code;
+      char utf8[5] = {static_cast<char>(0xF0 | (c >> 18)), static_cast<char>(0x80 | ((c >> 12) & 0x3F)),
+                      static_cast<char>(0x80 | ((c >> 6) & 0x3F)), static_cast<char>(0x80 | (c & 0x3F)), 0};
+      return String(utf8);
+    }
+  }
+  return String("?");
+}
+// Board and grid (src/devices kProfile, tile_config.h).
+namespace Device {
+constexpr int kGridCols = ${p.cols}, kGridRows = ${p.rows}, kGridCellW = ${p.cw}, kGridCellH = ${p.ch}, kGridGap = ${p.gap};
+constexpr int kGridPad = ${p.gap}, kScreenWidth = SCREEN_WIDTH, kScreenHeight = SCREEN_HEIGHT;
+}
+static constexpr uint8_t GRID_COLS = ${p.cols};
+static constexpr uint8_t GRID_ROWS = ${p.rows};
+static constexpr int GRID_GAP = ${p.gap};
+static constexpr int GRID_PAD = ${p.pad};
+static constexpr int GRID_CELL_W = ${p.cw};
+static constexpr int GRID_CELL_H = ${p.ch};
+static constexpr int GRID_EXTRA_X = SCREEN_WIDTH - (GRID_COLS * GRID_CELL_W + (GRID_COLS - 1) * GRID_GAP + 2 * GRID_PAD);
+static constexpr int GRID_EXTRA_Y = SCREEN_HEIGHT - (GRID_ROWS * GRID_CELL_H + (GRID_ROWS - 1) * GRID_GAP + 2 * GRID_PAD);
+static constexpr int GRID_PAD_LEFT = GRID_PAD + GRID_EXTRA_X / 2;
+static constexpr int GRID_PAD_RIGHT = GRID_PAD + GRID_EXTRA_X - GRID_EXTRA_X / 2;
+static constexpr int GRID_PAD_TOP = GRID_PAD + GRID_EXTRA_Y / 2;
+static constexpr int GRID_PAD_BOTTOM = GRID_PAD + GRID_EXTRA_Y - GRID_EXTRA_Y / 2;
+${radiusPolicyHost(root, String(p.ch), String(p.gap))}
+#include "src/core/config/icon_glow.h"
+// Default global options: borders on, circles on, default Circle strength, maximum radius.
+struct Config { bool tile_borders = true; bool icon_discs = true; uint8_t icon_glow = icon_glow::kDefault; int tile_radius = tile_radius::kDefault; };
+struct Manager { Config cfg; const Config& getConfig() { return cfg; } } configManager;
+${surfaceStyleHost(root)}
+enum : int { TILE_SENSOR = 1, TILE_BINARY_SENSOR, TILE_ENERGY, TILE_SCENE, TILE_FOLDER, TILE_BACK, TILE_CAMERA, TILE_SETTINGS,
+  TILE_NUMBER, TILE_SELECT, TILE_DATETIME, TILE_LOCK, TILE_ALARM, TILE_FAN, TILE_CLOCK, TILE_SWITCH, TILE_COVER, TILE_CLIMATE,
+  TILE_TEXT, TILE_CALENDAR, TILE_VACUUM };
+// PSRAM tables (psram_static.h) come from the host's heap.
+#include <new>
+#define MALLOC_CAP_SPIRAM 0
+#define MALLOC_CAP_8BIT 0
+inline void* heap_caps_malloc(size_t bytes, int) { return malloc(bytes); }
+${strip(read('src/core/memory/psram_static.h'))}
+${strip(read('src/tiles/config/tile_geometry.h'))}
+${strip(read('src/tiles/config/grid_layout.h'))}
+${strip(read('src/ui/popups/popup_layout.h'))}
+${strip(read('src/core/i18n/i18n.h'))}
+namespace i18n {
+${enTable}
+}
+// The card "From icon" gives a color, as tile_icon_source.cpp registers it.
+static uint32_t host_from_icon_card(uint32_t icon, bool pressed, uint8_t percent) {
+  const uint32_t card = tile_tint::background(0x1A1A1A, icon, percent ? percent : 20);
+  if (!pressed) return card;
+  uint32_t out = 0;
+  for (int shift = 16; shift >= 0; shift -= 8) out |= std::min<uint32_t>(255, ((card >> shift) & 0xFF) + 0x10) << shift;
+  return out;
+}
+${strip(read('src/ui/shared/text_scroll.h'))}
+${strip(read('src/ui/tabs/settings/settings_style.h'))}
+${strip(read('src/ui/tabs/settings/settings_parts.h'))}
+${strip(read('src/ui/tabs/settings/settings_model.h'))}
+${strip(read('src/ui/tabs/settings/settings_screen.h'))}
+${strip(read('src/ui/startup/hometiles_logo.h'))}
+${strip(read('src/ui/startup/hometiles_logo.cpp'))}
+${strip(read('src/ui/tabs/settings/settings_parts.cpp'))}
+${strip(read('src/ui/tabs/settings/keyboard_letters.h'))}
+${strip(read('src/ui/tabs/settings/settings_keyboard.h'))}
+${strip(read('src/ui/tabs/settings/settings_keyboard.cpp'))}
+${strip(read('src/ui/tabs/settings/settings_entry.h'))}
+${strip(read('src/ui/tabs/settings/settings_entry.cpp'))}
+${strip(read('src/ui/tabs/settings/setup_screen.h'))}
+${strip(read('src/ui/tabs/settings/settings_screen.cpp'))}
+${strip(read('src/ui/tabs/settings/setup_screen.cpp'))}
+// The mockup's example state.
+namespace settings_model {
+const i18n::Strings& text() { return i18n::kStrings${Code}; }
+uint8_t language_count() { return ${codes.length}; }
+const i18n::Strings& text_of(uint8_t language) {
+  static const i18n::Strings* const kTables[] = {${codes.map(code => `&i18n::kStrings${code}`).join(', ')}};
+  return *kTables[language < ${codes.length} ? language : 0];
+}
+uint32_t card_color() { return 0x1A1A1A; }
+DisplayValues display_values() { return {80, 1, 100, 4, 3, 20, 1, 100}; }
+int saved_brightness() { return 80; }
+int saved_sleep_index() { return 4; }
+int sleep_steps() { return 8; }
+unsigned sleep_step_seconds(int index) {
+  static const unsigned kSteps[] = {5, 15, 30, 60, 300, 900, 1800, 3600};
+  return kSteps[index < 0 ? 0 : index > 7 ? 7 : index];
+}
+bool quarter_turns() { return ${p.quarter ? 'true' : 'false'}; }
+uint8_t rotation_index() { return 0; }
+void brightness_changed(int, bool) {}
+void sleep_changed(int, bool) {}
+void saver_changed(int, bool) {}
+void saver_brightness_changed(int, bool) {}
+void rotation_selected(uint8_t) {}
+// The Sound group (#123): the P4 panels have a speaker and a microphone, the
+// 480x480 S3 has neither.
+SoundValues sound_values() {
+  const bool p4 = ${p.W === 480 && p.H === 480 ? 'false' : 'true'};
+  return SoundValues{p4, p4, 45, true};
+}
+void volume_changed(int, bool) {}
+void microphone_selected(bool) {}
+uint8_t theme_index() { return 0; }
+uint8_t theme_choice() { return 0; }
+void theme_selected(uint8_t) {}
+// A new panel's first setup on a panel that is not square (--state=again:
+// opened from Settings, no layout).
+bool layout_choice() { return ${p.W !== p.H && state !== 'again' ? 'true' : 'false'}; }
+uint8_t layout_index() { return ${p.W < p.H ? 1 : 0}; }
+void layout_selected(uint8_t) {}
+bool access_point_on() { return false; }
+bool network_connected() { return true; }
+void network_name(char* buf, size_t len) { snprintf(buf, len, "HomeNet"); }
+const char* language_name() { return ${shown.name}; }
+bool time_text(char* buf, size_t len) { snprintf(buf, len, "%s", "${time}"); return true; }
+bool update_available() { return false; }
+// Localization: English, Berlin, the rest Auto (mockup st.loc).
+uint8_t locale_option_count(LocaleList list) {
+  static const uint8_t kCounts[] = {${codes.length}, 27, 3, 4, 5};
+  return kCounts[static_cast<int>(list)];
+}
+const char* locale_option(LocaleList list, uint8_t index) {
+  static const char* const kLanguages[] = {${locales.map(locale => locale.name).join(', ')}};
+  static const char* const kZones[] = ${zones};
+  static const char* const kTimes[] = {"Auto (language)", "24-hour", "12-hour"};
+  static const char* const kDates[] = {"Auto (language)", "DD.MM.YYYY", "MM/DD/YYYY", "YYYY/MM/DD"};
+  static const char* const kKeyboards[] = {"Auto (language)", "Deutsch (QWERTZ)", "English (QWERTY)",
+                                           "Fran\xC3\xA7" "ais (AZERTY)", "Русский (ЙЦУКЕН)"};
+  switch (list) {
+    case LocaleList::Language: return kLanguages[index];
+    case LocaleList::TimeZone: return kZones[index];
+    case LocaleList::TimeFormat: return kTimes[index];
+    case LocaleList::DateFormat: return kDates[index];
+    case LocaleList::Keyboard: return kKeyboards[index];
+  }
+  return "";
+}
+uint8_t locale_selected(LocaleList list) { return list == LocaleList::TimeZone ? 2 : 0; }
+void locale_selected_changed(LocaleList, uint8_t) {}
+// System: paired, password on (mockup st.sec), or --state=off; --dialog=pairing
+// shows the number.
+SystemValues system_values() {
+  const bool off = ${state === 'off' || state === 'new' ? 'true' : 'false'};
+  // The setup shows Pair (--state=wait: findable with the time left, code:
+  // the number, ok: paired).
+  const PairState pairing = ${setup ? (state === 'code' ? 'PairState::Compare' : state === 'ok' ? 'PairState::Paired'
+    : state === 'wait' ? 'PairState::Discoverable' : 'PairState::NotPaired')
+    : dialog === 'pairing' ? 'PairState::Compare' : 'off ? PairState::NotPaired : PairState::Paired'};
+  return {UpdateState::Idle, 0, !off, pairing, 119, !off, ${state === 'off' ? 'true' : 'false'}, 119};
+}
+const char* latest_version() { return ""; }
+const char* device_name() { return "${p.name}"; }
+bool panel_address(char* buf, size_t len) { snprintf(buf, len, "${state === 'ap' ? '192.168.4.1' : '192.168.1.50'}"); return true; }
+// The way to Home Assistant: the direct link, or MQTT with --state=mqtt.
+bool bridge_route(char* buf, size_t len) {
+  snprintf(buf, len, text().${state === 'mqtt' ? 'settings_link_mqtt_fmt' : 'settings_link_direct_fmt'}, "192.168.1.10");
+  return true;
+}
+bool link_active() { return ${state === 'mqtt' ? 'false' : 'true'}; }
+bool pairing_number(char* buf, size_t len) { snprintf(buf, len, "465 848"); return true; }
+const char* pairing_note() { return nullptr; }
+const char* repo_url() { return "https://github.com/GalusPeres/HomeTiles"; }
+void update_pressed() {}
+void restart() {}
+void pair() {}
+void confirm_pairing() {}
+void cancel_pairing() {}
+void unpair() {}
+void allow_password() {}
+void remove_password() {}
+// WiFi: HomeNet connected, the mockup's other networks (st.nets).
+WifiValues wifi_values() {
+  WifiValues v = {};
+  v.ethernet_panel = ${state === 'eth' || state === 'ethwifi' ? 'true' : 'false'};
+  v.ethernet_selected = v.ethernet_active = ${state === 'eth' ? 'true' : 'false'};
+  v.access_point = ${state === 'ap' ? 'true' : 'false'};
+  v.connected = ${online ? 'true' : 'false'} && !v.access_point;
+  v.bars = 4;
+  v.ip_mode_offered = v.ethernet_active;
+  return v;
+}
+bool ethernet_panel() { return ${state === 'eth' || state === 'ethwifi' ? 'true' : 'false'}; }
+bool ethernet_active() { return ${state === 'eth' ? 'true' : 'false'}; }
+uint8_t keyboard_layout() { return ${shown.layout}; }
+const char* keyboard_letters() { return ${shown.letters}; }
+// The mockup's networks (st.nets); HomeNet only while it is not the connected one.
+static const WifiNetwork kNetworks[] = {{"HomeNet", 4, true}, {"HomeNet-Guest", 3, true},
+                                        {"FRITZ!Box 7590 XY", 2, true}, {"Garden-Cam", 2, false},
+                                        {"DIRECT-42-HP OfficeJet", 1, true}};
+constexpr uint8_t kFirst = ${online ? 1 : 0};
+uint8_t wifi_network_count() { return 5 - kFirst; }
+const WifiNetwork& wifi_network(uint8_t index) { return kNetworks[kFirst + (index < 5 - kFirst ? index : 0)]; }
+const char* wifi_saved_password(const char*) { return ""; }
+void hotspot_details(char* ssid, size_t ssid_len, char* password, size_t password_len) {
+  snprintf(ssid, ssid_len, "HomeTiles-3F2A");
+  snprintf(password, password_len, "hometiles");
+}
+bool static_address(char*, size_t) { return false; }
+void wifi_scan() {}
+void wifi_connect(const char*, const char*) {}
+void wifi_disconnect() {}
+void hotspot_selected(bool) {}
+void network_mode_selected(bool) {}
+void ip_mode_selected(bool) {}
+void wifi_connect_done() {}
+const char* firmware_version() { return "v0.8.0"; }
+void close_settings() {}
+int setup_step() { return ${setup ? step : -1}; }
+void setup_step_changed(uint8_t) {}
+void setup_start(bool) {}
+void setup_end() {}
+bool web_admin_url(char* buf, size_t len) { snprintf(buf, len, "http://192.168.1.50"); return ${online ? 'true' : 'false'}; }
+const char* setup_guide_url() { return "https://galusperes.github.io/HomeTiles/"; }
+}
+// The screen as shown (turned with --upright).
+static const int kShownW = ${upright ? 'SCREEN_HEIGHT' : 'SCREEN_WIDTH'};
+static const int kShownH = ${upright ? 'SCREEN_WIDTH' : 'SCREEN_HEIGHT'};
+static lv_point_t g_drag_point{};
+static bool g_drag_down = false;
+static void drag_step(lv_display_t* display, int x, int y, bool down) {
+  g_drag_point = {x, y};
+  g_drag_down = down;
+  lv_tick_inc(16);
+  lv_timer_handler();
+  (void)display;
+}
+// A finger 200 px up from (x, y0) on real LVGL input; prints how far the
+// target scrolled of its whole range.
+static void drag_up(lv_display_t* display, lv_obj_t* target, int x, int y0) {
+  lv_indev_t* touch = lv_indev_create();
+  lv_indev_set_type(touch, LV_INDEV_TYPE_POINTER);
+  lv_indev_set_read_cb(touch, [](lv_indev_t*, lv_indev_data_t* data) {
+    data->point = g_drag_point;
+    data->state = g_drag_down ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+  });
+  drag_step(display, x, y0, false);
+  for (int i = 0; i <= 20; ++i) drag_step(display, x, y0 - i * 10, true);
+  drag_step(display, x, y0 - 200, false);
+  for (int i = 0; i < 30; ++i) drag_step(display, x, y0 - 200, false);
+  std::printf("page scroll %d of %d\n", static_cast<int>(lv_obj_get_scroll_y(target)),
+              static_cast<int>(lv_obj_get_scroll_y(target) + lv_obj_get_scroll_bottom(target)));
+}
+int main(int argc, char** argv) {
+  tone_color::g_from_icon_card = &host_from_icon_card;
+  ${upright ? 'grid_layout::g_shown = grid_layout::layout_grid(grid_layout::Layout::kPortrait);' : ''}
+  lv_init();
+  lv_display_t* display = lv_display_create(kShownW, kShownH);
+  std::vector<uint32_t> pixels(kShownW * kShownH), band(kShownW * 32);
+  lv_display_set_color_format(display, LV_COLOR_FORMAT_XRGB8888);
+  lv_display_set_buffers(display, band.data(), nullptr, band.size() * 4, LV_DISPLAY_RENDER_MODE_PARTIAL);
+  lv_display_set_user_data(display, &pixels);
+  lv_display_set_flush_cb(display, [](lv_display_t* d, const lv_area_t* area, uint8_t* data) {
+    auto& target = *static_cast<std::vector<uint32_t>*>(lv_display_get_user_data(d));
+    auto* source = reinterpret_cast<uint32_t*>(data);
+    for (int y = area->y1; y <= area->y2; ++y)
+      for (int x = area->x1; x <= area->x2; ++x) target[y * kShownW + x] = *source++;
+    lv_display_flush_ready(d);
+  });
+  lv_obj_t* screen = lv_screen_active();
+  lv_obj_set_style_bg_color(screen, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+  // The Settings panel as UIManager::createTabPanel and build_settings_tab set it up.
+  lv_obj_t* panel = lv_obj_create(screen);
+  lv_obj_set_size(panel, LV_PCT(100), LV_PCT(100));
+  lv_obj_set_style_border_width(panel, 0, 0);
+  lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_bg_color(panel, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_opa(panel, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_pad_left(panel, GRID_PAD_LEFT, 0);
+  lv_obj_set_style_pad_right(panel, GRID_PAD_RIGHT, 0);
+  lv_obj_set_style_pad_top(panel, GRID_PAD_TOP, 0);
+  lv_obj_set_style_pad_bottom(panel, GRID_PAD_BOTTOM, 0);
+  settings_screen::build(panel);
+  settings_screen::prepare_show();
+  ${setup ? `
+  ${state === 'guide' ? 'setup_screen::g_guide = true; setup_screen::build_body();' : ''}
+  ${open === undefined ? '' : `setup_screen::open_locale_list(${Number(open)});`}
+  ${press === undefined ? '' : `lv_obj_add_state(setup_screen::g_locale_rows[${Number(press)}].row, LV_STATE_PRESSED);`}
+  ${entry === undefined ? '' : `setup_screen::open_entry(${entry === 'manual'}, "FRITZ!Box 7590 XY");`}
+  ${keysCode ? `${keysCode} settings_keyboard::lay_out();` : ''}
+  ${dialog === 'leave' ? 'setup_screen::open_leave_dialog();' : ''}
+  ${option('drag') === 'up' ? `{
+    // The step's list that scrolls in itself (step 0: the language group on
+    // short landscape panels), a finger on the name of its third row, a row
+    // with a switch (issue #41: only the two tap rows above it scrolled).
+    lv_obj_update_layout(screen);
+    lv_obj_t* list = nullptr;
+    for (uint32_t i = 0; !list && i < lv_obj_get_child_count(setup_screen::g_body); ++i) {
+      lv_obj_t* child = lv_obj_get_child(setup_screen::g_body, static_cast<int32_t>(i));
+      if (lv_obj_has_flag(child, LV_OBJ_FLAG_SCROLLABLE)) list = child;
+    }
+    if (!list || lv_obj_get_child_count(list) < 3) {
+      std::printf("no list that scrolls\\n");
+    } else {
+      lv_obj_t* row = lv_obj_get_child(list, 2);
+      lv_area_t icon{}, area{};
+      lv_obj_get_coords(lv_obj_get_child(row, 1), &icon);
+      lv_obj_get_coords(row, &area);
+      drag_up(display, list, icon.x2 + 20, (area.y1 + area.y2) / 2);
+    }
+  }` : ''}
+  ` : `
+  settings_screen::select_category(static_cast<settings_screen::Category>(${categories[page]}));
+  ${open === undefined ? '' : `settings_screen::open_locale_list(${Number(open)});`}
+  ${press === undefined ? '' : `lv_obj_add_state(settings_screen::g_locale_rows[${Number(press)}].row, LV_STATE_PRESSED);`}
+  settings_screen::system_changed();
+  ${option('scroll') === 'bottom' ? 'lv_obj_update_layout(screen); lv_obj_scroll_by(settings_screen::g_page, 0, -lv_obj_get_scroll_bottom(settings_screen::g_page), LV_ANIM_OFF);' : ''}
+  ${option('drag') === 'up' ? `{
+    lv_obj_update_layout(screen);
+    lv_area_t page{};
+    lv_obj_get_coords(settings_screen::g_page, &page);
+    // On a row's name (no control under the finger), well inside the page.
+    drag_up(display, settings_screen::g_page, page.x1 + 70, page.y1 + 120);
+  }` : ''}
+  ${args.includes('--press-close') ? 'lv_obj_add_state(settings_screen::g_close, LV_STATE_PRESSED);' : ''}
+  ${entry === undefined ? '' : `settings_screen::open_entry(${entry === 'manual'}, "FRITZ!Box 7590 XY");`}
+  ${keysCode ? `${keysCode} settings_keyboard::lay_out();` : ''}
+  ${dialog === undefined || dialog === 'pairing' ? '' : `settings_screen::open_dialog(settings_screen::Dialog::${{github: 'GitHub', restart: 'Restart', unpair: 'Unpair', password: 'RemovePassword'}[dialog]});`}
+  `}
+  ui_surface_style::process_pending_updates();
+  lv_obj_update_layout(screen);
+  lv_obj_invalidate(screen);
+  lv_tick_inc(50);
+  lv_refr_now(display);
+  std::ofstream file(argv[1], std::ios::binary);
+  file.write(reinterpret_cast<const char*>(pixels.data()), pixels.size() * 4);
+  return 0;
+}
+`;
+}
+
+// ---------- PNG ----------
+function encodePng(width, height, rgb) {
+  const raw = Buffer.alloc((width * 3 + 1) * height);
+  for (let y = 0; y < height; y++) {
+    raw[y * (width * 3 + 1)] = 0;
+    rgb.copy(raw, y * (width * 3 + 1) + 1, y * width * 3, (y + 1) * width * 3);
+  }
+  const chunk = (type, data) => {
+    const length = Buffer.alloc(4); length.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type), data]);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(zlib.crc32(body) >>> 0);
+    return Buffer.concat([length, body, crc]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0); header.writeUInt32BE(height, 4);
+  header[8] = 8; header[9] = 2; header[10] = 0; header[11] = 0; header[12] = 0;
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header),
+    chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+}
+
+// The mockup state at the panel's resolution, 1:1 (headless Edge, the
+// screen cropped out of the device frame; see mockup fit()).
+function mockup(key, p) {
+  const edge = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+  const html = path.join(root, 'build/design-mockups/settings/settings-menu.html');
+  if (!fs.existsSync(edge) || !fs.existsSync(html)) return null;
+  const bezel = {big: 14, mid: 12, small: 10}[p.cls];
+  const winW = p.W + 2 * bezel + 34, winH = p.H + 2 * bezel + 18;
+  const file = path.join(out, `${key}-mockup-full.png`);
+  const url = 'file:///' + html.replace(/\\/g, '/') +
+    `#dev=${key}&${mockupView}&ico=0&bare=1&shot=1${mockupState}`;
+  spawnSync(edge, ['--headless=new', '--disable-gpu', '--hide-scrollbars', '--allow-file-access-from-files',
+    `--window-size=${winW},${winH}`, '--virtual-time-budget=6000', `--screenshot=${file}`, url], {stdio: 'ignore'});
+  if (!fs.existsSync(file)) return null;
+  const image = decodePng(fs.readFileSync(file));
+  fs.unlinkSync(file);
+  const x0 = Math.floor((winW - (p.W + 2 * bezel)) / 2) + bezel, y0 = bezel;
+  const rgb = Buffer.alloc(p.W * p.H * 3);
+  const channels = 4;
+  for (let y = 0; y < p.H; y++) {
+    for (let x = 0; x < p.W; x++) {
+      const s = ((y + y0) * image.width + x + x0) * channels, d = (y * p.W + x) * 3;
+      rgb[d] = image.pixels[s]; rgb[d + 1] = image.pixels[s + 1]; rgb[d + 2] = image.pixels[s + 2];
+    }
+  }
+  return rgb;
+}
+
+const host = await lvglHost(root);
+if (!host) {
+  console.log('SKIP: the Settings preview needs LVGL 9.6 and a host compiler');
+  process.exit(0);
+}
+for (const key of panels) {
+  const p = PANELS[key];
+  const source = path.join(out, `${key}.cpp`), binary = path.join(out, `${key}.exe`), raw = path.join(out, `${key}.raw`);
+  fs.writeFileSync(source, harness(p));
+  const defines = [`-DSCREEN_WIDTH=${p.W}`, `-DSCREEN_HEIGHT=${p.H}`,
+    ...(p.cls === 'mid' ? ['-DDEVICE_LAYOUT_1024X600'] : p.cls === 'small' ? ['-DDEVICE_LAYOUT_480X480'] : [])];
+  const build = spawnSync(host.cxx, [...host.flags, '-std=c++17', ...defines, source, host.archive, '-o', binary], {encoding: 'utf8'});
+  if (build.status !== 0) {
+    console.error(build.stdout + build.stderr);
+    process.exit(1);
+  }
+  const run = spawnSync(binary, [raw], {encoding: 'utf8'});
+  if (run.status !== 0) {
+    console.error(`${key}: render failed\n${run.stdout}${run.stderr}`);
+    process.exit(1);
+  }
+  if (option('drag')) process.stdout.write(run.stdout);
+  const xrgb = fs.readFileSync(raw);
+  const shownW = upright ? p.H : p.W, shownH = upright ? p.W : p.H;
+  const firmware = Buffer.alloc(shownW * shownH * 3);
+  for (let i = 0; i < shownW * shownH; i++) {
+    firmware[i * 3] = xrgb[i * 4 + 2]; firmware[i * 3 + 1] = xrgb[i * 4 + 1]; firmware[i * 3 + 2] = xrgb[i * 4];
+  }
+  fs.writeFileSync(path.join(out, `${key}-${shot}.png`), encodePng(shownW, shownH, firmware));
+  const reference = noMockup || upright ? null : mockup(key, p);
+  if (!reference) {
+    console.log(`${key}: ${path.join(out, `${key}-${shot}.png`)}`);
+    continue;
+  }
+  // mockup | firmware | difference (white = differs, grey = the firmware image faintly).
+  const gap = 12, width = p.W * 3 + gap * 2;
+  const sheet = Buffer.alloc(width * p.H * 3, 40);
+  let differing = 0;
+  for (let y = 0; y < p.H; y++) {
+    for (let x = 0; x < p.W; x++) {
+      const s = (y * p.W + x) * 3;
+      const delta = Math.max(...[0, 1, 2].map(c => Math.abs(reference[s + c] - firmware[s + c])));
+      if (delta > 48) differing++;
+      for (let c = 0; c < 3; c++) {
+        sheet[(y * width + x) * 3 + c] = reference[s + c];
+        sheet[(y * width + x + p.W + gap) * 3 + c] = firmware[s + c];
+        sheet[(y * width + x + 2 * (p.W + gap)) * 3 + c] = delta > 48 ? 255 : Math.round(firmware[s + c] * 0.25);
+      }
+    }
+  }
+  const file = path.join(out, `${key}-${shot}-compare.png`);
+  fs.writeFileSync(file, encodePng(width, p.H, sheet));
+  console.log(`${key}: ${(100 * differing / (p.W * p.H)).toFixed(2)} % of the pixels differ clearly -> ${file}`);
+}

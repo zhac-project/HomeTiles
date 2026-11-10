@@ -1,0 +1,282 @@
+// Host test for src/types/switch/layout.h: the stored Switch layouts, which
+// bar a tile shows, and the dimmer geometry (the Light popup's brightness
+// logic sideways). Also pins the half-height policy, the save path and the
+// Web Admin mirror of the dimmer geometry.
+import assert from 'node:assert/strict';
+
+import {readRepoFile} from '../../lib/admin-source.mjs';
+import {compileAndRun} from '../../lib/cpp-host.mjs';
+
+const harness = String.raw`
+#include "src/types/switch/layout.h"
+
+#include <cstdio>
+
+using namespace switch_layout;
+
+int main() {
+  // Stored values; unknown ones fall back to the icon button.
+  for (int value = 0; value <= 5; ++value) {
+    std::printf("layout %d %d\n", value, static_cast<int>(from_stored(static_cast<uint8_t>(value))));
+  }
+  const Layout layouts[] = {Layout::IconButton, Layout::Switch, Layout::Dimmer, Layout::Automatic};
+  for (Layout layout : layouts) {
+    for (int half = 0; half <= 1; ++half) {
+      for (int dimmable = 0; dimmable <= 1; ++dimmable) {
+        std::printf("bar %d %d %d %d\n", static_cast<int>(layout), half, dimmable,
+                    static_cast<int>(bar_for(layout, half, dimmable)));
+      }
+    }
+  }
+  // Guition V2 1x1: 156 x 61 bar, radius 26.
+  const Dimmer v2{156, 61, 26};
+  std::printf("geometry %d %d %d %d %d %d\n", v2.handle_margin(), v2.end_radius(), v2.handle_width(),
+              v2.handle_height(), v2.handle_low(), v2.handle_high());
+  for (int x = -40; x <= 170; x += 1) {
+    std::printf("value %d %d\n", x, v2.value_at(x));
+  }
+  for (int value = 0; value <= 100; ++value) {
+    std::printf("fill %d %d %d\n", value, v2.handle_x(static_cast<uint8_t>(value)),
+                v2.fill_width(static_cast<uint8_t>(value)));
+  }
+  for (int fill = v2.min_fill(); fill <= 156; ++fill) {
+    std::printf("end %d %d\n", fill, v2.end_radius_for(fill));
+  }
+  // Sensor look from 1.5 rows; the bar grows by a third of the extra height
+  // (Guition V2: cell 145, gap 16).
+  for (const float span : {0.5f, 1.0f, 1.5f, 2.0f}) {
+    std::printf("look %d %d %d\n", static_cast<int>(span * 2), sensor_look(Layout::Dimmer, span) ? 1 : 0,
+                sensor_look(Layout::IconButton, span) ? 1 : 0);
+  }
+  std::printf("grow %d %d %d\n", bar_growth(145, 145), bar_growth(226, 145), bar_growth(306, 145));
+  // A taller bar (V2 1x1.5: 88 px) keeps the one-row end rounding and handle
+  // width; only the handle grows in height.
+  const Dimmer tall{156, 88, 26, 61};
+  std::printf("tall %d %d %d %d\n", tall.end_radius(), tall.handle_width(), tall.handle_height(), tall.min_fill());
+  return 0;
+}
+`;
+
+const output = compileAndRun({label: 'Switch layout', harness});
+if (output !== null) {
+  const rows = output.trim().split('\n').map(line => line.trim().split(' '));
+  const pick = kind => rows.filter(row => row[0] === kind).map(row => row.slice(1).map(Number));
+
+  // 4..6 are Switch, Dimmer and Automatic with the bar upright (bar_orientation.h).
+  assert.deepEqual(pick('layout'), [[0, 0], [1, 1], [2, 2], [3, 3], [4, 1], [5, 2]]);
+
+  // Bar: None 0, Toggle 1, Dimmer 2.
+  const bars = new Map(pick('bar').map(([layout, half, dimmable, bar]) => [`${layout}${half}${dimmable}`, bar]));
+  for (const key of bars.keys()) {
+    const [layout, half] = key;
+    if (half === '1' || layout === '0') assert.equal(bars.get(key), 0, `no bar ${key}`);
+  }
+  assert.equal(bars.get('100'), 1);
+  assert.equal(bars.get('101'), 1, 'Switch stays a switch for dimmable lights');
+  assert.equal(bars.get('200'), 1, 'Dimmer falls back to the switch');
+  assert.equal(bars.get('201'), 2);
+  assert.equal(bars.get('300'), 1);
+  assert.equal(bars.get('301'), 2);
+
+  const [[margin, endRadius, handleWidth, handleHeight, low, high]] = pick('geometry');
+  // Smallest piece = bar radius + end rounding (tangential), handle in its
+  // middle (approved mockup switch-tiles-left).
+  assert.deepEqual([endRadius, handleWidth, handleHeight], [15, 4, 25]);
+  assert.equal(margin, Math.floor((26 + 15) / 2));
+  assert.equal(low, 26 + 15 - margin);
+  assert.equal(high, 156 - margin);
+
+  const values = new Map(pick('value').map(([x, value]) => [x, value]));
+  // Off only beyond the bar's start (like the popup slider's end); 1 % up to
+  // the smallest piece's handle; 100 % at the end; monotonic in between.
+  assert.equal(values.get(-1), 0);
+  assert.equal(values.get(0), 1);
+  assert.equal(values.get(low), 1);
+  assert.equal(values.get(high), 100);
+  assert.equal(values.get(170), 100);
+  let previous = 0;
+  for (let x = -40; x <= 170; x += 1) {
+    assert.ok(values.get(x) >= previous, `value at ${x}`);
+    previous = values.get(x);
+  }
+
+  const fills = pick('fill');
+  assert.deepEqual(fills[0], [0, low, 0], 'off: no fill');
+  assert.deepEqual(fills[1], [1, low, 26 + 15], '1 %: bar radius + end rounding');
+  assert.deepEqual(fills[100], [100, high, 156], '100 % fills the bar');
+  // The handle sits exactly in the middle of the smallest piece.
+  assert.ok(Math.abs(fills[1][1] - (26 + 15) / 2) <= 0.5, 'handle centered at 1 %');
+  // The end rounding is fixed in the middle and becomes the bar radius at
+  // the full end, growing monotonically, never shrinking.
+  const ends = pick('end');
+  const endAt = new Map(ends.map(([fill, end]) => [fill, end]));
+  assert.equal(endAt.get(26 + 15), 15);
+  assert.equal(endAt.get(100), 15);
+  assert.equal(endAt.get(156), 26);
+  let lastEnd = 0;
+  for (const [fill, end] of ends) {
+    assert.ok(end >= lastEnd && end >= 15 && end <= 26, `end rounding at ${fill}`);
+    lastEnd = end;
+  }
+  for (let value = 1; value <= 100; ++value) {
+    // The handle round-trips through value_at.
+    assert.equal(values.get(fills[value][1]), value, `round trip ${value}`);
+  }
+  // Approved mockup switch-tall (2026-10-01): Sensor look from 1.5 rows for
+  // the header layouts only, the bar + 1/3 of the extra height.
+  assert.deepEqual(pick('look'), [[1, 0, 0], [2, 0, 0], [3, 1, 0], [4, 1, 0]]);
+  assert.deepEqual(pick('grow'), [[0, 27, 53]]);
+  assert.deepEqual(pick('tall'), [[15, 4, 36, 41]], 'Only the handle height grows');
+}
+
+// Policy, save path and Web mirror.
+const geometry = readRepoFile('src/tiles/config/tile_geometry.h');
+assert.match(geometry, /icon_title\(type\) \|\| type == TILE_SWITCH/);
+assert.match(geometry, /inline bool compact_switch\(int type, float w, float h\)/);
+const handler = readRepoFile('src/types/switch/web_handler.cpp');
+assert.match(handler, /raw >= 0 && raw <= switch_layout::kLayoutMax/);
+const layoutJs = readRepoFile('src/web/admin/tiles/layout.js');
+assert.match(layoutJs, /\[2, 4, 5, 7, 8, 9, 10, 17, 18, 19, 24, 25, 26, 27, 29\]\.includes\(Number\(type\)\)/);
+const admin = readRepoFile('src/types/switch/admin.js');
+for (const marker of [
+  'const endRadius = Math.floor(reference / 4);',
+  'handleWidth: Math.max(3, Math.floor(reference * 7 / 100)),',
+  'const minFill = Math.min(radius + endRadius, width);',
+  'const margin = Math.floor(minFill / 2);',
+  'endRadiusFor(fill) {',
+  "const SWITCH_LAYOUT_NEW_TILE = '3';",
+  'SWITCH_I18N'
+]) {
+  assert.ok(admin.includes(marker), `Web dimmer mirror: ${marker}`);
+}
+// Value size like the half-height Sensor: editor field, save and load.
+const html = readRepoFile('src/types/switch/web_html.cpp');
+assert.ok(html.includes('append_switch_choice(html, tab_id, "switch_value_font", tr.sensor_value_size, sizes, 6, size_attrs);'));
+// Named by the sizes this panel draws (value_size_attrs.h, user 2026-10-27).
+assert.ok(html.includes('append_value_size_attrs(size_attrs, FONT_VALUE, tr.sensor_value_size_default);'));
+// Tall tiles: the Sensor value sizes and title, the state centered between
+// the disc and the bar, kept centered when a long state steps down.
+// The bar's box, drawing and touch mapping live in the shared level bar.
+const levelBar = readRepoFile('src/tiles/runtime/level_bar.h');
+// The header (title, state line, tall look) lives in the shared tile header.
+const tileHeader = readRepoFile('src/tiles/runtime/tile_header.h');
+const tallRenderer = readRepoFile('src/types/switch/renderer.cpp') + levelBar + tileHeader;
+// An upright bar keeps the header beside the disc (bar_orientation.h).
+assert.ok(tallRenderer.includes('const bool tall = switch_layout::sensor_look(layout, tile.span_h, view->upright);') &&
+          tallRenderer.includes('tall ? tile_layout::value_font_for_choice(tile.sensor_value_font, FONT_VALUE)'));
+assert.ok(tallRenderer.includes('tile_header::create(container, tile, tall, bar_box(tile).top);') &&
+          tallRenderer.includes('header.state_center = static_cast<int16_t>((inset + disc + bar_top) / 2 - pad_y);') &&
+          tallRenderer.includes('if (center >= 0) lv_obj_set_y(label, center - lv_font_get_line_height(font) / 2);'));
+assert.ok(tallRenderer.includes('switch_layout::bar_growth(tile_h, GRID_CELL_H)'));
+const layoutJsTall = readRepoFile('src/web/admin/tiles/layout.js');
+assert.ok(layoutJsTall.includes("const switchTall = switchHeader && Number(layout?.span_h) > 1 && !el.classList.contains('switch-upright');"));
+assert.ok(admin.includes('function switchSensorLook(style, spanH, upright = false) {'));
+const livePreview = readRepoFile('src/web/admin/tiles/live-preview.js');
+assert.ok(livePreview.includes('!switchSensorLook(switchStyle, spanH, switchUpright));'),
+          'The editor offers the value sizes of the tile size');
+assert.ok(tallRenderer.includes('switch_layout::Dimmer geometry{width, height, radius, base};') &&
+          tallRenderer.includes('level_bar::draw_fill(layer, view->bar, view->level, view->bar_base, accent, notch, view->upright);') &&
+          tallRenderer.includes('draw_power_symbol(layer, thumb, symbol_color, view->on, view->bar_base);'),
+          'A taller bar keeps its handle width, roundings and symbol size');
+// b148 regression: switching a dimmable light on showed 100 % until Home
+// Assistant reported its brightness.
+assert.ok(tallRenderer.includes('const uint8_t unreported_level = dimmable ? view->last_on_level : 100;') &&
+          tallRenderer.includes('if (dimmable && on && level > 0) view->last_on_level = level;') &&
+          tallRenderer.includes('show_state_text(view, state, dimmable && level > 0, level, on);'));
+// The Light popup's brightness handle line on the fill like the tile's
+// (user 2026-10-10, tone_color::notch_on), in the popup card's color: the
+// popup shows the tile without "Ausfuellen" (#130, user 2026-10-26).
+const popup = readRepoFile('src/ui/popups/light/light_popup.cpp');
+assert.ok(popup.includes('lv_color_hex(tone_color::notch_on(ctx->brightness_draw_color, lv_color_to_u32(brightness_dash_color(ctx))));') &&
+          popup.includes('static lv_color_t brightness_dash_color(const LightPopupContext* ctx) { return popup_surface::card(ctx->card_bg); }'));
+assert.ok(tallRenderer.includes('level_bar::draw_fill(layer, view->bar, view->level, view->bar_base, accent, notch, view->upright);'),
+  'The tile handle is the same handle line');
+// b149 regression: the resize preview copied the tile at its old size, so a
+// Switch kept its bar at half height and lost it (icon button look) at one
+// row; it now takes the parts of the new size.
+const dragResize = readRepoFile('src/web/admin/tiles/drag-resize.js');
+assert.ok(dragResize.includes('if (isSwitch) prepareSwitchResizePreview(preview, data, layout);') &&
+          dragResize.includes('if (isSwitch) finishSwitchResizePreview(preview, data);'));
+assert.ok(admin.includes('function prepareSwitchResizePreview(preview, data, layout) {'));
+// b150 regression: the grid measured the dimmer fill before layoutTiles gave
+// the tile its span, so wider tiles kept the one-cell fill; the fill is drawn
+// again whenever the bar's size changes.
+assert.ok(admin.includes('switchBarObserver.observe(bar);') && admin.includes('function drawSwitchPreviewFill(bar) {'));
+const css = readRepoFile('src/web/assets/admin.css');
+assert.ok(css.includes('height:calc(var(--switch-bar-height, 30px) + var(--switch-bar-grow, 0px));'));
+assert.ok(css.includes('.switch-choices button.hidden { display:none; }'));
+assert.ok(admin.includes("formData.append('sensor_value_font', switchValueFont("));
+assert.ok(admin.includes('fontEl.value = switchValueFont(data.sensor_value_font);'));
+assert.match(handler, /tile\.sensor_value_font =\s*font >= 1 && font <= SENSOR_VALUE_FONT_MAX/);
+const renderer = readRepoFile('src/types/switch/renderer.cpp') + levelBar + tileHeader;
+// The bar draws itself: no LVGL switch/slider widgets, no clip_corner.
+for (const forbidden of ['lv_switch_create', 'lv_slider_create', 'set_style_clip_corner']) {
+  assert.ok(!renderer.includes(forbidden), `Switch renderer must not use ${forbidden}`);
+}
+assert.ok(renderer.includes('tile_icon_disc::mark_surface(bar);'));
+// Approved touch zones: the bar takes touches up to the card edges.
+assert.ok(renderer.includes('lv_obj_set_ext_click_area(bar, climate_layout::kOuterInset);'));
+// The fill stays inside the bar's shape through narrowed clip areas, no layer.
+assert.ok(renderer.includes('layer->_clip_area = clip_ori;'));
+// Title and state left-aligned beside the disc like the half-height tiles.
+assert.ok(renderer.includes('const int text_x = inset + disc + 2 * inset;'));
+assert.ok(renderer.includes('compact_sensor_layout::value_font(tile.sensor_value_font)'));
+// b143 regression: a local bg_opa on the bar outranked the shared control
+// fill style (ui_surface_style::apply_control_fill), so the track never showed.
+const createBar = levelBar.slice(levelBar.indexOf('inline lv_obj_t* create('),
+                                 levelBar.indexOf('inline bool intersect('));
+assert.ok(createBar.length > 0, 'create_bar must exist');
+assert.ok(!/lv_obj_set_style_bg_opa\(bar,/.test(createBar),
+          'The bar track opacity must come from the control fill style');
+assert.ok(renderer.includes('lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLL_CHAIN_VER);'));
+
+// b144 regressions on the V2: dragging from off showed a grey 1 % piece
+// until Home Assistant replied (the fill takes the icon color), and a later
+// icon color change did not redraw the bar.
+const localLevel = renderer.slice(renderer.indexOf('void show_local_level('),
+                                  renderer.indexOf('void dimmer_event('));
+assert.ok(localLevel.includes('if ((value > 0) != was_on) {') &&
+          localLevel.includes('update_switch_tile_state(data->grid_type, data->index, payload);'),
+          'Crossing off/on while dragging switches the tile at once');
+assert.ok(renderer.includes('if (view->bar && view->fill_rgb != icon_rgb) lv_obj_invalidate(view->bar);'),
+          'A new icon color redraws the bar');
+// Smoothness: a drag step redraws only the changed columns, like the popup.
+assert.ok(localLevel.includes('invalidate_level_change(view, old_level, value);') &&
+          !localLevel.includes('lv_obj_invalidate(view->bar)'),
+          'Drag steps must not redraw the whole bar');
+assert.ok(levelBar.includes('lv_obj_invalidate_area(bar, &dirty);'));
+
+// b146 regressions on the V2: the track lit up under the finger (LVGL
+// pressed the bar, not its card), and a light switched off sometimes showed
+// its color (echoes of earlier commands, or a paced level sent after a tap).
+assert.ok(renderer.includes('static_cast<lv_event_code_t>(LV_EVENT_PRESSED | LV_EVENT_PREPROCESS)') &&
+          renderer.includes('tile_icon_disc::set_fill_colors(bar, rgb, rgb);') &&
+          renderer.includes('tile_icon_source::refresh_controls(lv_obj_get_parent(bar));'),
+          'A touch on the bar keeps its resting color');
+const iconSource = readRepoFile('src/tiles/runtime/tile_icon_source.cpp');
+assert.ok(iconSource.includes('own_press ? rest : surface_pressed'),
+          'A refresh while the bar is touched keeps its resting color');
+const toggle = renderer.slice(renderer.indexOf('void toggle_switch_tile('),
+                              renderer.indexOf('// State line'));
+const holdToggle = renderer.slice(renderer.indexOf('void hold_toggle('), renderer.indexOf('void toggle_switch_tile('));
+assert.ok(toggle.includes('hold_toggle(data, next_on);') &&
+          holdToggle.includes('g_final_entity.equalsIgnoreCase(data->entity_id)') &&
+          holdToggle.includes('g_drag.hold_level = false;') && holdToggle.includes('start_hold();'),
+          'A toggle cancels a pending dimmer level and holds its on/off');
+const tileRenderer = readRepoFile('src/tiles/runtime/tile_renderer.cpp');
+assert.ok(tileRenderer.includes('switch_tile_held_on(widgets, held_on)') &&
+          tileRenderer.includes('switch_tile_show_state(widgets, tile, state, switch_state_icon_color(shown));'),
+          'The icon color follows the held on/off like the bar');
+assert.ok(renderer.includes('switch_tile_show_state(widgets[data->index], *tile, state, switch_state_icon_color(state));'),
+          'The end of a hold restores the reported icon color');
+
+// The Light popup looks like the tile: circle, track and buttons in the
+// tile's circle color, no Light exception in the shell
+// (test-light-popup-matches-tile.mjs).
+const lightPopup = readRepoFile('src/ui/popups/light/light_popup.cpp');
+assert.ok(!lightPopup.includes('lv_obj_set_style_bg_opa(ctx->val_slider, LV_OPA_30'),
+          'The brightness track is opaque');
+assert.ok(!readRepoFile('src/ui/popups/popup_shell.cpp').includes('disc_track'), 'No Light track exception');
+assert.match(iconSource, /popup_shows_tile_color && from_icon > 0,\s+from_icon\);/);
+
+console.log('Switch layout tests passed.');

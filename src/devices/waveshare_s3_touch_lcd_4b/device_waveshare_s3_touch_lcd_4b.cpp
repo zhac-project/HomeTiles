@@ -97,8 +97,15 @@ constexpr uint32_t kExpectedPsramBytes = 8U * 1024U * 1024U;
 #define HOMETILES_WAVESHARE_S3_RGB_BOUNCE_ROWS 0
 #endif
 
-// Exact values from Waveshare's maintained ESP-IDF BSP.
-constexpr uint32_t kRgbPclkHz = 16000000;
+// Waveshare's BSP runs 16 MHz with bounce buffers fed from PSRAM XIP and
+// 64-byte cache lines. The stock Arduino SDK has neither, so the RGB DMA
+// reads the framebuffer straight from PSRAM next to LVGL, Wi-Fi and flash
+// traffic (flash and PSRAM share the bus). When it falls behind, the image
+// stays shifted sideways until the next flash write restarts the scanout;
+// the shift reported in issue #26 matches that. Ten MHz is the direct-mode
+// clock of the other two ST7701 480x480 S3 profiles.
+constexpr uint32_t kRgbPclkHz = 10000000;
+// Porches: exact values from Waveshare's maintained ESP-IDF BSP.
 constexpr uint32_t kRgbHsyncPulseWidth = 10;
 constexpr uint32_t kRgbHsyncBackPorch = 10;
 constexpr uint32_t kRgbHsyncFrontPorch = 20;
@@ -554,7 +561,6 @@ void ensureStorageLayout() {
   if (!g_littlefs_ready) return;
   LittleFS.mkdir("/_tile_grids");
   LittleFS.mkdir("/_tile_links");
-  LittleFS.mkdir("/icons");
 }
 
 bool writeTouchRegister(uint16_t reg, uint8_t value) {

@@ -29,6 +29,23 @@ namespace GithubUpdate {
 constexpr const char* kRepoUrl =
     "https://github.com/zhac-project/HomeTiles";
 
+// Release files the panel fetches for itself (the icon file) come from the
+// release of its own FW_VERSION. Beta builds carry a version no release of the
+// main repository has; they use the staging repository, whose releases are
+// made for exactly those builds.
+#if defined(HOMETILES_ISSUE30_SAFE_BETA) || defined(HOMETILES_ISSUE38_BETA) || \
+    defined(HOMETILES_CAMERA_BETA) || defined(HOMETILES_TEST_BETA)
+constexpr const char* kReleaseFilesRepoUrl =
+    "https://github.com/GalusPeres/HomeTiles-staging";
+#else
+// ZHAC fork: the fork publishes no icon files. Its built-in icons and fonts
+// are upstream's, so the icon file of upstream's release with the same
+// FW_VERSION fits; keep FW_VERSION on an upstream release tag or publish the
+// files with the fork's own releases (docs-dev/zhac-fork.md).
+constexpr const char* kReleaseFilesRepoUrl =
+    "https://github.com/GalusPeres/HomeTiles";
+#endif
+
 struct CheckResult {
   bool ok = false;                // The request completed successfully.
   bool update_available = false;  // latest_tag is newer than FW_VERSION.
@@ -50,6 +67,19 @@ typedef void (*ProgressFn)(size_t written, size_t total);
 // Admin because TLS needs about 45KB of internal RAM, and restarts the device
 // after a true result. error_out contains the reason on false.
 bool install(const char* tag, ProgressFn progress, String& error_out);
+
+// Receives a downloaded release file in order; false stops the transfer.
+typedef bool (*FileWriteFn)(const uint8_t* data, size_t len, void* ctx);
+
+// Downloads `file_name` of release `tag` from kReleaseFilesRepoUrl with
+// install()'s ranges, retries and pacing, completely into PSRAM, and hands
+// it to `write` only after the last HTTPS connection has ended (the P4 keeps
+// ESP-Hosted reception and flash writes apart). The file must be exactly
+// `expected_bytes` long. Blocks like install(); the caller prepares the panel
+// the same way.
+bool downloadReleaseFile(const char* tag, const char* file_name,
+                         size_t expected_bytes, FileWriteFn write, void* ctx,
+                         ProgressFn progress, String& error_out);
 
 // Multiline diagnostics for the last install() run, including failed ranges,
 // attempts, memory, and WiFi state. The caller appends this to the crash report

@@ -24,6 +24,8 @@
 
 #include "src/core/display/dma2d_arbiter.h"
 #include "src/devices/common/p4_dsi_camera_presenter.h"
+#include "src/devices/common/p4_dsi_cpu_rotate.h"
+#include "src/devices/common/p4_dsi_ui_ppa.h"
 #include "src/devices/guition_jc1060p470c_v2/vendor/displays_config.h"
 #include "src/devices/guition_jc1060p470c_v2/vendor/esp_lcd_jd9165.h"
 #include "src/devices/guition_jc1060p470c_v2/vendor/gt911.h"
@@ -974,7 +976,43 @@ void ensure_storage_layout() {
   }
   LittleFS.mkdir("/_tile_grids");
   LittleFS.mkdir("/_tile_links");
-  LittleFS.mkdir("/icons");
+}
+
+// The turned layout (grid_layout::turned(), user 2026-10-11): the UI shown
+// upright, a quarter turned against this panel. The same quarter turn as the
+// panels upright by themselves (the V2's landscape UI, p4_dsi_ui_ppa and
+// p4_dsi_cpu_rotate), the other way round, so DisplayManager's shared touch
+// turn maps this panel's points onto it: UI (x, y) at panel (y, h - 1 - x),
+// with 180 the mirrored place.
+bool g_turned = false;
+p4_dsi_ui_ppa::Client g_turn_ppa("GuitionJC1060P470CV2");
+bool g_turn_ppa_started = false;
+
+uint8_t turn_rotation() { return g_rotation ^ 0x02; }
+// The camera popup's frames turn with the UI.
+uint8_t frame_rotation() { return g_turned ? turn_rotation() : g_rotation; }
+
+bool draw_turned_area(int32_t x, int32_t y, int32_t w, int32_t h, const uint16_t* data) {
+  if (!data || w <= 0 || h <= 0) return false;
+  const uint8_t turn = turn_rotation();
+  const int32_t panel_w = static_cast<int32_t>(display_cfg.width);
+  const int32_t panel_h = static_cast<int32_t>(display_cfg.height);
+  const int32_t dst_x = (turn & 0x02) ? y : panel_w - y - h;
+  const int32_t dst_y = (turn & 0x02) ? panel_h - x - w : x;
+  const auto ppa_result = g_turn_ppa.rotate(g_camera_presenter, panel_w, panel_h, x, y, w, h, data, turn);
+  if (ppa_result == p4_dsi_ui_ppa::Result::Drawn) {
+    mark_dirty_rect(dst_x, dst_y, h, w);
+    return true;
+  }
+  if (ppa_result == p4_dsi_ui_ppa::Result::Failed) return false;
+  // Small regions: the CPU turn straight into the panel framebuffer.
+  uint16_t* fb = panel_fb();
+  if (!fb) return false;
+  p4_dsi_cpu_rotate::rotate_into(fb, panel_w, dst_x, dst_y, w, h, data, (turn & 0x02) != 0);
+  flush_framebuffer_rect(fb, dst_x, dst_y, h, w);
+  mark_dirty_rect(dst_x, dst_y, h, w);
+  g_camera_presenter.noteUiWrite(dst_x, dst_y, h, w, false);
+  return true;
 }
 
 }  // namespace
@@ -1025,11 +1063,19 @@ bool DeviceGuitionJC1060P470CV2::ppaCooldownActive() {
 
 void DeviceGuitionJC1060P470CV2::displayPushPixels(int32_t x, int32_t y, int32_t w, int32_t h,
                                                  const uint16_t* data) {
+  if (g_turned) {
+    draw_turned_area(x, y, w, h, data);
+    return;
+  }
   draw_landscape_area(x, y, w, h, data);
 }
 
 void DeviceGuitionJC1060P470CV2::displayPushPixelsDMA(int32_t x, int32_t y, int32_t w, int32_t h,
                                                     const uint16_t* data) {
+  if (g_turned) {
+    draw_turned_area(x, y, w, h, data);
+    return;
+  }
   draw_landscape_area(x, y, w, h, data);
 }
 
@@ -1047,7 +1093,7 @@ bool DeviceGuitionJC1060P470CV2::displayTryFullFramePreview(
       nullptr,
   };
   const bool presented = g_camera_presenter.present(
-      x, y, w, h, source_stride, data, data_size, byte_swap, g_rotation,
+      x, y, w, h, source_stride, data, data_size, byte_swap, frame_rotation(),
       runtime);
   if (presented) g_ppa_consecutive_faults = 0;
   return presented;
@@ -1055,6 +1101,29 @@ bool DeviceGuitionJC1060P470CV2::displayTryFullFramePreview(
 
 void DeviceGuitionJC1060P470CV2::displayEndFullFramePreview() {
   g_camera_presenter.end();
+}
+
+bool DeviceGuitionJC1060P470CV2::displayFullFrameInfo(uint16_t& width, uint16_t& height,
+                                                      uint16_t& turn_cw) {
+  return g_panel_fb_ready &&
+         g_camera_presenter.fullFrameInfo(frame_rotation(), width, height, turn_cw);
+}
+
+bool DeviceGuitionJC1060P470CV2::displayBeginFullFrames() {
+  return g_panel_fb_ready && g_camera_presenter.beginFullFrames();
+}
+
+uint16_t* DeviceGuitionJC1060P470CV2::displayAcquireFullFrame(size_t& bytes) {
+  bytes = 0;
+  return g_panel_fb_ready ? g_camera_presenter.acquireFullFrame(bytes) : nullptr;
+}
+
+bool DeviceGuitionJC1060P470CV2::displaySubmitFullFrame() {
+  return g_panel_fb_ready && g_camera_presenter.submitFullFrame();
+}
+
+void DeviceGuitionJC1060P470CV2::displayEndFullFrames() {
+  if (g_panel_fb_ready) g_camera_presenter.endFullFrames();
 }
 
 void DeviceGuitionJC1060P470CV2::displayWaitDMA() {
@@ -1110,6 +1179,16 @@ void DeviceGuitionJC1060P470CV2::displayFillScreen(uint16_t color) {
 
 void DeviceGuitionJC1060P470CV2::displaySetRotation(uint8_t rotation) {
   g_rotation = rotation & 0x03;
+}
+
+void DeviceGuitionJC1060P470CV2::displaySetUpright(bool upright) {
+  // The turned layout: the UI and the camera popup's frames a quarter turned.
+  g_turned = upright;
+  if (upright && !g_turn_ppa_started) {
+    g_turn_ppa_started = true;
+    g_turn_ppa.init();
+  }
+  g_camera_presenter.setUpright(upright);
 }
 
 void DeviceGuitionJC1060P470CV2::setBrightness(uint8_t value) {
@@ -1494,13 +1573,11 @@ void DeviceGuitionJC1060P470CV2::migrateStorageFromSD() {
 
   LittleFS.mkdir("/_tile_grids");
   LittleFS.mkdir("/_tile_links");
-  LittleFS.mkdir("/icons");
 
   if (initSDCard()) {
     Serial.println("[Storage] Migrating data from SD to LittleFS...");
     copyDirectory(JC1060SDMMC, LittleFS, "/_tile_grids");
     copyDirectory(JC1060SDMMC, LittleFS, "/_tile_links");
-    copyDirectory(JC1060SDMMC, LittleFS, "/icons");
     Serial.println("[Storage] Migration complete");
   } else {
     Serial.println("[Storage] No SD card, starting fresh");

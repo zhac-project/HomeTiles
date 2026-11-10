@@ -3,7 +3,10 @@ param()
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
-$fontOutputDirectory = Join-Path $repoRoot 'src\fonts'
+# The full fonts are the input of tools/generate-icon-files.mjs, which writes
+# the compiled src/fonts/mdi_icons_<px>.c and the icon files.
+$fontOutputDirectory = Join-Path $repoRoot 'tools\mdi-fonts'
+$licenseDirectory = Join-Path $repoRoot 'src\fonts'
 $mdiVersion = '7.4.47'
 $converterVersion = '1.5.3'
 $mdiRange = '983040-991231'
@@ -120,8 +123,13 @@ try {
 
     Copy-Item -LiteralPath $sourceLicense `
         -Destination (Join-Path `
-            $fontOutputDirectory 'MaterialDesignIcons-LICENSE.txt') `
+            $licenseDirectory 'MaterialDesignIcons-LICENSE.txt') `
         -Force
+
+    & node (Join-Path $repoRoot 'tools\generate-icon-files.mjs')
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Unable to generate the icon files.'
+    }
 }
 finally {
     $resolvedTemp = [IO.Path]::GetFullPath($tempDirectory)

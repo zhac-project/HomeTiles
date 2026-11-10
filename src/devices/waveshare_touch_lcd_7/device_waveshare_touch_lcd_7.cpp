@@ -24,6 +24,7 @@
 
 #include "src/core/display/dma2d_arbiter.h"
 #include "src/devices/common/p4_dsi_camera_presenter.h"
+#include "src/devices/common/p4_dsi_cpu_rotate.h"
 #include "src/devices/waveshare_touch_lcd_7/sdmmc.h"
 #include "src/devices/waveshare_touch_lcd_7/vendor/displays_config.h"
 #include "src/devices/waveshare_touch_lcd_7/vendor/gt911.h"
@@ -646,6 +647,19 @@ bool draw_landscape_area(int32_t x, int32_t y, int32_t w, int32_t h, const uint1
     }
   }
 
+  // Small regions: rotate straight into the panel framebuffer
+  // (p4_dsi_cpu_rotate.h) instead of through the PSRAM rotate buffer.
+  if (g_panel_fb_ready) {
+    if (uint16_t* fb = panel_fb()) {
+      p4_dsi_cpu_rotate::rotate_into(fb, display_cfg.width, dst_x, dst_y, w, h,
+                                     data, (g_rotation & 0x02) != 0);
+      flush_framebuffer_rect(fb, dst_x, dst_y, dst_w, dst_h);
+      mark_dirty_rect(dst_x, dst_y, dst_w, dst_h);
+      g_camera_presenter.noteUiWrite(dst_x, dst_y, dst_w, dst_h, false);
+      return true;
+    }
+  }
+
   const size_t pixel_count = static_cast<size_t>(w) * static_cast<size_t>(h);
   if (!ensure_rotate_buffer(pixel_count)) {
     return false;
@@ -1003,7 +1017,6 @@ void ensure_storage_layout() {
   }
   LittleFS.mkdir("/_tile_grids");
   LittleFS.mkdir("/_tile_links");
-  LittleFS.mkdir("/icons");
 }
 
 }  // namespace
@@ -1054,12 +1067,17 @@ bool DeviceWaveshareTouchLCD7::ppaCooldownActive() {
 
 void DeviceWaveshareTouchLCD7::displayPushPixels(int32_t x, int32_t y, int32_t w, int32_t h,
                                                  const uint16_t* data) {
+  // The upright layout: straight into the panel (the shared way).
+  if (g_camera_presenter.upright()) {
+    g_camera_presenter.drawUpright(x, y, w, h, data, g_rotation);
+    return;
+  }
   draw_landscape_area(x, y, w, h, data);
 }
 
 void DeviceWaveshareTouchLCD7::displayPushPixelsDMA(int32_t x, int32_t y, int32_t w, int32_t h,
                                                     const uint16_t* data) {
-  draw_landscape_area(x, y, w, h, data);
+  displayPushPixels(x, y, w, h, data);
 }
 
 bool DeviceWaveshareTouchLCD7::displayTryFullFramePreview(
@@ -1084,6 +1102,29 @@ bool DeviceWaveshareTouchLCD7::displayTryFullFramePreview(
 
 void DeviceWaveshareTouchLCD7::displayEndFullFramePreview() {
   g_camera_presenter.end();
+}
+
+bool DeviceWaveshareTouchLCD7::displayFullFrameInfo(uint16_t& width, uint16_t& height,
+                                                    uint16_t& turn_cw) {
+  return g_panel_fb_ready &&
+         g_camera_presenter.fullFrameInfo(g_rotation, width, height, turn_cw);
+}
+
+bool DeviceWaveshareTouchLCD7::displayBeginFullFrames() {
+  return g_panel_fb_ready && g_camera_presenter.beginFullFrames();
+}
+
+uint16_t* DeviceWaveshareTouchLCD7::displayAcquireFullFrame(size_t& bytes) {
+  bytes = 0;
+  return g_panel_fb_ready ? g_camera_presenter.acquireFullFrame(bytes) : nullptr;
+}
+
+bool DeviceWaveshareTouchLCD7::displaySubmitFullFrame() {
+  return g_panel_fb_ready && g_camera_presenter.submitFullFrame();
+}
+
+void DeviceWaveshareTouchLCD7::displayEndFullFrames() {
+  if (g_panel_fb_ready) g_camera_presenter.endFullFrames();
 }
 
 void DeviceWaveshareTouchLCD7::displayWaitDMA() {
@@ -1139,6 +1180,11 @@ void DeviceWaveshareTouchLCD7::displayFillScreen(uint16_t color) {
 
 void DeviceWaveshareTouchLCD7::displaySetRotation(uint8_t rotation) {
   g_rotation = rotation & 0x03;
+}
+
+void DeviceWaveshareTouchLCD7::displaySetUpright(bool upright) {
+  // The UI and the camera popup's frames without the quarter turn.
+  g_camera_presenter.setUpright(upright);
 }
 
 void DeviceWaveshareTouchLCD7::setBrightness(uint8_t value) {
@@ -1462,13 +1508,11 @@ void DeviceWaveshareTouchLCD7::migrateStorageFromSD() {
 
   LittleFS.mkdir("/_tile_grids");
   LittleFS.mkdir("/_tile_links");
-  LittleFS.mkdir("/icons");
 
   if (initSDCard()) {
     Serial.println("[Storage] Migrating data from SD to LittleFS...");
     copyDirectory(WaveshareSDMMC, LittleFS, "/_tile_grids");
     copyDirectory(WaveshareSDMMC, LittleFS, "/_tile_links");
-    copyDirectory(WaveshareSDMMC, LittleFS, "/icons");
     Serial.println("[Storage] Migration complete");
   } else {
     Serial.println("[Storage] No SD card, starting fresh");

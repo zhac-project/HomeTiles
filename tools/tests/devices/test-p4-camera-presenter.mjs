@@ -79,10 +79,68 @@ requireMarker(
 );
 const swapIndex = presenterSource.indexOf('const esp_err_t swap_err');
 const refreshDrainIndex = presenterSource.indexOf('drainRefreshSignal();', swapIndex);
-const refreshWaitIndex = presenterSource.indexOf('if (!waitRefreshDone())', swapIndex);
+const pendingIndex = presenterSource.indexOf('refresh_pending_ = true;', swapIndex);
 assert.ok(
-  swapIndex >= 0 && refreshDrainIndex > swapIndex && refreshWaitIndex > refreshDrainIndex,
-  'continuous VSYNC semaphore must be drained after the accepted draw and before waiting',
+  swapIndex >= 0 && refreshDrainIndex > swapIndex && pendingIndex > refreshDrainIndex,
+  'continuous VSYNC semaphore must be drained after the accepted draw, then the refresh stays pending',
+);
+
+// The UI loop no longer waits up to one panel refresh after every camera
+// swap (about 6 ms per frame on average at 68.6 Hz). The wait moved to the
+// next write into the then inactive framebuffer, which the panel may still
+// scan until that refresh: the start of the next present(), begin() and end().
+const presentBody = presenterSource.slice(
+  presenterSource.indexOf('bool Presenter::present('),
+  presenterSource.indexOf('void Presenter::end()'),
+);
+assert.ok(
+  presentBody.indexOf('finishPendingSwap();') >= 0 &&
+    presentBody.indexOf('finishPendingSwap();') < presentBody.indexOf('Dma2dArbiterGuard dma2d_guard') &&
+    presentBody.indexOf('finishPendingSwap();') < presentBody.indexOf('syncUiToInactive()'),
+  'present() must confirm the previous swap before it writes the inactive framebuffer',
+);
+assert.ok(
+  !presentBody.slice(presentBody.indexOf('const esp_err_t swap_err')).includes('waitRefreshDone'),
+  'present() must not wait for the refresh after its own swap',
+);
+const finishBody = presenterSource.slice(
+  presenterSource.indexOf('void Presenter::finishPendingSwap()'),
+  presenterSource.indexOf('\n}\n', presenterSource.indexOf('void Presenter::finishPendingSwap()')),
+);
+requireMarker(finishBody, 'if (!refresh_pending_) return;', 'pending swap guard');
+requireMarker(finishBody, 'if (!waitRefreshDone())', 'deferred DSI swap confirmation');
+requireMarker(finishBody, 'restartAfterDisplayTimeout(', 'deferred fail-closed refresh timeout');
+requireMarker(finishBody, 'refresh_pending_ = false;', 'pending swap reset');
+const beginBody = presenterSource.slice(
+  presenterSource.indexOf('bool Presenter::begin(bool covers_panel)'),
+  presenterSource.indexOf('bool Presenter::syncUiToInactive()'),
+);
+assert.ok(
+  beginBody.indexOf('finishPendingSwap();') >= 0 &&
+    beginBody.indexOf('finishPendingSwap();') < beginBody.indexOf('std::memcpy(inactive'),
+  'begin() must confirm a pending swap before it copies into the inactive framebuffer',
+);
+// A frame that fills the panel (the screensaver) replaces every pixel: no
+// 2 MB copy of the UI before it (V2 b308). A partial frame (a camera stream)
+// still lands on a copy of the UI and its later changes. The inactive
+// framebuffer is written back either way.
+assert.match(beginBody, /if \(!covers_panel\) \{[\s\S]*?std::memcpy\(inactive, active, framebufferBytes\(\)\);\s*\}/,
+  'only a partial frame copies the UI into the inactive framebuffer');
+assert.ok(beginBody.indexOf('if (!syncCache(inactive, framebufferBytes(), false)) return false;') >
+    beginBody.indexOf('std::memcpy(inactive'), 'the inactive framebuffer is written back in both cases');
+assert.match(presentBody,
+  /const bool covers_panel = dst_x == 0 && dst_y == 0 &&\s*dst_w == config_\.panel_width &&\s*dst_h == config_\.panel_height;\s*bool synced = begin\(covers_panel\);\s*if \(synced && covers_panel\) \{\s*resetMirrorDirty\(\);[^\n]*\n\s*\} else if \(synced\) \{\s*synced = syncUiToInactive\(\);/,
+  'a full-panel frame skips the UI copy and the dirty mirror; a partial frame keeps both');
+const endBody = presenterSource.slice(presenterSource.indexOf('void Presenter::end()'));
+assert.ok(
+  endBody.indexOf('finishPendingSwap();') >= 0 &&
+    endBody.indexOf('finishPendingSwap();') < endBody.indexOf('double_buffer_active_ = false;'),
+  'end() must confirm a pending swap before the UI owns both framebuffers again',
+);
+assert.match(
+  presenterSource,
+  /refresh_pending_ = false;\s*fault_cooldown_until_ms_ = 0;/,
+  'init resets the pending swap',
 );
 requireMarker(deviceSelect, '#define DEVICE_P4_IDF_DSI', 'shared DSI profile group');
 assert.match(
@@ -173,6 +231,17 @@ const profiles = [
     transform: 'Transform::Native0Or180',
     panel: [480, 800],
     logical: [480, 800],
+    genericPpa: false,
+  },
+  {
+    // The shared Waveshare P4 DSI driver (Waveshare 5-inch, #76); its UI PPA
+    // is the shared p4_dsi_ui_ppa client like the Guition V2's.
+    file: 'src/devices/waveshare_touch_lcd_5/dsi_driver/waveshare_p4_dsi.cpp',
+    header: 'src/devices/waveshare_touch_lcd_5/dsi_driver/waveshare_p4_dsi.h',
+    qualified: 'waveshare_p4_dsi::displayTryFullFramePreview',
+    transform: 'Transform::Portrait90Or270',
+    panel: [720, 1280],
+    logical: [1280, 720],
     genericPpa: false,
   },
 ];

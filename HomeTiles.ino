@@ -19,11 +19,15 @@
 #include "src/core/power/power_manager.h"
 #include "src/core/config/config_manager.h"
 #include "src/core/diagnostics/crash_log.h"
+#include "src/core/diagnostics/loop_stall.h"
+#include "src/core/diagnostics/text_fit_probe.h"
 #include "src/core/firmware/firmware_version.h"
 #include "src/core/firmware/github_update.h"
 #include "src/core/display/lvgl_tick_service.h"
 #include "src/devices/guition_esp32_4848s040/s3_diagnostics.h"
 #include "src/ui/ui_manager.h"
+#include "src/ui/shared/ui_theme.h"
+#include "src/ui/shared/theme_schedule.h"
 #include "src/ui/popups/sensor/sensor_popup.h"
 #include "src/ui/popups/popup_first_frame.h"
 #include "src/ui/popups/popup_open.h"
@@ -36,6 +40,7 @@
 #include "src/network/tls_memory.h"
 #include "src/network/transport/network_transport.h"
 #include "src/network/mqtt/mqtt_handlers.h"
+#include "src/network/bridge/ha_bridge_config.h"
 #include "src/network/mqtt/mqtt_topics.h"
 #include "src/web/setup/web_config.h"
 #include "src/web/server/web_admin.h"
@@ -43,14 +48,21 @@
 #include "src/ui/startup/boot_splash.h"
 #include "src/ui/tabs/tiles/tab_tiles_unified.h"
 #include "src/ui/screensaver/image_screensaver.h"
+#include "src/types/camera/picture.h"
 #include "src/ui/screensaver/screensaver_config.h"
 #include "src/io/hardware_io.h"
 #include "src/video/local_camera/local_camera.h"
+#include "src/video/camera_transport.h"
+#include "src/audio/speaker.h"
+#include "src/network/secure/command_channel.h"
 #include "src/tiles/config/tile_config.h"
+#include "src/tiles/config/new_panel_tiles.h"
 #include "src/tiles/runtime/tile_renderer.h"
 #include "src/tiles/runtime/tile_update_service.h"
 #include "src/types/media/update_service.h"
 #include "src/tiles/icons/mdi_icons.h"      // MDI Icon Mapping
+#include "src/tiles/icons/mdi_icon_store.h"
+#include "src/ui/tabs/settings/setup_screen.h"
 
 // MDI icon font (48px, 4bpp), defined in src/fonts/mdi_icons_48.c.
 LV_FONT_DECLARE(mdi_icons_48);
@@ -91,6 +103,10 @@ static constexpr uint32_t kBootBlackWarmupMs = 90;
 static constexpr uint32_t kBootBlackGapMs = 60;
 #endif
 
+#if defined(DEVICE_ESP32_S3_RGB_480)
+constexpr size_t kS3InternalMallocMax = 32;
+#endif
+
 static void log_memory_status(const char* tag) {
   const uint32_t heap_free = ESP.getFreeHeap();
   const uint32_t heap_min = ESP.getMinFreeHeap();
@@ -111,6 +127,12 @@ static void log_memory_status(const char* tag) {
                 psram_free / 1024,
                 psram_largest / 1024,
                 ESP.getPsramSize() / 1024);
+#if defined(DEVICE_ESP32_S3_RGB_480)
+  // The loop task's 16 KB stack is internal RAM: how much of it was ever used.
+  Serial.printf("[Mem] %s | Loop stack never below %u B free of %u B\n", tag ? tag : "?",
+                static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)),
+                static_cast<unsigned>(getArduinoLoopTaskStackSize()));
+#endif
   if (lv_is_initialized()) {
     lv_mem_monitor_t lv_mem{};
     lv_mem_monitor(&lv_mem);
@@ -406,11 +428,11 @@ static GithubUpdate::CheckResult perform_fw_check() {
 
   // Keep MQTT connected. Disconnecting it does not help the synchronous HTTPS
   // handshake and creates a retained subscribe/state burst afterwards.
-  Serial.println("[Update] Check: MQTT stays connected");
+  Serial.printf("[Update] Check: %s stays connected\n", networkManager.bridgeLogName());
 #if defined(DEVICE_ESP32_S3_RGB_480)
   const bool s3_rgb_network_active = networkTransport.isConnected();
 #endif
-#if defined(DEVICE_GUITION_ESP32_4848S040) || \
+#if defined(DEVICE_GUITION_ESP32_4848S040) || defined(DEVICE_GOLDEN_SECURITY_GS_T3E_V2) || \
     defined(DEVICE_SUNTON_ESP32_8048S070C)
   if (s3_rgb_network_active) {
     // Reduce continuous RGB scanout bandwidth before TLS/WiFi starts using
@@ -419,7 +441,7 @@ static GithubUpdate::CheckResult perform_fw_check() {
   }
 #endif
   GithubUpdate::CheckResult res = GithubUpdate::checkLatest();
-#if defined(DEVICE_GUITION_ESP32_4848S040) || \
+#if defined(DEVICE_GUITION_ESP32_4848S040) || defined(DEVICE_GOLDEN_SECURITY_GS_T3E_V2) || \
     defined(DEVICE_SUNTON_ESP32_8048S070C)
   if (s3_rgb_network_active) {
     // Restore normal scanout speed and finish with one canonical FB0 restart.
@@ -497,6 +519,7 @@ static void apply_fw_install() {
     clear_fw_install_auto_retry();
     settings_fw_install_done();
     Serial.println("[Update] Successful - restarting");
+    camera_transport::planned_restart();
     BoardHAL::prepareForRestart();
     delay(800);  // Erfolgsmeldung kurz stehen lassen
     BoardHAL::restart();
@@ -527,10 +550,105 @@ static void apply_fw_install() {
   BoardHAL::restart();
 }
 
+static bool icon_download_checked = false;
+
+struct IconFileWrite {
+  bool started = false;
+  String error;
+};
+
+// Runs after the whole file is in PSRAM and the last HTTPS connection ended.
+static bool write_icon_file(const uint8_t* data, size_t len, void* raw) {
+  auto* w = static_cast<IconFileWrite*>(raw);
+  if (!w->started) {
+    Device::storageWriteBegin();
+    w->started = true;
+    if (!mdi_icon_store::begin_write(mdi_icon_store::file_bytes(), w->error)) return false;
+  }
+  return mdi_icon_store::write(data, len);
+}
+
+static void icon_download_progress(size_t, size_t) {
+  displayManager.resetActivityTimer();
+  delay(1);
+}
+
+// A panel without a valid icon file for its firmware (after an update from a
+// version with built-in icons, or a reset LittleFS) fetches the file of its
+// own release. Same preparation as a GitHub firmware install: suspended
+// display, paused MQTT, stopped Web Admin. It restarts either way, also to
+// leave ESP-Hosted clean after a failed large HTTPS transfer.
+// requested: "Update" on the Web Admin's Icons card, which does not use up
+// one of the three automatic attempts.
+static void apply_icon_download(bool requested = false) {
+  Serial.printf("[Icons] Fetching %s of %s\n", mdi_icon_store::release_file_name(), FW_VERSION);
+  if (!requested) mdi_icon_store::note_download_attempt();
+  displayManager.setInputEnabled(false);
+  lv_refr_now(displayManager.getDisplay());
+  BoardHAL::displayPowerSaveOn();
+  displayManager.setBufferLines(8);
+  networkManager.prepareMqttForOta();
+  if (webAdminServer.isRunning()) webAdminServer.stop();
+  log_memory_status("before-icon-download");
+  delay(20);
+
+  IconFileWrite file_write;
+  String err;
+  bool ok = GithubUpdate::downloadReleaseFile(FW_VERSION, mdi_icon_store::release_file_name(),
+                                              mdi_icon_store::file_bytes(), write_icon_file,
+                                              &file_write, icon_download_progress, err);
+  if (file_write.started) {
+    String finish_err;
+    if (!mdi_icon_store::finish_write(finish_err) && ok) {
+      ok = false;
+      err = finish_err;
+    }
+    if (!ok && file_write.error.length()) err = file_write.error;
+    if (ok) mdi_icon_store::clear_download_attempts();
+    Device::storageWriteEnd();
+  }
+  if (ok) {
+    Serial.println("[Icons] Icon file installed - restarting");
+  } else {
+    Serial.printf("[Icons] Icon download failed: %s - restarting\n", err.c_str());
+    mdi_icon_store::note_failure(String("Download failed: ") + err);
+  }
+  camera_transport::planned_restart();
+  BoardHAL::prepareForRestart();
+  delay(500);
+  BoardHAL::restart();
+}
+
+// An icon file uploaded on the Web Admin's Icons card: written from PSRAM
+// with the same checks as a downloaded one; the panel restarts either way.
+static void apply_icon_upload() {
+  Serial.printf("[Icons] Installing the uploaded %s\n", mdi_icon_store::release_file_name());
+  displayManager.setInputEnabled(false);
+  lv_refr_now(displayManager.getDisplay());
+  BoardHAL::displayPowerSaveOn();
+  if (webAdminServer.isRunning()) webAdminServer.stop();
+  String err;
+  Device::storageWriteBegin();
+  const bool ok = mdi_icon_store::install_upload(err);
+  if (ok) mdi_icon_store::clear_download_attempts();
+  Device::storageWriteEnd();
+  if (ok) {
+    Serial.println("[Icons] Uploaded icon file installed - restarting");
+  } else {
+    Serial.printf("[Icons] Uploaded icon file not installed: %s - restarting\n", err.c_str());
+    mdi_icon_store::note_failure(String("Install failed: ") + err);
+  }
+  camera_transport::planned_restart();
+  BoardHAL::prepareForRestart();
+  delay(500);
+  BoardHAL::restart();
+}
+
 static void apply_system_reboot() {
   Serial.println("[System] Restart requested");
   displayManager.setInputEnabled(false);
   lv_refr_now(displayManager.getDisplay());
+  camera_transport::planned_restart();
   BoardHAL::prepareForRestart();
   delay(800);
   BoardHAL::restart();
@@ -563,13 +681,28 @@ static bool init_nvs() {
   return true;
 }
 
+// The periodic refresh repairs states this panel lost and, from older
+// Bridges, carries name and unit changes. A Bridge that announces "push"
+// sends those changes itself; the refresh then follows a lost message (no
+// earlier than 30 s after the last one) and otherwise runs as a safety net.
 static constexpr uint32_t BACKGROUND_STATE_REFRESH_MS = 60UL * 1000UL;
+static constexpr uint32_t BACKGROUND_STATE_SAFETY_REFRESH_MS = 15UL * 60UL * 1000UL;
+static constexpr uint32_t DROP_REPAIR_DELAY_MS = 5000UL;
+static constexpr uint32_t DROP_REPAIR_MIN_GAP_MS = 30000UL;
+// A drop this soon after our own request belongs to the answer's burst; the
+// next repair then waits twice as long (up to the safety interval) so a
+// panel that cannot keep up does not ask again and again.
+static constexpr uint32_t DROP_REPAIR_ANSWER_WINDOW_MS = 20000UL;
 static uint32_t g_last_bridge_state_refresh_ms = 0;
 static bool g_bridge_state_refresh_pending = false;
+static bool g_drop_repair_pending = false;
+static uint32_t g_drop_repair_due_ms = 0;
+static uint32_t g_drop_repair_gap_ms = DROP_REPAIR_MIN_GAP_MS;
 
 static void mark_background_state_refresh_sent() {
   g_last_bridge_state_refresh_ms = millis();
   g_bridge_state_refresh_pending = false;
+  g_drop_repair_pending = false;
 }
 
 static void service_background_state_refresh(bool allow_now) {
@@ -577,17 +710,56 @@ static void service_background_state_refresh(bool allow_now) {
   if (!networkManager.isMqttConnected()) return;
 
   const uint32_t now = millis();
+  if (mqttTakeInboundDropped() && !g_drop_repair_pending) {
+    if (g_last_bridge_state_refresh_ms != 0 &&
+        now - g_last_bridge_state_refresh_ms < DROP_REPAIR_ANSWER_WINDOW_MS) {
+      g_drop_repair_gap_ms = g_drop_repair_gap_ms >= BACKGROUND_STATE_SAFETY_REFRESH_MS / 2
+                                 ? BACKGROUND_STATE_SAFETY_REFRESH_MS
+                                 : g_drop_repair_gap_ms * 2;
+    } else {
+      g_drop_repair_gap_ms = DROP_REPAIR_MIN_GAP_MS;
+    }
+    // Let the burst that filled the queue end before asking for it again.
+    g_drop_repair_pending = true;
+    g_drop_repair_due_ms = now + DROP_REPAIR_DELAY_MS;
+  }
   if (g_last_bridge_state_refresh_ms == 0) {
     g_last_bridge_state_refresh_ms = now;
     return;
   }
-  if ((uint32_t)(now - g_last_bridge_state_refresh_ms) >= BACKGROUND_STATE_REFRESH_MS) {
+  const uint32_t since_last = now - g_last_bridge_state_refresh_ms;
+  const uint32_t interval = haBridgeConfig.bridgePushesChanges()
+                                ? BACKGROUND_STATE_SAFETY_REFRESH_MS
+                                : BACKGROUND_STATE_REFRESH_MS;
+  if (since_last >= interval) {
+    g_bridge_state_refresh_pending = true;
+  }
+  if (g_drop_repair_pending && static_cast<int32_t>(now - g_drop_repair_due_ms) >= 0 &&
+      since_last >= g_drop_repair_gap_ms) {
     g_bridge_state_refresh_pending = true;
   }
   if (!g_bridge_state_refresh_pending || !allow_now) return;
 
   networkManager.publishBridgeRequest();
   mark_background_state_refresh_sent();
+}
+
+// While a finger is down (slider, colour wheel, scrolling) the frame time
+// belongs to the control under it: background tile states wait for the
+// release, at most TILE_HOLD_MAX_MS at a time. The queues keep the newest
+// state of each tile meanwhile (overflow replaces the oldest entry).
+static constexpr uint32_t TILE_HOLD_MAX_MS = 1500UL;
+static bool tile_updates_held_for_touch() {
+  static uint32_t held_since_ms = 0;
+  if (!DisplayManager::isTouchHeld()) {
+    held_since_ms = 0;
+    return false;
+  }
+  const uint32_t now = millis();
+  if (held_since_ms == 0) held_since_ms = now ? now : 1;
+  if (now - held_since_ms < TILE_HOLD_MAX_MS) return true;
+  held_since_ms = now ? now : 1;  // Apply once, then hold again.
+  return false;
 }
 
 // Single-owner MQTT worker
@@ -610,6 +782,16 @@ void setup() {
   delay(2000);
   Serial.println("\n\n=== HOMETILES STARTUP ===");
   Serial.printf("[Setup] Firmware: hometiles-%s-%s\n", FW_VERSION, Device::profile().key);
+#if defined(DEVICE_ESP32_S3_RGB_480)
+  // The S3's internal RAM carries Wi-Fi, the draw band and, by the SDK's
+  // CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL, every malloc up to 4 KB; it ran down
+  // to 14 KB with the screensaver's camera picture (b322). Small allocations
+  // (strings, JSON, lists) prefer PSRAM from here on; FreeRTOS, Wi-Fi and the
+  // drivers ask for internal RAM by their own caps.
+  heap_caps_malloc_extmem_enable(kS3InternalMallocMax);
+  Serial.printf("[Mem] S3: allocations above %u bytes prefer PSRAM\n",
+                static_cast<unsigned>(kS3InternalMallocMax));
+#endif
   GuitionS3Diagnostics::logBoot(FW_VERSION, Device::profile().key);
   GuitionS3Diagnostics::logOtaPartitions("boot");
   confirm_running_ota_if_needed();
@@ -639,6 +821,8 @@ void setup() {
     while(1) delay(1000);
   }
   Serial.println("[Setup] LittleFS OK");
+  // Icon bitmaps beyond the built-in ones come from LittleFS; before the UI.
+  mdi_icon_store::begin();
   log_memory_status("after-littlefs");
   Serial.flush();
 
@@ -698,8 +882,34 @@ void setup() {
   Serial.println("[Setup] Loading configs...");
   Serial.flush();
   bool has_config = configManager.load();
+  // A new panel stores its defaults and starts the first-start setup: its
+  // network then starts like any configured one, so neither the setup's WiFi
+  // search nor the Bridge link needs a restart.
+  const bool new_panel = !has_config && settings_begin_new_panel();
+  if (!has_config) has_config = new_panel;
+  // The shown tile grid of this boot (grid_layout.h): the layout's, or the
+  // classic one while the stored layout cannot be shown yet. Before anything
+  // builds or measures tiles.
+  grid_layout::apply(configManager.getConfig().layout);
+  // Settings parked or shown in this layout (user 2026-10-13: each layout
+  // decides), before the tiles load: Home's grid follows it.
+  configManager.applySettingsParking(static_cast<uint8_t>(grid_layout::active()));
+  // The UI theme of this boot (ui_theme.h), before anything builds or colors
+  // the UI.
+  ui_theme::set(theme_schedule::at_boot(configManager.getConfig().theme));
+  Serial.printf("[Setup] Layout %s, grid %ux%u, cells %dx%d\n", grid_layout::key(grid_layout::active()),
+                static_cast<unsigned>(grid_layout::shown().cols), static_cast<unsigned>(grid_layout::shown().rows),
+                grid_layout::shown().cell_w, grid_layout::shown().cell_h);
   haBridgeConfig.load();
   tileConfig.load();
+  // A new panel's first page (new_panel_tiles.h): the head bar layout with a
+  // clock, two folders and a welcome text, after the first load made its
+  // Home and the layout file.
+  if (new_panel) new_panel_tiles::seed();
+  // An upright layout on a landscape panel: the screen turns before the
+  // splash (Hochkant, grid_layout::switchable). After tileConfig.load(): a
+  // layout without places falls back to the classic one there.
+  displayManager.applyShownScreen();
   screensaverConfig.load();
   hardwareIo.load();
   hardwareIo.begin();
@@ -847,10 +1057,15 @@ void setup() {
   Serial.println("[Setup] UI built");
   Serial.flush();
   preload_image_screensaver();
+#if defined(HOMETILES_TEXT_FIT_PROBE)
+  text_fit_probe::start();
+#endif
 
   uiManager.updateStatusbar();
   Serial.println("[Setup] Statusbar updated");
   Serial.flush();
+  // A new panel, or a setup a restart interrupted, opens the first-start setup.
+  settings_resume_setup();
 
   // Tiles and status bar are ready. Re-enable invalidation so the wake refresh
   // presents the completed UI in one step.
@@ -897,7 +1112,7 @@ void setup() {
   log_memory_status("after-ui-build");
   Serial.flush();
 
-  Serial.println("[Setup] MQTT Topics...");
+  Serial.println("[Setup] Topics...");
   Serial.flush();
   TopicSettings ts;
   if (has_config) {
@@ -906,10 +1121,18 @@ void setup() {
     ts.ha_prefix = dcfg.ha_prefix;
   }
   mqttTopics.begin(ts);
-  Serial.println("[Setup] MQTT Topics OK");
+  Serial.println("[Setup] Topics OK");
   // Built-in camera opt-in (exact camera profiles only). The sensor probe
   // runs on its own worker and needs the touch-owned I2C bus from Device init.
   local_camera::begin();
+  // Optional encrypted Bridge commands; loads the stored pairing, if any.
+  command_channel::begin();
+  // After the Bridge sent its link address, the panel pairs by itself and
+  // shows the number in System > Security.
+  command_channel::setPairingPromptCallback(settings_show_pairing);
+  // Speaker playback (exact speaker profiles); the codec probe also needs
+  // the touch-owned I2C bus.
+  speaker::begin();
   Serial.flush();
 
   if (has_config) {
@@ -924,7 +1147,7 @@ void setup() {
     log_memory_status("after-network-init");
     Serial.flush();
 
-    Serial.println("[Setup] MQTT-Worker...");
+    Serial.println("[Setup] Network worker...");
     Serial.flush();
     networkManager.beginMqttWorker();
     const BaseType_t mqtt_worker_core = (ARDUINO_RUNNING_CORE == 0) ? 1 : 0;
@@ -932,14 +1155,14 @@ void setup() {
                                         nullptr, tskIDLE_PRIORITY,
                                         &g_mqtt_worker_handle, mqtt_worker_core,
                                         MALLOC_CAP_SPIRAM) == pdPASS) {
-      Serial.printf("[Setup] MQTT worker started on core %d\n", (int)mqtt_worker_core);
+      Serial.printf("[Setup] Network worker started on core %d\n", (int)mqtt_worker_core);
     } else {
       // Do not silently fall back to the loop task. Sharing the MQTT client would
       // reintroduce the race this single-owner design prevents; fail explicitly.
       g_mqtt_worker_handle = nullptr;
-      Serial.println("[Setup] ERROR: MQTT worker could not be started -- MQTT remains offline!");
+      Serial.println("[Setup] ERROR: Network worker could not be started -- Home Assistant stays offline!");
     }
-    log_memory_status("after-mqtt-worker");
+    log_memory_status("after-network-worker");
     Serial.flush();
   } else {
     Serial.println("[Setup] Skipping network (no configuration)");
@@ -959,6 +1182,7 @@ void setup() {
   // that the UI is usable; otherwise a short sleep timeout can expire during
   // boot before the user has had a chance to interact.
   displayManager.resetActivityTimer();
+  loop_stall::begin();
 
   Serial.println("\n=== SETUP COMPLETE ===\n");
   log_memory_status("setup-complete");
@@ -982,6 +1206,7 @@ void loop() {
   if (first_run) Serial.println("[Loop] lv_tick_inc()...");
   lv_tick_inc(now - g_lvgl_tick_last_ms);
   g_lvgl_tick_last_ms = now;
+  loop_stall::enter(loop_stall::Step::Top);
 
   if (hotspot_mode_change_pending) {
     hotspot_mode_change_pending = false;
@@ -1021,6 +1246,21 @@ void loop() {
     }
   }
 
+  // Fetch a missing icon file once per boot after Wi-Fi settled; a pending
+  // firmware install and the first-start setup go first.
+  if (!icon_download_checked && millis() > 20000 && networkManager.isNetworkConnected() &&
+      !fw_install_pending && !setup_screen::shown()) {
+    icon_download_checked = true;
+    if (mdi_icon_store::download_due()) apply_icon_download();
+  }
+
+  // The Web Admin's Icons card: an uploaded icon file to install, or "Update"
+  // (download now, also after three failed attempts). Both restart.
+  if (!fw_install_pending && !setup_screen::shown()) {
+    if (mdi_icon_store::upload_ready()) apply_icon_upload();
+    if (mdi_icon_store::take_download_request() && networkManager.isNetworkConnected()) apply_icon_download(true);
+  }
+
   if (fw_check_pending) {
     fw_check_pending = false;
     apply_fw_check();
@@ -1037,6 +1277,7 @@ void loop() {
   const bool ota_in_progress = webAdminOtaInProgress();
 
   if (ota_in_progress) {
+    loop_stall::enter(loop_stall::Step::OtaWeb);
     if (!ota_display_suspended) {
       displayManager.setInputEnabled(false);
       BoardHAL::displayPowerSaveOn();
@@ -1059,9 +1300,11 @@ void loop() {
   }
 
   if (first_run) Serial.println("[Loop] BoardHAL::update()...");
+  loop_stall::enter(loop_stall::Step::Board);
   BoardHAL::update();
 
   if (webConfigServer.isRunning()) {
+    loop_stall::enter(loop_stall::Step::AccessPoint);
     if (first_run) Serial.println("[Loop] AP mode active...");
     if (webAdminServer.isRunning()) webAdminServer.stop();
 
@@ -1087,6 +1330,7 @@ void loop() {
     webConfigServer.handle();
     // Folder taps only set a pending flag. Consume it in AP mode as well as the
     // normal loop; otherwise navigation remains stuck until AP mode ends.
+    uiManager.processThemeChange();
     tiles_process_reload_requests();
     settings_update_ap_mode(true);
     settings_update_wifi_status_ap(webConfigApSsid(), webConfigApPassword());
@@ -1152,6 +1396,7 @@ void loop() {
     displayManager.resetActivityTimer();
   }
 
+  loop_stall::enter(loop_stall::Step::Power);
   service_image_screensaver_auto(displayManager.getLastActivityTime());
   if (first_run) Serial.println("[Loop] powerManager.update()...");
   powerManager.update(displayManager.getLastActivityTime());
@@ -1173,15 +1418,23 @@ void loop() {
       first_run = false;
     }
     if (configManager.isConfigured()) {
+      loop_stall::enter(loop_stall::Step::SleepNetwork);
       networkManager.update();
+      loop_stall::enter(loop_stall::Step::SleepWeb);
       if (webAdminServer.isRunning()) webAdminServer.handle();
       // The MQTT worker keeps receiving during sleep. Drain inbound messages to
       // prevent queue drops, and run post-connect work so subscriptions/discovery
       // resume after a sleeping reconnect too.
+      loop_stall::enter(loop_stall::Step::SleepMqtt);
       mqttServicePostConnect();
     viewNavigationService();
       mqtt_process_inbound_queue();
       local_camera::service();
+      speaker::service();
+      command_channel::service();
+      // Drops the camera pictures while the display sleeps.
+      camera_picture::service();
+      loop_stall::enter(loop_stall::Step::SleepTiles);
       // Keep live tile state current during sleep. The paused refresh timer
       // prevents drawing to the sleeping display, so wake needs no catch-up.
       // Graph history remains on the active request/response path below.
@@ -1212,7 +1465,9 @@ void loop() {
       service_background_state_refresh(true);
       process_energy_response_queue();
       energy_service_periodic();
+      loop_stall::sampleNetwork();
     }
+    loop_stall::enter(loop_stall::Step::SleepTouch);
     // Touch wake only changes display hardware. Background state processing runs
     // in both modes, so wake needs no extra request or queue drain. The 20 ms sleep
     // loop delay keeps newly received state close to presentation without adding
@@ -1236,6 +1491,7 @@ void loop() {
   // of "found one cost, animation still hitches" -- this covers the whole gap
   // in one pass). Only prints if the total exceeds 80ms.
   uint32_t t_loop0 = millis();
+  loop_stall::enter(loop_stall::Step::PreLvgl);
 #if HOMETILES_GUITION_S3_DIAGNOSTICS_ACTIVE
   const uint32_t s3_loop_started_us = micros();
 #endif
@@ -1280,26 +1536,25 @@ void loop() {
   process_camera_popup();
   uint32_t t_popup_queues = millis();
 
-  // In idle mode, retain the normal tile budgets and service pending media
-  // separately so artwork does not wait for the two-second background batch.
+  // Every loop applies each type's bounded batch before LVGL services the
+  // next frame. Idle mode used to batch them every two seconds; its CPU,
+  // frame rate and Wi-Fi savings are gone (power_manager.h,
+  // setWifiPowerSaving), and the batch only delayed states: a moving Cover's
+  // 5 % steps showed as 20 % jumps (user 2026-10-02). Energy keeps its own
+  // retry and one-minute timers.
+  const bool hold_tile_updates = tile_updates_held_for_touch();
   if (!camera_popup_busy && !PopupFirstFrame::any_pending()) {
-    static uint32_t last_queue_ms = 0;
-    bool idle = !powerManager.isHighPerformance();
-    if (!idle || (millis() - last_queue_ms >= 2000)) {
-      // Apply each type's bounded batch before LVGL services the next frame.
-      // Remaining idle work waits for the next two-second interval.
-      process_tile_update_queues<TileUpdateBudget::Active>();
-      process_tile_graph_queue();
-      if (idle) energy_service_periodic();
-      last_queue_ms = millis();
-    } else {
-      process_idle_media_updates();
-    }
+    if (!hold_tile_updates) process_tile_update_queues<TileUpdateBudget::Active>();
+    process_tile_graph_queue();
+    tile_graph_service_periodic();
+    energy_service_periodic();
   }
   uint32_t t_update_queues = millis();
   // Retain navigation/layout/style reload flags while the camera covers them;
   // rebuilding invisible content could otherwise cost a complete camera frame.
   if (!camera_popup_busy && !PopupFirstFrame::any_pending()) {
+    theme_schedule::poll();
+    uiManager.processThemeChange();
     tiles_process_reload_requests();
   }
   uint32_t t_reload_requests = millis();
@@ -1323,6 +1578,7 @@ void loop() {
   const uint32_t s3_pre_lvgl_us = micros() - s3_loop_started_us;
   const uint32_t s3_lvgl_started_us = micros();
 #endif
+  loop_stall::enter(loop_stall::Step::Lvgl);
   yield();  // Yield so the watchdog can be serviced.
   sync_popup_shell();
   lv_timer_handler();
@@ -1330,6 +1586,7 @@ void loop() {
   GuitionS3Diagnostics::noteUiLoop(
       s3_pre_lvgl_us, micros() - s3_lvgl_started_us);
 #endif
+  loop_stall::enter(loop_stall::Step::FolderSwitch);
   tiles_process_pending_folder_switch();
   GuitionS3Diagnostics::service();
   yield();  // Yield so the watchdog can be serviced.
@@ -1339,6 +1596,7 @@ void loop() {
   }
 
   // Keep this pause at 1 ms for camera throughput.
+  loop_stall::enter(loop_stall::Step::WebAdmin);
   delay(1);
 
   if (first_run) Serial.println("[Loop] webAdminServer.handle()...");
@@ -1349,9 +1607,15 @@ void loop() {
     // The worker owns the MQTT socket, reconnects and buffer maintenance.
     // Only the application-facing queue ends remain on the loop: post-connect
     // subscriptions/discovery and incoming handlers that touch flash or LVGL.
+    loop_stall::enter(loop_stall::Step::PostConnect);
     mqttServicePostConnect();
+    loop_stall::enter(loop_stall::Step::Services);
     viewNavigationService();
     local_camera::service();
+    speaker::service();
+    command_channel::service();
+    camera_picture::service();
+    loop_stall::enter(loop_stall::Step::MqttInbound);
     // Keep S3 input service bounded when Home Assistant echoes a live slider
     // command or sends a retained-state burst. Eight messages per UI cycle
     // still drains far more than normal traffic without starving the next
@@ -1361,9 +1625,11 @@ void loop() {
 #else
     mqtt_process_inbound_queue(camera_popup_is_busy() ? 4 : 0);
 #endif
+    loop_stall::enter(loop_stall::Step::DynamicSlots);
     if (!camera_popup_is_busy()) {
       mqttServiceDynamicSlotsReload();
     }
+    loop_stall::enter(loop_stall::Step::NetworkUpdate);
     static uint8_t net_tick = 0;
     if (++net_tick % 5 == 0) {
       if (first_run) Serial.println("[Loop] networkManager.update()...");
@@ -1375,10 +1641,12 @@ void loop() {
     }
     if (!logged_mqtt_connected && networkManager.isMqttConnected()) {
       logged_mqtt_connected = true;
-      log_memory_status("mqtt-connected");
+      log_memory_status("bridge-connected");
     }
   }
 
+  loop_stall::enter(loop_stall::Step::Status);
+  loop_stall::sampleNetwork();
   if (now - last_mem_log_ms >= 60000UL) {
     last_mem_log_ms = now;
     log_memory_status("runtime-60s");

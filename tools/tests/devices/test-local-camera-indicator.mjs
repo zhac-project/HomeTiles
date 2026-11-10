@@ -25,11 +25,13 @@ const tileConfig = read('src/tiles/config/tile_config.h');
 const compact = read('src/tiles/runtime/compact_sensor_layout.h');
 const popupShell = read('src/ui/popups/popup_shell.cpp');
 
-// Stripe: top margin minus the one-pixel gap, fixed width, never clickable,
+// Stripe: the profile's own grid margin minus one pixel (V2 3 px; the grid's
+// whole-gap margin since b300 made it 15 px thick, user 2026-10-11), fixed
+// width, never clickable,
 // static. The wings fade out towards their outer ends, the section along the
 // pill stays solid. No animation: it would redraw and rotate part of the
 // screen every frame while the camera shares the 2D-DMA with the display.
-assert.match(indicator, /constexpr int kStripeHeight = GRID_PAD_TOP > 1 \? GRID_PAD_TOP - 1 : 1;/);
+assert.match(indicator, /constexpr int kStripeHeight = Device::kProfile\.grid_pad > 1 \? Device::kProfile\.grid_pad - 1 : 1;/);
 assert.match(indicator, /lv_obj_remove_flag\(part, static_cast<lv_obj_flag_t>\(LV_OBJ_FLAG_CLICKABLE/,
   'The stripe never takes touch input');
 assert.doesNotMatch(indicator, /lv_obj_set_width\(/, 'The stripe no longer grows and shrinks');
@@ -83,15 +85,12 @@ assert.match(indicator, /ui_surface_style::apply_radius\(ui\.pill, tile_layout::
 assert.match(indicator, /compact_sensor_layout::apply_content\(ui\.card, ui\.icon, ui\.title, ui\.hint, pill_width\);/);
 assert.match(indicator, /getMdiChar\("webcam"\)/);
 // Darker red, and a stronger icon disc than on tiles (red background).
-assert.match(indicator, /constexpr uint32_t kRed = 0xC62828;/);
+assert.match(read('src/ui/tabs/tiles/home_bar.h'), /constexpr uint32_t kCameraRed = 0xC62828;/);
 assert.match(indicator, /constexpr lv_opa_t kDiscOpa = 64;/);
 assert.match(indicator, /lv_obj_set_style_bg_opa\(disc, kDiscOpa, 0\);/);
-for (const line of ['lv_obj_set_style_shadow_width(parts.card, popup_layout::scale480(28), 0);',
-                    'lv_obj_set_style_shadow_opa(parts.card, LV_OPA_40, 0);',
-                    'lv_obj_set_style_shadow_spread(parts.card, popup_layout::scale480(2), 0);']) {
-  assert.ok(popupShell.includes(line), `popup reference: ${line}`);
-  assert.ok(indicator.includes(line.replace('parts.card', 'ui.pill')), `pill shadow: ${line}`);
-}
+// The popups' card shadow (popup_layout::apply_card_shadow), the pill too.
+assert.ok(popupShell.includes('popup_layout::apply_card_shadow(parts.card);'), 'popup reference shadow');
+assert.ok(indicator.includes('popup_layout::apply_card_shadow(ui.pill);'), 'pill shadow');
 assert.match(indicator, /lv_label_set_text\(ui\.title, strings\.local_camera_indicator_active\);/);
 assert.match(indicator, /lv_label_set_text\(ui\.hint, strings\.local_camera_indicator_end\);/);
 assert.doesNotMatch(indicator, /lv_label_set_text\([^,]+, "[^"]/, 'No hard-coded UI text');
@@ -102,13 +101,13 @@ assert.match(indicator, /lv_obj_set_size\(top, pill_width, pill_height \/ 2\);/)
 // while visible when the setting or the Web Admin preview changes it.
 // Fillets: half the tile radius; buffers in PSRAM, not in internal RAM.
 assert.match(indicator, /inline int filletRadius\(\) \{ return std::clamp\(tileRadius\(\) \/ 2, 1, kMaxFillet\); \}/);
-assert.match(indicator, /constexpr int kMaxFillet = \(tile_radius::maximum\(GRID_CELL_H, GRID_GAP\) \+ 1\) \/ 2;/);
+assert.match(indicator, /constexpr int kMaxFillet = \(tile_radius::maximum\(Device::kGridCellH, GRID_GAP\) \+ 1\) \/ 2;/);
 assert.match(indicator, /LV_CANVAS_BUF_SIZE\(kMaxFillet, kMaxFillet, 32, LV_DRAW_BUF_STRIDE_ALIGN\)/);
 assert.match(indicator, /heap_caps_malloc\(kBufferBytes, MALLOC_CAP_SPIRAM \| MALLOC_CAP_8BIT\)/);
 assert.doesNotMatch(indicator, /static uint8_t buffers/, 'No static fillet buffers in internal RAM');
 assert.match(indicator, /drawFillet\(ui\.fillet_left, ui\.fillet_buffers\[0\], fillet, ui\.pill_x - fillet, true, border\);/);
 assert.match(indicator, /drawFillet\(ui\.fillet_right, ui\.fillet_buffers\[1\], fillet, ui\.pill_x \+ ui\.pill_width, false,\s*border\);/);
-assert.match(indicator, /if \(!visible\) return;\s*updateShape\(ui\);\s*keepOnTop\(ui\);/);
+assert.match(indicator, /if \(!visible\) return;[\s\S]{0,320}?\s*updateShape\(ui\);\s*keepOnTop\(ui\);/);
 // Style (Web Admin, experimental): none hides everything, line keeps only the
 // stripe, pill adds the pill, its fillets and border.
 assert.match(indicator, /const local_camera::IndicatorStyle style = local_camera::indicatorStyle\(\);\s*const bool visible =\s*style != local_camera::IndicatorStyle::None && local_camera::indicatorActive\(\);/);
@@ -165,9 +164,49 @@ assert.doesNotMatch(indicator, /setPaused\(|setEnabled\(/);
 
 // Stacking: pill below the stripe (its shadow never darkens the stripe), all
 // of them above later popups and the screensaver.
-assert.match(indicator, /lv_obj_t\* const order\[\] = \{ui\.pill, ui\.frame_clip, ui\.bar, ui\.left, ui\.right,\s*ui\.fillet_left, ui\.fillet_right\};/);
-assert.ok(indicator.indexOf('ui.pill = lv_button_create') < indicator.indexOf('ui.bar = createStripePart'),
+assert.match(indicator, /lv_obj_t\* parts\[\] = \{ui\.pill, ui\.frame_clip, ui\.bar, ui\.left, ui\.right,\s*ui\.fillet_left, ui\.fillet_right\};/);
+assert.match(indicator, /if \(part\) order\[count\+\+\] = part;/, 'Only the parts that exist (the circle has no fillets)');
+const pillBranch = indicator.slice(indicator.indexOf('  // Pill first:'));
+assert.ok(pillBranch.indexOf('ui.pill = lv_button_create') < pillBranch.indexOf('ui.bar = createStripePart'),
   'The stripe is created above the pill');
+
+// The head bar layout (user 2026-10-08): the pill would cover the head and
+// the first tile row; a circle with the webcam icon in every head takes its
+// place, part of the head like the time so popups lie over it (user
+// 2026-10-14: on the top layer it stood above popups and their shadow), under
+// the same stripe, and a tap ends the stream the same way.
+const headBranch = indicator.slice(indicator.indexOf('  if (grid_layout::head_bar()) {'), indicator.indexOf('  // Pill first:'));
+assert.match(headBranch, /ui\.head = true;\s*ui\.bar = createStripePart\(pill_x, pill_width\);/);
+assert.doesNotMatch(headBranch, /ui\.pill =/, 'No circle on the top layer');
+assert.match(headBranch, /return;\s*\}\s*$/, 'No pill parts with the circle');
+assert.match(indicator, /if \(ui\.head\) return;  \/\/ The circle has no fillets or border\./);
+assert.match(indicator, /if \(with_pill && !ui\.head\) \{/, 'No pill texts on the circle');
+// The heads are built again when the circle comes or goes.
+assert.match(indicator, /const bool circle = ui\.head && visible && style == local_camera::IndicatorStyle::Pill;\s*if \(circle != ui\.head_circle\) \{\s*ui\.head_circle = circle;\s*tiles_rebuild_heads\(false\);/);
+const bar = read('src/ui/tabs/tiles/home_bar.cpp');
+const circle = bar.slice(bar.indexOf('static void add_camera_circle(lv_obj_t* bar, const Geometry& g, bool gear_hidden) {'));
+assert.match(bar, /if \(!g_time_timer\) g_time_timer = lv_timer_create\(time_tick, 5000, nullptr\);\s*add_camera_circle\(bar, g, gear_hidden\);/,
+  'Every head builds it');
+assert.match(circle, /if \(local_camera::indicatorStyle\(\) != local_camera::IndicatorStyle::Pill \|\|\s*!local_camera::indicatorActive\(\)\)\s*return;/);
+assert.match(circle, /lv_obj_t\* circle = lv_button_create\(bar\);/, 'A child of the head');
+// In the middle of the screen; with pages the dots hold the middle and the
+// circle sits before the time (user 2026-10-12).
+assert.match(circle, /const int x = tile_layouts::pages\(pages\) \? \(gear_hidden \? g\.time_x_alone : g\.time_x\) - g\.disc \/ 5 - g\.disc\s*: \(grid_layout::screen_w\(\) - g\.disc\) \/ 2;/);
+assert.match(circle, /lv_obj_set_pos\(circle, x, g\.center_y - g\.disc \/ 2\);\s*lv_obj_set_size\(circle, g\.disc, g\.disc\);/,
+  'The page circle\'s size on the head\'s centre line');
+assert.match(circle, /lv_label_set_text\(icon, getMdiChar\("webcam"\)\.c_str\(\)\);/);
+// The page circle's grey with the red icon (user 2026-10-11: the full red
+// circle was too loud, "Grauer Kreis"): one tone for the Home circle and the
+// camera circle; the heads are built again when the theme changes.
+assert.match(circle, /lv_obj_set_style_bg_color\(circle, lv_color_hex\(page_circle_tone\(\)\.disc\), 0\);/);
+assert.match(circle, /lv_obj_set_style_text_color\(icon, lv_color_hex\(settings_style::tone\(head_base\(\), kCameraRed\)\.icon\), 0\);/);
+assert.ok(bar.includes('settings_style::Tone page_circle_tone() { return settings_style::tone(head_base(), settings_style::kGearColor); }') &&
+  bar.includes('const settings_style::Tone tone = page_circle_tone();'), 'Home and camera circle share one tone');
+assert.doesNotMatch(circle, /lv_color_white\(\)/, 'No white icon on a red circle any more');
+assert.match(circle, /lv_obj_add_event_cb\(circle, camera_circle_event, LV_EVENT_CLICKED, nullptr\);/);
+assert.match(bar, /static void camera_circle_event\(lv_event_t\*\) \{ local_camera::endStream\(\); \}/);
+assert.match(read('src/ui/tabs/tiles/home_bar.h'), /constexpr uint32_t kCameraRed = 0xC62828;/);
+assert.match(indicator, /constexpr uint32_t kRed = home_bar::kCameraRed;/);
 assert.match(indicator, /constexpr uint32_t kPollMs = 100;/);
 assert.match(indicator, /if \(started \|\| !local_camera::supported\(\)\) return;/,
   'Devices without a camera never create the timer');
@@ -220,21 +259,23 @@ assert.doesNotMatch(service, /endedViewerActive|g_ended_seen_ms/);
 // tile grids and hides on Settings and under every open top-layer overlay.
 assert.match(indicator, /lv_obj_add_event_cb\(lv_layer_top\(\), detail::onTopLayerChanged, LV_EVENT_CHILD_CREATED, nullptr\);/);
 assert.match(indicator, /lv_obj_add_event_cb\(lv_layer_top\(\), detail::onTopLayerChanged, LV_EVENT_CHILD_CHANGED, nullptr\);/);
-assert.match(indicator, /if \(busy \|\| !ui\.pill \|\| !ui\.visible\) return;\s*busy = true;\s*refresh\(ui\);\s*busy = false;/);
+// The stripe exists in both layouts (the head bar has no pill).
+assert.match(indicator, /if \(busy \|\| !ui\.bar \|\| !ui\.visible\) return;\s*busy = true;\s*refresh\(ui\);\s*busy = false;/);
+assert.match(indicator, /if \(!ui\.bar\) \{\s*if \(!visible\) return;\s*create\(ui\);\s*\}/);
 assert.match(indicator, /inline void poll\(lv_timer_t\*\) \{ refresh\(objects\(\)\); \}/);
 // Tab switches set the pill before the switch is drawn (b27 hid it one poll
-// later, visibly over the Settings page), and the partial Settings refresh
-// after the framebuffer clear redraws the stripe (b27 kept only the pieces
-// above the Settings controls on the 8-inch).
+// later, visibly over the Settings page). The Settings refresh marks the whole
+// page, so the stripe on the top layer is drawn in the same full-width bands
+// from the top (b27 kept only pieces after a framebuffer clear; b28 drew the
+// faded ends after the controls; the clear and the per-control areas went in
+// b589, user 2026-10-28).
 {
   const ui = read('src/ui/ui_manager.cpp');
   const partial = ui.slice(ui.indexOf('if (partial_settings_switch) {\n    lv_display_enable_invalidation(disp, true);'));
   assert.match(partial, /^if \(partial_settings_switch\) \{\s*lv_display_enable_invalidation\(disp, true\);\s*\/\/[^\n]*\n\s*camera_indicator::refreshNow\(\);/);
-  // Stripe first: LVGL draws the dirty areas in order, and b28 drew the faded
-  // ends only after the ~150 ms of Settings controls.
-  assert.ok(partial.indexOf('BoardHAL::displayFillScreen(0x0000);') < partial.indexOf('camera_indicator::invalidateVisible();') &&
-    partial.indexOf('camera_indicator::invalidateVisible();') < partial.indexOf('lv_obj_invalidate(child);') &&
-    partial.indexOf('lv_obj_invalidate(child);') < partial.indexOf('lv_refr_now(disp);'));
+  const refresh = partial.slice(0, partial.indexOf('lv_refr_now(disp);'));
+  assert.ok(refresh.includes('lv_obj_invalidate(tab_panels[index]);'), 'the whole Settings page is marked');
+  assert.doesNotMatch(refresh, /displayFillScreen|lv_obj_invalidate\(child\)/, 'no framebuffer clear, no area per control');
   assert.match(ui, /camera_indicator::refreshNow\(\);\s*lv_obj_invalidate\(lv_scr_act\(\)\);/);
   assert.match(indicator, /inline void invalidateVisible\(\) \{[\s\S]*?for \(lv_obj_t\* part : \{ui\.bar, ui\.left, ui\.right\}\) lv_obj_invalidate\(part\);/);
 }
@@ -242,6 +283,13 @@ assert.match(indicator, /constexpr uint8_t kSettingsTab = 3;/);
 // Closed popups stay parked but visible on the top layer (b26 hid the pill for
 // good on the 8-inch and the V2): the shell and the screensaver decide.
 assert.match(indicator, /return tab != UINT8_MAX && tab != kSettingsTab && !popup_shell_active\(\) &&\s*!image_screensaver_covers_ui\(\);/);
+// The shell moves its objects with the display's invalidation off
+// (SceneChange). A pill shown then marked no area: after a popup closed it
+// came back cut to the popup's area (Tab5, 2026-10-14). It follows in the next
+// timer pass instead, with invalidation on again.
+assert.match(popupShell, /SceneChange\(\) : display_\(lv_obj_get_display\(shell\.overlay\)\) \{\s*lv_display_enable_invalidation\(display_, false\);/);
+assert.match(indicator, /inline void onTopLayerChanged\(lv_event_t\*\) \{\s*if \(!lv_display_is_invalidation_enabled\(lv_display_get_default\(\)\)\) \{\s*lv_async_call_cancel\(refreshLater, nullptr\);\s*lv_async_call\(refreshLater, nullptr\);\s*return;\s*\}\s*refreshGuarded\(\);/);
+assert.match(indicator, /inline void refreshLater\(void\*\) \{\s*if \(lv_display_is_invalidation_enabled\(lv_display_get_default\(\)\)\) refreshGuarded\(\);/);
 // The screensaver covers the UI from its overlay's creation on, not only after
 // its ~0.5 s setup (b28 showed the pill over the opening screensaver).
 {
@@ -287,26 +335,37 @@ assert.doesNotMatch(service, /g_paused\.store\(prefs\./, 'A stored pause is neve
 assert.match(body('currentGate'), /in\.enabled = g_enabled\.load\(\) && !g_paused\.load\(\);/);
 assert.match(body('streamStopCondition'), /if \(!g_enabled\.load\(\) \|\| g_paused\.load\(\)\) return StopReason::Disabled;/);
 assert.match(body('abortRequested'), /g_paused\.load\(\)/);
-assert.match(body('handleMqttMessage'), /if \(!g_enabled\.load\(\) \|\| g_paused\.load\(\)\) \{\s*code = ErrorCode::Disabled;/);
+assert.match(body('handleCommandPayload'), /if \(!g_enabled\.load\(\) \|\| g_paused\.load\(\)\) \{\s*code = ErrorCode::Disabled;/);
 assert.doesNotMatch(body('bridgeCapability'), /g_paused/, 'A pause keeps the camera in Home Assistant');
 assert.match(body('currentStatusFields'), /if \(g_paused\.load\(\)\) \{\s*fields\.state = PublicState::Disabled;\s*fields\.paused = true;/);
 assert.match(contract, /if \(fields\.paused\) \{[\s\S]*?",\\"paused\\":true"/);
 // Home Assistant pause/resume commands on the camera command topic.
 assert.match(request, /enum class CommandKind : uint8_t \{ Snapshot, Stream, StreamStop, Pause, Resume \};/);
-assert.match(body('handleMqttMessage'), /command\.kind == CommandKind::Pause \|\| command\.kind == CommandKind::Resume[\s\S]*?setPaused\(pause\);/);
+assert.match(body('handleCommandPayload'), /command\.kind == CommandKind::Pause \|\| command\.kind == CommandKind::Resume[\s\S]*?setPaused\(pause\);/);
 
 // Grid margins: leftover pixels are split between both sides (1280x800: top
 // 5, bottom 6) for the tiles, the screensaver tiles and the settings grid.
-assert.match(tileConfig, /static constexpr int GRID_PAD_TOP = GRID_PAD \+ GRID_EXTRA_Y \/ 2;/);
-assert.match(tileConfig, /static constexpr int GRID_PAD_BOTTOM = GRID_PAD \+ GRID_EXTRA_Y - GRID_EXTRA_Y \/ 2;/);
-assert.match(tileConfig, /static_assert\(GRID_EXTRA_X >= 0 && GRID_EXTRA_Y >= 0/);
+// The margins come from the shown grid (grid_layout.h): the profile's split
+// them like this; the head bar layout has its own.
+const gridLayout = read('src/tiles/config/grid_layout.h');
+assert.match(gridLayout, /Device::kGridPad \+ extra_y \/ 2,\s*Device::kGridPad \+ extra_y - extra_y \/ 2,/);
+assert.match(tileConfig, /static const int& GRID_PAD_TOP = grid_layout::g_shown\.pad_top;/);
+assert.match(tileConfig, /static const int& GRID_PAD_BOTTOM = grid_layout::g_shown\.pad_bottom;/);
+assert.match(tileConfig, /static_assert\(grid_layout::profile_grid\(\)\.pad_left >= Device::kGridPad/);
 for (const [file, obj] of [['src/ui/tabs/tiles/tab_tiles_unified.cpp', 'grid'],
-                           ['src/ui/screensaver/image_screensaver.cpp', 'st->slot_grid'],
-                           ['src/ui/tabs/settings/tab_settings.cpp', 'tab']]) {
+                           ['src/ui/screensaver/image_screensaver.cpp', 'st->slot_grid']]) {
   const source = read(file);
   for (const side of ['left', 'right', 'top', 'bottom']) {
     assert.ok(source.includes(`lv_obj_set_style_pad_${side}(${obj}, GRID_PAD_${side.toUpperCase()}, 0);`),
       `${file} ${side}`);
+  }
+}
+// Settings keeps the profile grid's margins whatever the tiles show.
+{
+  const source = read('src/ui/tabs/settings/tab_settings.cpp');
+  for (const side of ['left', 'right', 'top', 'bottom']) {
+    assert.ok(source.includes(`lv_obj_set_style_pad_${side}(tab, grid_layout::profile_grid().pad_${side}, 0);`),
+      `tab_settings.cpp ${side}`);
   }
 }
 // Exact numbers for the 1280x800 profiles: 7x5 cells of 168x145, gap 16, pad 4.

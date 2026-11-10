@@ -8,6 +8,10 @@ typedef void (*hotspot_callback_t)(bool enable);
 
 void hide_settings_popup();
 void build_settings_tab(lv_obj_t *tab, hotspot_callback_t hotspot_cb = nullptr);
+// UIManager::switchToTab: before the Settings panel shows (builds the open
+// page with current values) and after it hid (releases the page).
+void settings_prepare_show();
+void settings_did_hide();
 
 // Registered by the sketch to request main-loop Wi-Fi reconnection
 // with the currently saved credentials, without restarting the device.
@@ -46,8 +50,24 @@ void settings_update_wifi_status_ap(const char* ssid, const char* password);
 void settings_update_ap_mode(bool running);
 void settings_refresh_language();
 void settings_sync_display_rotation(bool rotated);
+// Home Assistant's rotation select: a step of the Settings rotation row
+// (0..3 quarter turns, or 0/1 normal and flipped), applied like a tap on it.
+void settings_select_display_rotation(uint8_t index);
 
 // Update power status from the main loop.
 void settings_update_power_status();
+
+// Opens System > Security on the running pairing; used when the panel starts
+// pairing by itself after Home Assistant sent the Bridge address. During the
+// first-start setup its Home Assistant step shows the number.
+void settings_show_pairing();
+
+// First-start setup. At boot, before the network starts: a panel without a
+// stored configuration stores its defaults (so its network starts like any
+// configured one) and starts the setup; returns whether that was stored.
+bool settings_begin_new_panel();
+// After the UI is built: a running setup (a new panel, or one a restart
+// interrupted) shows again.
+void settings_resume_setup();
 
 #endif // TAB_SETTINGS_H

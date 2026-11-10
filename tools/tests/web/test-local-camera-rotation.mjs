@@ -45,9 +45,12 @@ assert.match(begin, /const uint8_t rotation = prefs\.getUChar\(kPrefsRotationKey
 assert.match(begin, /g_rb_swap\.store\(prefs\.getBool\(kPrefsRbSwapKey, false\)\);/, 'Red/blue swap is off by default');
 const setRotation = svc('setRotation').body;
 assert.match(setRotation, /if \(quarter_turns > kRotationMax\) return false;/, 'Only 0..3 quarter turns');
+// One rotation for every layout (user 2026-10-11).
+assert.doesNotMatch(setRotation, /grid_layout::turned\(\)/);
 assert.match(setRotation, /prefs\.putUChar\(kPrefsRotationKey, quarter_turns\)/);
 assert.match(setRotation, /BatchedNvsWrite::finish\(prefs\) \|\| !written\) \{[\s\S]*?return false;[\s\S]*?g_rotation\.store\(quarter_turns\);/,
   'Only a successful save changes the live value');
+assert.doesNotMatch(begin, /kPrefsRotationUprightKey|g_rotation_upright/, 'No upright rotation of its own');
 // Live: the retained status is republished with the new "rotate"; the worker
 // reads the value for every orientation check (per stream frame).
 assert.match(setRotation, /g_rotation\.store\(quarter_turns\);[\s\S]*?publishStatus\(\);\s*return true;/,
@@ -55,9 +58,9 @@ assert.match(setRotation, /g_rotation\.store\(quarter_turns\);[\s\S]*?publishSta
 assert.match(svc('publishStatus').body, /buildStatusJson\(payload, sizeof\(payload\), currentStatusFields\(\)\)/);
 assert.match(svc('currentStatusFields').body, /fields\.rotate = statusRotate\(\);/);
 assert.match(svc('statusRotate').body,
-  /statusRotateDegrees\(\s*imageTurn\(false, local_camera_board::kMode\.quarter_turn, g_rotation\.load\(\)\)\)/);
+  /statusRotateDegrees\(imageTurn\(false, local_camera_board::kMode\.quarter_turn,\s*static_cast<uint8_t>\(userTurns\(\) \+ displayQuarterTurns\(\)\)\)\)/);
 assert.match(svc('applyOrientation').body,
-  /const ImageTurn turn = imageTurn\(imageRotated180\(\), kQuarterTurn, g_rotation\.load\(\)\);\s*const SensorOrientation wanted =\s*desiredOrientation\(turn\.rotated_180, g_mirror\.load\(\), turn\.quarter_turn\);/,
+  /const ImageTurn turn = imageTurn\(imageRotated180\(\), kQuarterTurn,\s*static_cast<uint8_t>\(userTurns\(\) \+ displayQuarterTurns\(\)\)\);\s*const SensorOrientation wanted =\s*desiredOrientation\(turn\.rotated_180, g_mirror\.load\(\), turn\.quarter_turn\);/,
   'The 180 degree part and the mirror become sensor flips');
 {
   const run = svc('runStream').body;
@@ -72,11 +75,11 @@ assert.match(publicHeader, /bool setRotation\(uint8_t quarter_turns\);/);
 assert.match(publicHeader, /bool setRedBlueSwap\(bool swap\);/);
 // Status JSON for the Web Admin.
 const statusJson = svc('appendStatusJson').body;
-assert.match(statusJson, /json \+= ",\\"rotation\\":";\s*json \+= String\(static_cast<unsigned>\(g_rotation\.load\(\)\)\);/);
+assert.match(statusJson, /json \+= ",\\"rotation\\":";\s*json \+= String\(static_cast<unsigned>\(userTurns\(\)\)\);/);
 assert.match(statusJson, /json \+= ",\\"rb_swap\\":";\s*json \+= g_rb_swap\.load\(\) \? "true" : "false";/);
 // The picture size Home Assistant shows follows the Bridge turn.
-assert.match(svc('imageWidth').body, /statusRotate\(\) != 0 \? kImageHeight : kImageWidth/);
-assert.match(svc('imageHeight').body, /statusRotate\(\) != 0 \? kImageWidth : kImageHeight/);
+assert.match(svc('imageWidth').body, /statusRotate\(\) != 0 \? statusHeight\(\) : statusWidth\(\)/);
+assert.match(svc('imageHeight').body, /statusRotate\(\) != 0 \? statusWidth\(\) : statusHeight\(\)/);
 
 // --- Red/blue swap: Bayer counterpart when the pipeline is built ------------------
 const pipeline = svc('ensurePipeline').body;
@@ -333,18 +336,28 @@ assert.match(css, /\.local-camera-advanced > summary \{[^}]*cursor:pointer;[^}]*
 assert.match(css, /\.local-camera-advanced > summary::-webkit-details-marker \{ display:none; \}/);
 assert.match(css, /\.local-camera-advanced\[open\] > summary::before \{ transform:rotate\(45deg\); \}/);
 
-// --- Translations: every language table ends with the new texts ------------------
-const newKeys = ['local_camera_advanced', 'local_camera_rotation', 'local_camera_rb_swap',
-  'local_camera_rb_swap_note'];
+// --- Translations: every language table holds the texts at their position ------
+const newKeys = ['local_camera_advanced', 'local_camera_rotation',
+  'local_camera_rb_swap', 'local_camera_rb_swap_note'];
+let membersAfter = 0;
 {
   const members = [...header.slice(header.indexOf('struct Strings {'), header.indexOf('\n};', header.indexOf('struct Strings {')))
     .matchAll(/^\s*const char\* (\w+);/gm)].map(match => match[1]);
-  assert.deepEqual(members.slice(-newKeys.length), newKeys, 'The new members close i18n::Strings');
+  const blockStart = members.indexOf(newKeys[0]);
+  assert.deepEqual(members.slice(blockStart, blockStart + newKeys.length), newKeys,
+    'The new members close the local camera block of i18n::Strings');
+  // Later features append their own members after this block.
+  membersAfter = members.length - (blockStart + newKeys.length);
 }
 const expected = {
   kStringsEn: ['Advanced', 'Rotation', 'Swap red and blue'],
   kStringsDe: ['Erweitert', 'Drehung', 'Rot und Blau tauschen'],
   kStringsFr: ['Avancé', 'Rotation', 'Inverser le rouge et le bleu'],
+  kStringsPl: ['Zaawansowane', 'Obrót', 'Zamień czerwony i niebieski'],
+  kStringsCs: ['Pokročilé', 'Otočení', 'Prohodit červenou a modrou'],
+  kStringsEs: ['Avanzado', 'Rotación', 'Intercambiar rojo y azul'],
+  kStringsSk: ['Pokročilé', 'Otočenie', 'Zameniť červenú a modrú'],
+  kStringsRu: ['Дополнительно', 'Поворот', 'Поменять красный и синий'],
 };
 const tables = [...new Set([...i18n.matchAll(/\{&(kStrings\w+), &kLocale\w+\}/g)].map(match => match[1]))];
 assert.deepEqual([...tables].sort(), Object.keys(expected).sort(), 'Every registered language is checked');
@@ -354,12 +367,14 @@ for (const table of tables) {
   assert.notEqual(start, -1, table);
   const values = [...i18n.slice(start, i18n.indexOf('};', start)).matchAll(/"((?:\\.|[^"\\])*)"/g)]
     .map(match => match[1]);
-  tails[table] = values.slice(-newKeys.length);
+  tails[table] = values.slice(values.length - membersAfter - newKeys.length,
+                              values.length - membersAfter);
   assert.deepEqual(tails[table].slice(0, 3), expected[table], `${table} labels`);
   assert.ok(tails[table][3].length > 20, `${table} has the red/blue swap note`);
 }
-assert.notEqual(tails.kStringsDe[3], tails.kStringsEn[3], 'German note must be translated');
-assert.notEqual(tails.kStringsFr[3], tails.kStringsEn[3], 'French note must be translated');
+for (const table of tables.filter(table => table !== 'kStringsEn')) {
+  assert.notEqual(tails[table][3], tails.kStringsEn[3], `${table} note must be translated`);
+}
 
 // --- Delivered browser code ----------------------------------------------------------
 const delivered = readAdminDeliverySource();

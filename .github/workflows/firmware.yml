@@ -25,7 +25,7 @@ concurrency:
 
 env:
   ARDUINO_CORE_VERSION: "3.3.7"
-  ARDUINO_CACHE_KEY: arduino-esp32-3.3.7-libs-v3
+  ARDUINO_CACHE_KEY: arduino-esp32-3.3.7-libs-v5-lvgl-9.6.0
 
 jobs:
   toolchain:
@@ -93,14 +93,17 @@ jobs:
           retry 5 arduino-cli core update-index
           retry 12 arduino-cli core install "esp32:esp32@${ARDUINO_CORE_VERSION}"
           retry 5 arduino-cli lib update-index
-          retry 5 arduino-cli lib install "ArduinoJson@7.4.3"
-          retry 5 arduino-cli lib install "DallasTemperature@4.0.6"
-          retry 5 arduino-cli lib install "GFX Library for Arduino@1.6.5"
-          retry 5 arduino-cli lib install "lvgl@9.5.0"
-          retry 5 arduino-cli lib install "M5GFX@0.2.25"
-          retry 5 arduino-cli lib install "M5Unified@0.2.14"
-          retry 5 arduino-cli lib install "OneWire@2.3.8"
-          retry 5 arduino-cli lib install "PubSubClient@2.8"
+          # --no-deps: a library's dependencies would be installed in their
+          # newest version over the pinned ones (M5Unified pulled M5GFX
+          # 0.2.32 instead of 0.2.25, the Tab5 image no longer fit).
+          retry 5 arduino-cli lib install --no-deps "ArduinoJson@7.4.3"
+          retry 5 arduino-cli lib install --no-deps "DallasTemperature@4.0.6"
+          retry 5 arduino-cli lib install --no-deps "GFX Library for Arduino@1.6.5"
+          retry 5 arduino-cli lib install --no-deps "lvgl@9.6.0"
+          retry 5 arduino-cli lib install --no-deps "M5GFX@0.2.25"
+          retry 5 arduino-cli lib install --no-deps "M5Unified@0.2.14"
+          retry 5 arduino-cli lib install --no-deps "OneWire@2.3.8"
+          retry 5 arduino-cli lib install --no-deps "PubSubClient@2.8"
 
   build:
     name: Build ${{ matrix.label }}
@@ -146,12 +149,12 @@ jobs:
             silicon_variant: pre_v3
             rx_variant: repo-a8204
             publish: true
-          - label: Waveshare 7B / 7B-C (ESP32-P4 rev 3.1 only, experimental)
-            profile: waveshare_7b_rev3_1
-            key: waveshare_touch_lcd_7b_rev3_1
+          - label: Waveshare 7B / 7B-C (ESP32-P4 v3.1 or newer, experimental)
+            profile: waveshare_7b_rev3
+            key: waveshare_touch_lcd_7b_rev3
             metadata_key: waveshare_touch_lcd_7b
             define: DEVICE_WAVESHARE_TOUCH_LCD_7B
-            silicon_variant: rev3_1
+            silicon_variant: post_v3
             rx_variant: repo-a8204
             publish: true
           - label: Waveshare 8 inch
@@ -226,6 +229,51 @@ jobs:
             key: waveshare_touch_lcd_10_1_rev3
             metadata_key: waveshare_touch_lcd_10_1
             define: DEVICE_WAVESHARE_TOUCH_LCD_10_1
+            silicon_variant: post_v3
+            rx_variant: repo-a8204
+            publish: true
+          - label: Guition JC8012P4A1 V3 (ESP32-P4 v3.1 or newer, experimental)
+            profile: guition_jc8012p4a1_v3
+            key: guition_jc8012p4a1_v3
+            metadata_key: guition_jc8012p4a1_v2
+            define: DEVICE_GUITION_JC8012P4A1_V2
+            silicon_variant: post_v3
+            rx_variant: repo-a8204
+            publish: true
+          - label: Waveshare Touch LCD 5 inch
+            profile: waveshare_5
+            key: waveshare_touch_lcd_5
+            define: DEVICE_WAVESHARE_TOUCH_LCD_5
+            silicon_variant: pre_v3
+            rx_variant: repo-a8204
+            publish: true
+          - label: Waveshare Touch LCD 5 inch (ESP32-P4 v3.1 or newer, experimental)
+            profile: waveshare_5_rev3
+            key: waveshare_touch_lcd_5_rev3
+            metadata_key: waveshare_touch_lcd_5
+            define: DEVICE_WAVESHARE_TOUCH_LCD_5
+            silicon_variant: post_v3
+            rx_variant: repo-a8204
+            publish: true
+          - label: Golden Security GS-T3E v2
+            profile: golden_security_gs_t3e_v2
+            key: golden_security_gs_t3e_v2
+            define: DEVICE_GOLDEN_SECURITY_GS_T3E_V2
+            rx_variant: native-s3
+            publish: true
+          - label: Waveshare Touch LCD 4.3 (ESP32-P4 v3.1 or newer, experimental)
+            profile: waveshare_4_3_rev3
+            key: waveshare_touch_lcd_4_3_rev3
+            metadata_key: waveshare_touch_lcd_4_3
+            define: DEVICE_WAVESHARE_TOUCH_LCD_4_3
+            silicon_variant: post_v3
+            rx_variant: repo-a8204
+            publish: true
+          - label: Waveshare 8 inch (ESP32-P4 v3.1 or newer, experimental)
+            profile: waveshare_8_rev3
+            key: waveshare_touch_lcd_8_rev3
+            metadata_key: waveshare_touch_lcd_8
+            define: DEVICE_WAVESHARE_TOUCH_LCD_8
             silicon_variant: post_v3
             rx_variant: repo-a8204
             publish: true
@@ -310,6 +358,39 @@ jobs:
             done
           done
 
+      # The panel keeps refreshing during flash writes (no blue flash):
+      # tools/esp-idf-3.3.7-p4-cache-safe/README.md.
+      - name: Apply cache-safe P4 display and camera DMA objects
+        if: matrix.rx_variant != 'native-s3' && !inputs.repair_s3_release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ar_bin="$(find "$HOME/.arduino15/packages/esp32/tools" -type f -path '*/bin/riscv32-esp-elf-ar' -print -quit)"
+          test -x "$ar_bin"
+
+          for variant in esp32p4-libs esp32p4_es-libs; do
+            lib_dir="$HOME/.arduino15/packages/esp32/tools/${variant}/${ARDUINO_CORE_VERSION}/lib"
+            for pair in esp_lcd_panel_dpi.c.obj:libesp_lcd.a dw_gdma.c.obj:libesp_hw_support.a esp_cam_ctlr_csi.c.obj:libesp_driver_cam.a; do
+              object_name="${pair%%:*}"
+              archive="${lib_dir}/${pair##*:}"
+              fixed_object="$GITHUB_WORKSPACE/tools/esp-idf-3.3.7-p4-cache-safe/${variant}/${object_name}"
+              test -f "$archive"
+              test -f "$fixed_object"
+
+              work_dir="$(mktemp -d)"
+              cp "$fixed_object" "$work_dir/$object_name"
+              "$ar_bin" rs "$archive" "$work_dir/$object_name"
+              (
+                cd "$work_dir"
+                rm "$object_name"
+                "$ar_bin" x "$archive" "$object_name"
+                cmp "$object_name" "$fixed_object"
+              )
+              rm -rf "$work_dir"
+            done
+          done
+
       - name: Verify release tag matches firmware version
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
@@ -364,6 +445,9 @@ jobs:
           elf_flags=""
           if [ "${profile}" = "guition_jc8012p4a1" ]; then
             elf_flags="-Wl,--wrap=esp_hosted_get_default_sdio_config"
+          elif [ "${profile}" = "waveshare_7b_rev3" ]; then
+            # Issue #41: SDIO at 20 MHz, no C6 version query (device code).
+            elf_flags="-Wl,--wrap=esp_hosted_get_default_sdio_config -Wl,--wrap=esp_hosted_get_coprocessor_fwversion"
           fi
           # The SDK flag file enables -fexceptions for all C++ code, but
           # HomeTiles never throws or catches; the unwind tables only cost
@@ -401,6 +485,8 @@ jobs:
             done
             grep -a -F -q "HomeTiles RPC sync serialization active" "${firmware_bin}"
             grep -a -F -q "HomeTiles SDIO RX recovery active (a8204f9 raw PKT_LEN + pending drain)" "${firmware_bin}"
+            # Only the cache-safe DW-GDMA object checks callbacks for IRAM.
+            grep -a -F -q "on_full_trans_done not in IRAM" "${firmware_bin}"
 
             short_tail_marker="HomeTiles SDIO RX 512-byte padding disabled (CMD53 short tail, 4-byte aligned)"
             if grep -a -F -q "${short_tail_marker}" "${firmware_bin}"; then
@@ -417,10 +503,10 @@ jobs:
             fi
 
             firmware_map="build/ci/${{ matrix.key }}/HomeTiles.ino.map"
-            if [ "${profile}" = "guition_jc8012p4a1" ]; then
+            if [ "${profile}" = "guition_jc8012p4a1" ] || [ "${profile}" = "waveshare_7b_rev3" ]; then
               grep -F -q "__wrap_esp_hosted_get_default_sdio_config" "${firmware_map}"
             elif grep -F -q "__wrap_esp_hosted_get_default_sdio_config" "${firmware_map}"; then
-              echo "Unexpected JC8012 SDIO configuration wrapper found in ${{ matrix.label }}" >&2
+              echo "Unexpected SDIO configuration wrapper found in ${{ matrix.label }}" >&2
               exit 1
             fi
 
@@ -433,12 +519,21 @@ jobs:
             grep -a -F -q "HTTPS host=%s tls=%d (%s) allocator=%s" "${firmware_bin}"
           fi
 
+      # The factory image carries the device's icon file in its LittleFS
+      # partition (release-helper/factory-icon-file.js), so a freshly flashed
+      # panel needs no download for its icons.
+      - name: Build the icon files for the factory image
+        if: ${{ !inputs.repair_s3_release || matrix.rx_variant == 'native-s3' }}
+        shell: bash
+        run: node tools/generate-icon-files.mjs --files-only --out build/icons
+
       - name: Package firmware binaries
         if: ${{ !inputs.repair_s3_release || matrix.rx_variant == 'native-s3' }}
         shell: bash
         run: |
           node release-helper/package-ci-build.js \
             --build-dir "build/ci/${{ matrix.key }}" \
+            --icon-dir build/icons \
             --device-key "${{ matrix.key }}" \
             --metadata-device-key "${{ matrix.metadata_key || matrix.key }}" \
             --silicon-variant "${{ matrix.silicon_variant || 'default' }}"
@@ -556,6 +651,11 @@ jobs:
           pattern: firmware-*
           path: build/release-assets
           merge-multiple: true
+
+      - name: Add the icon files
+        shell: bash
+        run: |
+          node tools/generate-icon-files.mjs --files-only --out build/release-assets
 
       - name: Verify release assets
         shell: bash

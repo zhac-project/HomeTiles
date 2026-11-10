@@ -1,6 +1,7 @@
 #pragma once
 
 #include <lvgl.h>
+#include "src/ui/popups/popup_surface.h"
 #include <initializer_list>
 #include <math.h>
 #include <stddef.h>
@@ -8,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include "src/ui/shared/ui_theme.h"
 
 // Finger readout for popup graphs (Sensor, Number, Select, Binary Sensor and
 // Energy). The graph's touch surface keeps the press, so dragging never
@@ -85,6 +87,8 @@ class PopupGraphScrub {
   }
 
   static void input(lv_event_t* event) {
+    // The graph's popup may draw on a filled tile's color (popup_surface).
+    const ui_theme::SurfaceScope popup_scope = popup_surface::scope();
     auto* self = static_cast<PopupGraphScrub*>(lv_event_get_user_data(event));
     auto* target = static_cast<lv_obj_t*>(lv_event_get_current_target(event));
     if (!self || !target) return;
@@ -123,6 +127,8 @@ class PopupGraphScrub {
   }
 
   static void refresh(lv_event_t* event) {
+    // The graph's popup may draw on a filled tile's color (popup_surface).
+    const ui_theme::SurfaceScope popup_scope = popup_surface::scope();
     auto* self = static_cast<PopupGraphScrub*>(lv_event_get_user_data(event));
     if (!self) return;
     if (lv_event_get_code(event) == LV_EVENT_DELETE) {
@@ -160,7 +166,7 @@ constexpr const char* kRangeSeparator = " \xE2\x80\x93 ";
 inline lv_obj_t* create_band_label(lv_obj_t* band, const lv_font_t* font, const char* text) {
   lv_obj_t* label = lv_label_create(band);
   lv_obj_set_style_text_font(label, font, 0);
-  lv_obj_set_style_text_color(label, lv_color_white(), 0);
+  lv_obj_set_style_text_color(label, lv_color_hex(ui_theme::text()), 0);
   lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_long_mode(label, LV_LABEL_LONG_CLIP);
   lv_obj_set_size(label, LV_PCT(100), lv_font_get_line_height(font));

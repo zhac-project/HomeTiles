@@ -50,7 +50,13 @@ public:
   void handleSaveBridge();
   void handleBridgeRefresh();
   void handleStatus();
+  // GET /api/language: the panel's language, so an open page notices a change
+  // made on the display and reloads (issue #73).
+  void handleLanguage();
   void handleRestart();
+  // POST /api/link: the Bridge's address for the direct link (docs-dev/bridge-link.md).
+  void handleLinkSetup();
+  void handleLinkInfo();
   void handleGetTiles();
   void handleSaveTiles();
   void handleReorderTiles();
@@ -58,34 +64,42 @@ public:
   void handleGetFolderTab();
   void handleSaveFolderAccess();
   void handleDeleteFolder();
+  void handleGetLayouts();
+  void handleSaveLayouts();
+  void handleSwitchLayout();
+  void handleSavePages();
   void handleGetSensorValues();
   void handleGetEntityOptions();
+  void handleGetMdiIcons();
+  void handleStartEntitySearch();
+  void handleGetEntitySearch();
   void handleGetScreensaver();
   void handleSaveScreensaver();
   void handleGetHardwareIo();
   void handleSaveHardwareIo();
   void handleSaveTileBorders();
-  void handleSaveIconDiscs();
-  void handleSaveIconGlow();
-  void handleSaveDefaultTileColor();
-  void handleTileRadius();
+  void handleSaveHeadGear();
+  void handleSaveHeadSwitch();
+  void handleSaveHomeHead();
+  void handleGestures();
+  void handleSaveTheme();
   void handleLocalCamera();
   void handleGetScreensaverWallpaper();
   void handleGetSdImages();
-  void handleGetSdIcons();
   void handleCreateScreenshot();
   void handleDownloadScreenshot();
   void handlePrepareOtaUpload();
   void handleOtaUpdate();
   void handleOtaRawUpdate();
+  void handleIconFileDownload();
+  void handleIconFileUpload();
+  void handleIconFileUploadDone();
   void handleOtaUploadDone();
   void handleStartOtaInstall();
   void handleGetOtaStatus();
   void handleGithubUpdateCheck();
   void handleGithubUpdateInstall();
   void handleGetGithubUpdateStatus();
-  void handleUploadIcon();
-  void handleUploadIconDone();
   void handleFileManagerList();
   void handleFileManagerDownload();
   void handleFileManagerDelete();
@@ -97,6 +111,17 @@ public:
   void handleCoreDumpErase();
   void handleCrashLogDownload();
   void handleSdDiagnosticsDownload();
+  void handleAuthChallenge();
+  void handleAuthLogin();
+  void handleAuthLogout();
+  void handleAuthPassword();
+
+  // Optional Web Admin password (web_admin_auth_handlers.cpp). Without a
+  // password every check passes. authorizeRequest() sends the 401/403 reply
+  // itself; the upload helpers gate chunk callbacks of multipart/raw uploads.
+  bool authorizeRequest();
+  bool authorizeUploadChunk(bool starting);
+  void finishUploadRequest();
 
   // A request that came through the ZHAC Cloud tunnel: the transport bridges
   // it from 127.0.0.1, which no LAN client can be. Remote sessions cannot
@@ -106,6 +131,7 @@ public:
 
   // HTML pages, implemented in web_admin_html.cpp.
   String getAdminPage();
+  String getLoginPage();
   String getSuccessPage();
   String getBridgeSuccessPage();
   String getStatusJSON();

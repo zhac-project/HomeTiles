@@ -10,7 +10,10 @@
 #include "src/tiles/runtime/compact_sensor_layout.h"
 #include "src/tiles/runtime/tile_renderer_fonts.h"
 #include "src/tiles/runtime/tile_renderer_shared.h"
+#include "src/ui/shared/tone_color.h"
+#include "src/types/camera/picture.h"
 #include "src/ui/popups/camera/camera_popup.h"
+#include "src/ui/shared/ui_theme.h"
 
 namespace {
 
@@ -22,7 +25,9 @@ struct CameraEventData {
   String entity_id;
   String title;
   String icon_name;
-  uint32_t bg_color = 0x2A2A2A;
+  uint32_t bg_color = 0;  // 0: the popup takes its default card
+  // A tap opens the full screen straight away (camera_picture::tap_full_screen).
+  bool full_screen = false;
 };
 
 static String friendly_camera_name(const String& entity_id) {
@@ -53,6 +58,7 @@ static void camera_tile_event_cb(lv_event_t* event) {
   lv_obj_t* icon = tile_icon_source::card_icon(static_cast<lv_obj_t*>(lv_event_get_current_target(event)));
   init.icon_color =
       icon ? lv_color_to_u32(lv_obj_get_style_text_color(icon, LV_PART_MAIN)) & 0xFFFFFF : 0xFFFFFF;
+  init.full_screen = data->full_screen;
   show_camera_popup(init);
 }
 
@@ -73,13 +79,18 @@ lv_obj_t* render_camera_tile(lv_obj_t* parent,
 
   lv_obj_t* card = lv_button_create(parent);
   if (!card) return nullptr;
-  const uint32_t card_color = tileBgColorOrDefault(tile, tileDefaultBgColor());
+  // The head over a picture (picture.h) draws on its fixed surface
+  // (tile_renderer.cpp tile_surface_of): its card takes that theme's tile
+  // color, which this scope gives, whatever the tile's own color.
+  const uint32_t card_color = camera_picture::head_over_picture(tile)
+                                  ? tileDefaultBgColor()
+                                  : tileBgColorOrDefault(tile, tileDefaultBgColor());
   lv_obj_set_style_bg_color(card, lv_color_hex(card_color),
                             LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_set_style_bg_grad_dir(card, LV_GRAD_DIR_NONE,
                                LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_set_style_bg_color(card,
-                            lv_color_hex(brighten_rgb_color(card_color, 0x10)),
+                            lv_color_hex(tone_color::pressed_card(card_color)),
                             LV_PART_MAIN | LV_STATE_PRESSED);
   lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
   ui_surface_style::apply_radius(card, tile_layout::scale_480(22), 0);
@@ -113,30 +124,40 @@ lv_obj_t* render_camera_tile(lv_obj_t* parent,
   }
   if (icon_char.length()) {
     icon = lv_label_create(card);
-    set_label_style(icon, lv_color_white(), FONT_MDI_ICONS);
+    set_label_style(icon, lv_color_hex(ui_theme::icon()), FONT_MDI_ICONS);
     lv_label_set_text(icon, icon_char.c_str());
     tile_icon_source::apply_initial(icon, tile);
     if (!compact) {
-      lv_obj_align(icon, LV_ALIGN_CENTER, 0, tile_layout::scale_i16(-20));
+      lv_obj_align(icon, LV_ALIGN_CENTER, 0,
+                   tile_icon_disc::icon_title_offsets(FONT_MDI_ICONS, tile_layout::header_title_font()).icon);
       tile_icon_disc::add_round(card, icon);
     }
   }
 
   lv_obj_t* title_label = lv_label_create(card);
-  set_label_style(title_label, lv_color_white(),
+  set_label_style(title_label, lv_color_hex(ui_theme::text()),
                   tile_layout::header_title_font());
   hometiles_title::tile(title_label, title.c_str(), false);
   if (compact) {
     compact_sensor_layout::apply(card, icon, title_label, nullptr, tile);
   } else if (icon) {
-    lv_obj_align(title_label, LV_ALIGN_CENTER, 0, tile_layout::scale(35));
+    lv_obj_align(title_label, LV_ALIGN_CENTER, 0,
+                 tile_icon_disc::icon_title_offsets(FONT_MDI_ICONS, tile_layout::header_title_font()).title);
   } else {
     lv_obj_center(title_label);
   }
 
-  if (grid_type != GridType::SCREENSAVER && tile.sensor_entity.length()) {
+  // The Bridge's picture instead of the icon (picture.h), not at half
+  // height: it shows the icon look until the first picture arrives.
+  if (!compact && grid_type != GridType::SCREENSAVER) {
+    camera_picture::attach(card, icon, title_label, tile);
+  }
+
+  // An image entity's picture has no popup yet.
+  if (grid_type != GridType::SCREENSAVER && tile.sensor_entity.length() &&
+      !camera_picture::is_image(tile.sensor_entity)) {
     CameraEventData* event_data = new CameraEventData{
-        tile.sensor_entity, title, icon_name, card_color};
+        tile.sensor_entity, title, icon_name, card_color, camera_picture::tap_full_screen(tile)};
     lv_obj_add_event_cb(card, camera_tile_event_cb, LV_EVENT_SHORT_CLICKED,
                         event_data);
     lv_obj_add_event_cb(card, camera_tile_delete_cb, LV_EVENT_DELETE,

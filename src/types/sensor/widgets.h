@@ -9,8 +9,14 @@ struct SensorTileWidgets {
   lv_obj_t* icon_label = nullptr;
   lv_obj_t* unit_label = nullptr;
   lv_obj_t* gauge = nullptr;
-  int32_t gauge_min = 0;
-  int32_t gauge_max = 100;
+  // The gauge's bounds with their decimals (gauge_range.h).
+  float gauge_min = 0;
+  float gauge_max = 100;
   lv_obj_t* chart = nullptr;
   lv_chart_series_t* series = nullptr;
+  // A look below the header (sensor_look_view, display modes 3 and up).
+  lv_obj_t* look = nullptr;
+  // Number/Select/Date-Time: what the value label shows (refresh_editable_tile),
+  // 0 before the first refresh.
+  uint32_t editable_hash = 0;
 };

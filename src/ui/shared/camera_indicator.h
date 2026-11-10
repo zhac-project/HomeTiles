@@ -20,6 +20,12 @@
 //     fades out towards the stripe. A tap ends the running live stream and
 //     hides the pill; nothing is paused or stored, Home Assistant can open the
 //     camera again.
+// With the head bar layout (grid_layout::head_bar()) the pill would cover the
+// head and the first tile row: a circle with the webcam icon in every head
+// takes its place (home_bar.cpp, user 2026-10-08), part of the head like the
+// time, so popups lie over it (user 2026-10-14); a tap ends the stream the
+// same way. Here only the stripe; the heads are built again when the circle
+// comes or goes.
 // The stripe and fillets lie above the pill. The stripe lies above every
 // screen, popup and the screensaver. The pill belongs to the tile grids: it
 // hides on the Settings tab and while a popup, the PIN pad or the screensaver
@@ -45,6 +51,9 @@
 #include "src/ui/popups/popup_shell.h"
 #include "src/ui/screensaver/image_screensaver.h"
 #include "src/ui/shared/ui_surface_style.h"
+#include "src/ui/shared/ui_theme.h"
+#include "src/ui/tabs/tiles/home_bar.h"
+#include "src/ui/tabs/tiles/tab_tiles_unified.h"
 #include "src/ui/ui_manager.h"
 #include "src/video/local_camera/local_camera.h"
 
@@ -55,9 +64,12 @@ namespace detail {
 // indicator for long.
 constexpr uint32_t kPollMs = 100;
 // A darker red than the Material 600 tone: calmer on the dark UI.
-constexpr uint32_t kRed = 0xC62828;
-// Stripe: the top margin minus the one-pixel gap to the tiles.
-constexpr int kStripeHeight = GRID_PAD_TOP > 1 ? GRID_PAD_TOP - 1 : 1;
+constexpr uint32_t kRed = home_bar::kCameraRed;
+// Stripe: the profile's own grid margin minus one pixel (V2 3 px), a thin
+// line at the screen's top edge in every layout. The grid's margin became a
+// whole grid gap in b300 and made the stripe 15 px thick (user 2026-10-11:
+// "so fett geworden").
+constexpr int kStripeHeight = Device::kProfile.grid_pad > 1 ? Device::kProfile.grid_pad - 1 : 1;
 // The whole stripe, pill included, spans this share of the screen width.
 constexpr int kStripePermille = 600;
 // Each wing fades in from its outer end up to this gradient position (of
@@ -67,7 +79,7 @@ constexpr int32_t kFadeStop = 180;
 constexpr float kPillSpan = 2.0f;
 // Concave fillets between the stripe and the pill sides: half the tile
 // radius, at most half the largest radius the setting allows.
-constexpr int kMaxFillet = (tile_radius::maximum(GRID_CELL_H, GRID_GAP) + 1) / 2;
+constexpr int kMaxFillet = (tile_radius::maximum(Device::kGridCellH, GRID_GAP) + 1) / 2;
 // Icon disc on the red pill (~25% white; tiles use ~15%).
 constexpr lv_opa_t kDiscOpa = 64;
 // Contour border: as bright as the disc (the tile border's ~20% white is hard
@@ -101,6 +113,8 @@ struct Objects {
   int radius = -1;
   int fillet = 0;
   bool border = false;
+  bool head = false;         // The heads' circle instead of the pill.
+  bool head_circle = false;  // The heads were built with the circle.
   bool visible = false;    // Stripe shown.
   bool with_pill = false;  // Pill, fillets and border shown as well.
 };
@@ -206,6 +220,7 @@ inline void setFadeGradient(lv_obj_t* obj, lv_color_t color, lv_opa_t main_opa,
 // clip area, so it starts where the fillets end; its outline follows the
 // global tile border setting here.
 inline void updateShape(Objects& ui) {
+  if (ui.head) return;  // The circle has no fillets or border.
   const int radius = tileRadius();
   const int fillet = filletRadius();
   const bool border = bordersEnabled();
@@ -250,6 +265,17 @@ inline void create(Objects& ui) {
   ui.pill_height = pill_height;
   ui.wing_width = wing_width;
 
+  if (grid_layout::head_bar()) {
+    // The stripe only; the heads hold the circle.
+    ui.head = true;
+    ui.bar = createStripePart(pill_x, pill_width);
+    ui.left = createStripePart(pill_x - wing_width, wing_width);
+    setFadeGradient(ui.left, lv_color_hex(kRed), LV_OPA_TRANSP, LV_OPA_COVER, 0, kFadeStop);
+    ui.right = createStripePart(pill_x + pill_width, wing_width);
+    setFadeGradient(ui.right, lv_color_hex(kRed), LV_OPA_COVER, LV_OPA_TRANSP, 255 - kFadeStop, 255);
+    return;
+  }
+
   // Pill first: the stripe parts created after it lie above its shadow.
   ui.pill = lv_button_create(lv_layer_top());
   lv_obj_remove_style_all(ui.pill);
@@ -261,10 +287,7 @@ inline void create(Objects& ui) {
   lv_obj_set_style_bg_color(ui.pill, lv_color_hex(kRed), 0);
   lv_obj_set_style_bg_opa(ui.pill, LV_OPA_COVER, 0);
   // Same shadow as the popup cards.
-  lv_obj_set_style_shadow_width(ui.pill, popup_layout::scale480(28), 0);
-  lv_obj_set_style_shadow_color(ui.pill, lv_color_black(), 0);
-  lv_obj_set_style_shadow_opa(ui.pill, LV_OPA_40, 0);
-  lv_obj_set_style_shadow_spread(ui.pill, popup_layout::scale480(2), 0);
+  popup_layout::apply_card_shadow(ui.pill);
   lv_obj_remove_flag(ui.pill, LV_OBJ_FLAG_SCROLLABLE);
   disable_pressed_button_animation(ui.pill);
   lv_obj_add_flag(ui.pill, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_IGNORE_LAYOUT | LV_OBJ_FLAG_HIDDEN));
@@ -331,6 +354,7 @@ inline void create(Objects& ui) {
 }
 
 inline void setShown(lv_obj_t* obj, bool shown) {
+  if (!obj) return;  // The circle has no fillets or border.
   if (shown) {
     lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
   } else {
@@ -344,7 +368,7 @@ inline void setVisible(Objects& ui, bool visible, bool with_pill) {
   if (visible == ui.visible && with_pill == ui.with_pill) return;
   ui.visible = visible;
   ui.with_pill = with_pill;
-  if (with_pill) {
+  if (with_pill && !ui.head) {
     // The language may have changed since the last capture.
     const auto& strings = i18n::strings(configManager.getConfig().language);
     lv_label_set_text(ui.title, strings.local_camera_indicator_active);
@@ -369,43 +393,69 @@ inline bool pillAllowed() {
 // Popups and the screensaver are added to the same layer later: keep the pill
 // and, above it, the stripe and fillets on top.
 inline void keepOnTop(Objects& ui) {
-  lv_obj_t* const order[] = {ui.pill, ui.frame_clip, ui.bar, ui.left, ui.right,
-                             ui.fillet_left, ui.fillet_right};
-  constexpr uint32_t kCount = sizeof(order) / sizeof(order[0]);
+  lv_obj_t* parts[] = {ui.pill, ui.frame_clip, ui.bar, ui.left, ui.right,
+                       ui.fillet_left, ui.fillet_right};
+  // The circle has no fillets or border: only the parts that exist.
+  lv_obj_t* order[sizeof(parts) / sizeof(parts[0])] = {};
+  uint32_t count = 0;
+  for (lv_obj_t* part : parts) {
+    if (part) order[count++] = part;
+  }
   lv_obj_t* layer = lv_layer_top();
   const uint32_t children = lv_obj_get_child_count(layer);
-  bool on_top = children >= kCount;
-  for (uint32_t i = 0; on_top && i < kCount; ++i) {
-    on_top = lv_obj_get_child(layer, static_cast<int32_t>(children - kCount + i)) == order[i];
+  bool on_top = children >= count;
+  for (uint32_t i = 0; on_top && i < count; ++i) {
+    on_top = lv_obj_get_child(layer, static_cast<int32_t>(children - count + i)) == order[i];
   }
   if (on_top) return;
-  for (lv_obj_t* part : order) lv_obj_move_foreground(part);
+  for (uint32_t i = 0; i < count; ++i) lv_obj_move_foreground(order[i]);
 }
 
 inline void refresh(Objects& ui) {
   const local_camera::IndicatorStyle style = local_camera::indicatorStyle();
   const bool visible =
       style != local_camera::IndicatorStyle::None && local_camera::indicatorActive();
-  if (!ui.pill) {
+  if (!ui.bar) {
     if (!visible) return;
     create(ui);
   }
   setVisible(ui, visible, style == local_camera::IndicatorStyle::Pill && pillAllowed());
+  const bool circle = ui.head && visible && style == local_camera::IndicatorStyle::Pill;
+  if (circle != ui.head_circle) {
+    ui.head_circle = circle;
+    tiles_rebuild_heads(false);
+  }
   if (!visible) return;
   updateShape(ui);
   keepOnTop(ui);
 }
 
-// A popup or the screensaver overlay opened or closed on the top layer: hide
-// or restore the pill and keep the stripe above it at once, not at the next
-// poll. The indicator's own changes re-enter here; busy stops that.
-inline void onTopLayerChanged(lv_event_t*) {
+// The indicator's own changes re-enter here; busy stops that.
+inline void refreshGuarded() {
   static bool busy = false;
   Objects& ui = objects();
-  if (busy || !ui.pill || !ui.visible) return;
+  if (busy || !ui.bar || !ui.visible) return;
   busy = true;
   refresh(ui);
   busy = false;
+}
+
+inline void refreshLater(void*) {
+  if (lv_display_is_invalidation_enabled(lv_display_get_default())) refreshGuarded();
+}
+
+// A popup or the screensaver overlay opened or closed on the top layer: hide
+// or restore the pill and keep the stripe above it at once, not at the next
+// poll. The popup shell moves its objects with the display's invalidation
+// off: a pill shown then marked no area and came back cut to the popup's area
+// (Tab5). Then it follows in the next timer pass, before the next frame.
+inline void onTopLayerChanged(lv_event_t*) {
+  if (!lv_display_is_invalidation_enabled(lv_display_get_default())) {
+    lv_async_call_cancel(refreshLater, nullptr);
+    lv_async_call(refreshLater, nullptr);
+    return;
+  }
+  refreshGuarded();
 }
 
 inline void poll(lv_timer_t*) { refresh(objects()); }
@@ -426,11 +476,11 @@ inline void refreshNow() {
 // only the pieces above those controls. LVGL task only.
 inline void invalidateVisible() {
   detail::Objects& ui = detail::objects();
-  if (!ui.pill || !ui.visible) return;
+  if (!ui.bar || !ui.visible) return;
   for (lv_obj_t* part : {ui.bar, ui.left, ui.right}) lv_obj_invalidate(part);
   if (!ui.with_pill) return;
   for (lv_obj_t* part : {ui.pill, ui.frame_clip, ui.fillet_left, ui.fillet_right}) {
-    lv_obj_invalidate(part);
+    if (part) lv_obj_invalidate(part);
   }
 }
 

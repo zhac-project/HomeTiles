@@ -60,6 +60,16 @@ class Presenter {
 
   uint16_t* activeFramebuffer() const;
   bool active() const { return double_buffer_active_; }
+  // The turned layout (grid_layout::turned()): the UI and the camera frames
+  // take the other transform than the driver's own: without the quarter turn
+  // on a panel upright by itself, with one on a landscape panel (JC1060,
+  // Waveshare 7B upright) and on the JC4880 in landscape.
+  void setUpright(bool upright);
+  bool upright() const { return upright_; }
+  // An upright UI area straight into the active framebuffer (rotation 2:
+  // turned by 180 into the mirrored place), written back for the scan-out.
+  bool drawUpright(int32_t x, int32_t y, int32_t w, int32_t h,
+                   const uint16_t* data, uint8_t rotation);
 
   // Call after a normal UI write into activeFramebuffer(). PPA writers must
   // set ppa_writer so cached CPU lines cannot later overwrite the DMA result.
@@ -71,10 +81,29 @@ class Presenter {
                size_t data_size, bool byte_swap, uint8_t rotation,
                const PpaRuntime& runtime);
 
+  // Camera full screen (#65): frames that already have the panel's size and
+  // orientation go straight from the JPEG decoder into the inactive
+  // framebuffer and are swapped in, without the PPA. fullFrameInfo gives that
+  // size and the clockwise turn the Bridge applies (the PPA's turn for this
+  // rotation). beginFullFrames keeps a copy of the UI shown now and turns the
+  // screen black at once until the first full frame; endFullFrames puts the
+  // copy back at once. LVGL must not draw in between.
+  bool fullFrameInfo(uint8_t rotation, uint16_t& width, uint16_t& height,
+                     uint16_t& turn_cw) const;
+  bool beginFullFrames();
+  // Where the decoder may write the next frame (nullptr: nowhere) and the
+  // frame's size in bytes; a frame lower than the panel sits centred in black.
+  uint16_t* acquireFullFrame(size_t& bytes);
+  bool submitFullFrame();
+  void endFullFrames();
+  bool fullFramesActive() const { return full_frames_; }
+
   void end();
 
  private:
-  bool begin();
+  // covers_panel: the frame about to be presented fills the whole panel, so
+  // the inactive framebuffer needs no copy of the active one first.
+  bool begin(bool covers_panel);
   bool syncUiToInactive();
   bool faultCooldownActive();
   void noteFault(const PpaRuntime& runtime);
@@ -91,23 +120,36 @@ class Presenter {
                             int32_t y, int32_t w, int32_t h) const;
   void drainRefreshSignal() const;
   bool waitRefreshDone() const;
+  void finishPendingSwap();
   [[noreturn]] void restartAfterTimeout(int32_t x, int32_t y, int32_t w,
                                         int32_t h, int32_t source_stride,
                                         uint8_t rotation) const;
 
   Config config_{};
+  // The driver's own transform (init()); a turned layout takes the other.
+  Transform own_transform_ = Transform::Portrait90Or270;
+  bool upright_ = false;
   esp_lcd_panel_handle_t panel_ = nullptr;
   SemaphoreHandle_t refresh_done_ = nullptr;
   uint16_t* framebuffers_[2] = {nullptr, nullptr};
   uint8_t active_index_ = 0;
   bool ready_ = false;
   bool double_buffer_active_ = false;
+  // A swap was requested but the panel may still scan the previous (now
+  // inactive) framebuffer until its next refresh. Nothing writes into the
+  // inactive framebuffer before finishPendingSwap() confirmed that refresh.
+  bool refresh_pending_ = false;
   bool mirror_dirty_ = false;
   int32_t dirty_x1_ = 0;
   int32_t dirty_y1_ = 0;
   int32_t dirty_x2_ = 0;
   int32_t dirty_y2_ = 0;
   uint32_t fault_cooldown_until_ms_ = 0;
+  bool swapTo(uint16_t* framebuffer);
+  // Where a full frame lands: its first row and its rows (multiples of 16).
+  bool fullFrameRows(int32_t& top, int32_t& rows) const;
+  bool full_frames_ = false;
+  uint16_t* ui_copy_ = nullptr;
 };
 
 }  // namespace p4_dsi_camera_presenter

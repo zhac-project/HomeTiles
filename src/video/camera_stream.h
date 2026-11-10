@@ -3,10 +3,22 @@
 #include <Arduino.h>
 #include <lvgl.h>
 
-bool camera_stream_start(const char* url, uint32_t corner_rgb);
+// full_screen (#65): frames in the panel's own size and orientation, decoded
+// straight into the framebuffer (Device::displayBeginFullFrames first).
+bool camera_stream_start(const char* url, uint32_t corner_rgb,
+                         bool full_screen = false);
 void camera_stream_stop();
 void camera_stream_process_ui(lv_obj_t* image,
                               lv_obj_t* placeholder,
                               lv_obj_t* status_label);
 void camera_stream_set_external_status(const char* text, bool error = false);
 bool camera_stream_is_active();
+// millis() of this stream's first shown frame, 0 before it (switch timing).
+uint32_t camera_stream_first_frame_ms();
+// True once after the stream task ended on its own in a transport error
+// (DMA safety stop, receive or acknowledgement failure).
+bool camera_stream_take_transport_failure();
+// Test builds (/api/debug/camera-pause): the stream task reads and
+// acknowledges nothing for `ms`, a Wi-Fi stall as the Bridge sees it (#116).
+// False when no stream runs.
+bool camera_stream_debug_pause(uint32_t ms);

@@ -47,3 +47,51 @@ export async function formatAdminDelivery(source) {
   assertAdminDeliveryEquivalent(source, result.code);
   return result.code;
 }
+
+// The source without its comments (outside strings). A comment between two
+// non-space characters would join their tokens: refused, never guessed.
+function stripCssComments(source) {
+  let out = '';
+  let quote = '';
+  for (let i = 0; i < source.length; ++i) {
+    const ch = source[i];
+    if (quote) {
+      out += ch;
+      if (ch === '\\') out += source[++i] ?? '';
+      else if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      out += ch;
+      continue;
+    }
+    if (ch !== '/' || source[i + 1] !== '*') {
+      out += ch;
+      continue;
+    }
+    const end = source.indexOf('*/', i + 2);
+    if (end < 0) throw new Error('Admin CSS has an unterminated comment.');
+    const before = out.at(-1) ?? ' ';
+    const after = source[end + 2] ?? ' ';
+    if (!/\s/.test(before) && !/\s/.test(after)) {
+      throw new Error('Admin CSS comment joins two tokens: ' + source.slice(Math.max(0, i - 20), end + 22));
+    }
+    i = end + 1;
+  }
+  if (quote) throw new Error('Admin CSS has an unterminated string.');
+  return out;
+}
+
+// The firmware stores the delivered CSS: without comments, blank lines and
+// indentation (the readable source keeps them). Only whitespace and comments
+// change, which the check below proves.
+export function formatCssDelivery(source) {
+  const stripped = stripCssComments(source);
+  const delivery = stripped.split('\n').map(line => line.trim()).filter(Boolean).join('\n') + '\n';
+  const spaced = text => text.replace(/\s+/g, ' ').trim();
+  if (spaced(stripped) !== spaced(delivery)) {
+    throw new Error('Admin CSS delivery changed beyond comments and whitespace.');
+  }
+  return delivery;
+}

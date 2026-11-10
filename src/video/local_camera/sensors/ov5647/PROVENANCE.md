@@ -3,7 +3,8 @@
 Compiled only for boards that select `HOMETILES_CAMERA_SENSOR_OV5647` in
 `src/video/local_camera/camera_select.h`, camera beta builds only (first:
 Waveshare ESP32-P4-WIFI6-Touch-LCD-8; also the 7-inch and 10.1-inch front
-cameras and the OV5647 modules on the CSI connectors of the 7B-C, 4.3-C and 4B).
+cameras and the OV5647 modules on the CSI connectors of the 7B-C, 4.3-C, 5-inch
+and 4B).
 
 ## Source
 
@@ -33,10 +34,12 @@ exposure and colour, like on the OV02C10.
 
 ## HomeTiles overrides (not vendor data)
 
-- Portrait output 544x960 for the quarter-turn mounting: all 960 binned rows
-  of the table window, 544 centred columns (`0x3808/0x3809 = 544`, ISP x offset
-  `0x3810/0x3811 = 372`). The JPEG leaves the panel portrait; the Bridge turns it
-  into 960x544.
+- Portrait output 720x960 for the quarter-turn mounting: all 960 binned rows
+  of the table window, 720 centred columns (`0x3808/0x3809 = 720`, ISP x offset
+  `0x3810/0x3811 = 284`). The JPEG leaves the panel portrait; the Bridge turns it
+  into 960x720 (4:3; 544x960 until b297).
+- Without the Bridge's turn (an upright layout) the whole binned image,
+  1280x960 (x offset 4, y offset 2).
 - VTS 1640 (`0x380E/0x380F`) for 30 fps instead of 45 (less CSI/PSRAM traffic).
 - Manual exposure and analog gain after the Linux ov5647 driver: `0x3503 =
   0x03`, exposure `0x3500..0x3502` in 1/16 lines, gain `0x350A/0x350B` in 1/16
@@ -60,6 +63,10 @@ From `waveshareteam/ESP32-P4-WIFI6-Touch-LCD-X`, example
   and J5, the 8-inch J6). The 4B, 4.3-inch and 7B schematics wire their 15-pin
   CSI connector the same way: SCCB on GPIO 7/8, CSI_IO0 pulled up, no XCLK,
   reset or power-down line, VDD_MIPI_DPHY on LDO channel 3 at 2500 mV.
+- The 5-inch (`waveshareteam/ESP32-P4-WIFI6-Touch-LCD-5`, `09_video_lcd_display`
+  and `06_Camera_Preview`): optional OV5647 on its 2-lane MIPI-CSI connector,
+  SCCB on GPIO 7/8, `reset_pin = -1`, `pwdn_pin = -1`, the same LDO 3 supply as
+  its display.
 
 ## Assumptions that still need hardware confirmation
 

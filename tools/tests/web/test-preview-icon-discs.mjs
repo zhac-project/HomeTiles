@@ -1,6 +1,7 @@
 // Web Admin previews show the icon discs like the device: taller tiles get a
-// disc of round_diameter() centered on the unchanged icon, glow tints it with
-// the icon color, and the global option and per-tile override hide it. Scene
+// disc of round_diameter() centered on the unchanged icon, tinted with the
+// icon color; every circle shows (user 2026-10-11: no circle options, stored
+// per-tile values of older tiles are not drawn). Scene
 // tiles resolve their icon through the scene alias -> entity map, as the
 // device does; before, the preview had no such map and showed no scene icon.
 import assert from 'node:assert/strict';
@@ -18,25 +19,24 @@ assert.match(html, /if \(tile\.type == TILE_SCENE && !iconName\.length\(\) &&[\s
 assert.match(html, /tile_icon_disc::icon_color_tints\(binary_sensor_visual_color\(binary_sensor_state\)\)/);
 
 const page = `<!doctype html><html lang="en"><head><style>${readRepoFile('src/web/assets/admin.css')}
-:root{--icon-size:24px;--icon-disc-round:30px;--icon-disc-corner:34px;--compact-inset:2px;--tile-radius:11px;--icon-disc-opa:0.149;--icon-disc-glow:20%;--preview-cell-w:84px;--preview-cell-h:72px;--preview-gap:5px;}
+:root{--icon-size:24px;--icon-disc-round:30px;--icon-disc-corner:34px;--compact-inset:2px;--tile-radius:11px;--preview-cell-w:84px;--preview-cell-h:72px;--preview-gap:5px;--tile-card:var(--tile-default-bg, #2A2A2A);}
 </style></head><body>
 <div id="tab-tiles-test" class="tile-tab"><div class="tile-grid">
 <div class="tile" id="test-tile-0" data-index="0" style="width:84px;height:72px"></div>
 <div class="tile" id="test-tile-1" data-index="1" style="width:84px;height:72px"></div>
 <div class="tile" id="test-tile-2" data-index="2" style="width:84px;height:72px"></div></div></div>
-<div id="testSettings"><select id="test_tile_type"><option value="1">Sensor</option><option value="2">Scene</option></select>
+<div id="testSettings" class="tile-settings"><select id="test_tile_type"><option value="1">Sensor</option><option value="2">Scene</option></select>
 <textarea id="test_tile_title"></textarea><input id="test_tile_icon"><input type="color" id="test_tile_color">
 ${['col','row','span_w','span_h'].map(n=>`<input id="test_tile_${n}" value="1">`).join('')}
-<input type="checkbox" id="test_tile_icon_disc" checked>
-<input type="checkbox" id="test_tile_icon_glow" checked><select id="test_scene_alias"><option value="tv">TV</option></select>
-<div id="test_tile_color_modes"><button data-tile-color-mode="global"></button><button data-tile-color-mode="custom"></button><button data-tile-color-mode="icon" id="test_tile_color_mode_icon"></button></div>
+<select id="test_scene_alias"><option value="tv">TV</option></select>
+<div class="icon-color-segmented choice-row tile-color-modes" id="test_tile_color_modes"><button type="button" data-tile-color-mode="global" onclick="setTileColorMode('test','global')">Global</button><button type="button" id="test_tile_color_mode_custom" data-tile-color-mode="custom" onclick="setTileColorMode('test','custom')">Custom</button></div>
 <div id="test_tile_color_row" class="tile-color-row"></div>
-<div id="test_tile_icon_fill_row" class="tile-icon-color-fields icon-color-fill hidden" data-tab="test"><input type="checkbox" id="test_tile_icon_fill" hidden><input type="range" id="test_tile_icon_fill_strength" value="20"><output id="test_tile_icon_fill_strength_value"></output></div></div>
+<div id="test_tile_icon_fill_row" class="tile-icon-color-fields icon-color-fill hidden" data-tab="test"><label class="inline-checkbox"><input type="checkbox" id="test_tile_icon_fill" data-icon-color="fill-target"> Fill</label></div></div>
 <div class="tile" id="test-tile-3" data-index="3" style="width:84px;height:34px"></div>
 <pre id="result"></pre><script>
 const nativeListen=document.addEventListener.bind(document);document.addEventListener=(name,...args)=>{if(name!=='DOMContentLoaded')nativeListen(name,...args);};
 const APP_I18N={},CLIMATE_I18N={},BINARY_SENSOR_I18N={},GRID_COLS=7,GRID_ROWS=5,TILES_PER_GRID=35,ADMIN_WEB_SESSION_TOKEN='test';
-const TILE_TYPE_REGISTRY={0:{},1:{css:'sensor',fields:'sensor',preview:'sensor',sharedBg:true,defaultBg:'#222222'},2:{css:'scene',fields:'scene',preview:'none',sharedBg:true,defaultBg:'#222222'}};
+const TILE_TYPE_REGISTRY={0:{},1:{css:'sensor',fields:'sensor',preview:'sensor',sharedBg:true,defaultBg:'#222222'},2:{css:'scene',fields:'scene',preview:'none',sharedBg:true,defaultBg:'#222222'},10:{css:'text',fields:'text',preview:'none',sharedBg:true,defaultBg:'#222222'}};
 const TILE_TABS=[],TAB_BY_FOLDER={},FOLDER_BY_TAB={},SCREENSAVER_FOLDER_ID=65535,SCREENSAVER_TILE_DEFAULT_OPACITY=0,SCREENSAVER_TILE_DEFAULT_COLOR='#000000',MEDIA_TILE_TYPE=15,MEDIA_TILE_MIN_SPAN=2,MEDIA_TILE_MAX_SPAN=3;
 window.fetch=async()=>({json:async()=>({success:true})});
 ${inlineScriptSafe(readAdminDeliverySource())}
@@ -60,37 +60,34 @@ try{
  check(document.querySelector('#test-tile-3 .tile-icon.mdi-television'),'Half-height scene tiles show the entity icon too');
  const icon=scene.querySelector('.tile-icon').getBoundingClientRect();
  check(Math.abs(icon.width/2-parseFloat(disc(scene).left))<0.6,'Disc is centered on the icon');
- const white=c=>c.startsWith('rgba(255, 255, 255, 0.')&&parseFloat(c.split(',')[3])>=0.075&&parseFloat(c.split(',')[3])<=0.155;
- check(white(disc(scene).backgroundColor),'White icon keeps the white disc at the device opacity (8..15 % by tile luma)');
- // A colored icon tints its disc; glow off keeps it white.
+ // A neutral circle (tone_color::fill): an opaque grey a fixed step above the
+ // tile, like the device.
+ const channels=c=>c.slice(c.indexOf('(')+1,c.indexOf(')')).split(',').map(Number);
+ const white=c=>{const v=channels(c);return (v.length===3||Math.abs(v[3]-1)<0.01)&&v[0]===v[1]&&v[1]===v[2];};
+ check(white(disc(scene).backgroundColor),'White icon keeps an opaque neutral disc: '+disc(scene).backgroundColor);
+ const lighter=(el,c)=>channels(c)[0]>channels(getComputedStyle(el).backgroundColor)[0];
+ check(lighter(scene,disc(scene).backgroundColor),'The neutral disc is lighter than its tile');
+ // A colored icon tints its disc.
  renderTileFromData('test',1,{type:1,title:'T',sensor_entity:'sensor.t',icon_name:'thermometer'},meta);
  const sensor=document.getElementById('test-tile-1');
  sensor.querySelector('.tile-icon').style.color='rgb(255, 213, 79)';applyIconDiscTint(sensor);
  check(sensor.querySelector('.tile-icon').classList.contains('tile-icon-tinted'),'Colored icon is tinted');
  check(!white(disc(sensor).backgroundColor),'Tinted disc uses the icon hue');
- renderTileFromData('test',1,{type:1,title:'T',sensor_entity:'sensor.t',icon_name:'thermometer',icon_glow:0},meta);
+ // Stored per-tile "circle off" and "glow off" of older tiles are not drawn.
+ renderTileFromData('test',1,{type:1,title:'T',sensor_entity:'sensor.t',icon_name:'thermometer',icon_glow:0,icon_disc:2},meta);
  sensor.querySelector('.tile-icon').style.color='rgb(255, 213, 79)';applyIconDiscTint(sensor);
- check(!sensor.querySelector('.tile-icon').classList.contains('tile-icon-tinted'),'Glow off keeps the white disc');
- // Per-tile Off and the global option.
- renderTileFromData('test',1,{type:1,title:'T',sensor_entity:'sensor.t',icon_name:'thermometer',icon_disc:2},meta);
- check(disc(sensor).display==='none','Per-tile Off hides the disc');
- document.documentElement.classList.add('icon-discs-off');
- check(disc(scene).display==='none','Global off hides global discs');
- renderTileFromData('test',1,{type:1,title:'T',sensor_entity:'sensor.t',icon_name:'thermometer',icon_disc:1},meta);
- check(disc(sensor).display!=='none','Per-tile On keeps the disc with the global option off');
- document.documentElement.classList.remove('icon-discs-off');
- // Tiles with the stored default grey follow a global tile color change live,
- // and their discs stay translucent white over the new background.
- renderTileFromData('test',3,{type:1,title:'Half',sensor_entity:'sensor.t',icon_name:'thermometer',span_w:1,span_h:0.5,bg_color:0x012A2A2A},meta);
- renderTileFromData('test',0,{type:2,title:'TV',scene_alias:'tv',icon_name:'',bg_color:0x012A2A2A},meta);
- previewDefaultTileColor('#101010');
+ check(disc(sensor).display!=='none'&&sensor.querySelector('.tile-icon').classList.contains('tile-icon-tinted'),
+  'Old per-tile circle options draw the circle in the icon color');
+ // A tile with an icon is drawn on the theme card, a stored own color of an
+ // older tile included; the half-height disc follows the card.
+ renderTileFromData('test',3,{type:1,title:'Half',sensor_entity:'sensor.t',icon_name:'thermometer',span_w:1,span_h:0.5,bg_color:0x01FF0000},meta);
+ renderTileFromData('test',0,{type:2,title:'TV',scene_alias:'tv',icon_name:'',bg_color:0x01FF0000},meta);
  const half=document.getElementById('test-tile-3');
  check(half.classList.contains('sensor-compact'),'Half-height tile uses the compact disc');
- for(const el of [scene,half]) check(getComputedStyle(el).backgroundColor==='rgb(16, 16, 16)','Default-grey tile follows the global color live');
- check(white(disc(scene).backgroundColor),'Taller disc stays translucent white over the new color');
- check(white(getComputedStyle(half.querySelector('.tile-icon')).backgroundColor),'Half-height disc stays translucent white over the new color');
- renderTileFromData('test',0,{type:2,title:'TV',scene_alias:'tv',icon_name:'',bg_color:0x01FF0000},meta);
- check(getComputedStyle(scene).backgroundColor==='rgb(255, 0, 0)','Other stored colors are kept');
+ for(const el of [scene,half]) check(getComputedStyle(el).backgroundColor==='rgb(42, 42, 42)','An icon tile is drawn on the theme card: '+getComputedStyle(el).backgroundColor);
+ check(white(disc(scene).backgroundColor)&&lighter(scene,disc(scene).backgroundColor),'Taller disc a step above the card: '+disc(scene).backgroundColor);
+ const halfDisc=getComputedStyle(half.querySelector('.tile-icon')).backgroundColor;
+ check(white(halfDisc)&&lighter(half,halfDisc),'Half-height disc a step above the card: '+halfDisc);
  // Per-tile icon colors (icon-colors.js): first matching rule, else the fixed
  // color; unknown states keep the type color. Glow follows the result.
  const colored=(value,record)=>{meta.values['sensor.t']=value;renderTileFromData('test',1,{type:1,title:'T',sensor_entity:'sensor.t',icon_name:'thermometer',icon_colors:record},meta);return getComputedStyle(sensor.querySelector('.tile-icon')).color;};
@@ -99,31 +96,37 @@ try{
  check(sensor.querySelector('.tile-icon').classList.contains('tile-icon-tinted'),'Rule color tints the disc');
  check(colored('10',rule)==='rgb(255, 0, 0)','Fixed icon color without a matching rule');
  check(colored('unavailable',rule)==='rgb(255, 255, 255)','Unknown states keep the type color');
- // Tile color is one choice: a stored default grey loads as Global, picking a
- // color selects Custom, Global returns to the global color, From icon color
- // sets the hidden fill option and shows its strength, and a return to
- // Custom restores the picked color. The choice never depends on the order.
+ // Tile color: a tile with an icon offers only "Fill"; a tile without an
+ // icon (Text) keeps Global or Custom. A stored default grey loads as
+ // Global, picking a color selects Custom, Global returns to the theme card
+ // and a return to Custom restores the picked color.
  currentTileTab='test';currentTileIndex=1;folderByTab.test=1;
  const colorInput=document.getElementById('test_tile_color'),fill=document.getElementById('test_tile_icon_fill');
  const active=()=>[...document.querySelectorAll('#test_tile_color_modes button.active')].map(b=>b.dataset.tileColorMode).join();
  const hidden=id=>document.getElementById(id).classList.contains('hidden')||document.getElementById(id).classList.contains('color-hidden');
+ document.getElementById('test_tile_type').innerHTML+='<option value="10">Text</option>';
  document.getElementById('test_tile_type').value='1';
+ syncTileColorMode('test');
+ check(hidden('test_tile_color_modes')&&hidden('test_tile_color_row')&&!hidden('test_tile_icon_fill_row'),'A tile with an icon offers only Fill');
+ // Really not shown (b378: the grid rule of the choice row beat
+ // .tile-settings .hidden, so Global/Custom stayed visible) and Custom does
+ // nothing there (its hidden picker opened in the top left corner).
+ const shown=id=>getComputedStyle(document.getElementById(id)).display!=='none';
+ check(!shown('test_tile_color_modes')&&!shown('test_tile_color_row')&&shown('test_tile_icon_fill_row'),'Icon tile: Global/Custom and the color field are not shown');
+ let picked=0;colorInput.showPicker=()=>{picked++;};
+ setTileColorMode('test','custom');
+ check(picked===0&&tileColorInputIsDefault('test'),'Custom does nothing on a tile with an icon');
+ document.getElementById('test_tile_type').value='10';
  setTileColorInputFromStored('test',0x012A2A2A,'#101010');
- check(active()==='global'&&colorInput.value==='#101010'&&hidden('test_tile_color_row'),'Stored default grey loads as Global without a color field');
+ check(active()==='global'&&colorInput.value==='#101010'&&hidden('test_tile_color_row')&&!hidden('test_tile_color_modes')&&
+  hidden('test_tile_icon_fill_row')&&!fill.checked,'Text: a stored default grey loads as Global without a color field');
+ check(shown('test_tile_color_modes')&&!shown('test_tile_icon_fill_row'),'Text: Global/Custom shown, no Fill');
  colorInput.value='#ff0000';markTileColorInputExplicit('test');
  check(active()==='custom'&&!tileColorInputIsDefault('test')&&!hidden('test_tile_color_row'),'Picking a color selects Custom');
  setTileColorMode('test','global');
- check(active()==='global'&&tileColorInputIsDefault('test')&&colorInput.value==='#101010'&&!fill.checked,'Global returns to the global color');
- check(getComputedStyle(sensor).backgroundColor==='rgb(16, 16, 16)','Live preview follows the global color');
- setTileColorMode('test','icon');
- check(active()==='icon'&&fill.checked&&tileColorInputIsDefault('test')&&!hidden('test_tile_icon_fill_row')&&hidden('test_tile_color_row'),
-  'From icon color sets the fill option on the global base and shows its strength');
- check(document.getElementById('test_tile_icon_fill_strength_value').textContent==='20 %','Strength output');
+ check(active()==='global'&&tileColorInputIsDefault('test')&&!fill.checked,'Global returns to the theme card');
  setTileColorMode('test','custom');
- check(active()==='custom'&&!fill.checked&&colorInput.value==='#ff0000'&&hidden('test_tile_icon_fill_row'),'Custom restores the picked color');
- setTileColorMode('test','icon');colorInput.value='#00ff00';markTileColorInputExplicit('test');
- check(active()==='custom'&&!fill.checked,'Picking a color leaves From icon color');
- check(hidden('test_tile_color_mode_icon')===!tileTypeHasIconColors('1'),'From icon color is offered only with icon colors');
+ check(active()==='custom'&&colorInput.value==='#ff0000','Custom restores the picked color');
  // Live preview: the scene alias field resolves the same icon.
  currentTileTab='test';currentTileIndex=2;folderByTab.test=1;
  document.getElementById('test_tile_type').value='2';document.getElementById('test_scene_alias').value='tv';
@@ -134,4 +137,4 @@ try{
 </script></body></html>`;
 try {runDomHarness({label:'Preview icon discs and scene icons',html:page,tmpPrefix:'hometiles-preview-discs-'});}
 catch(error){throw Error(error.message.match(/<pre id="result">([\s\S]*?)<\/pre>/)?.[1]||error.message.slice(0,400));}
-console.log('Preview icon discs, glow, global/per-tile off and scene icons pass');
+console.log('Preview icon discs (always shown, icon color), tile color choice and scene icons pass');

@@ -15,6 +15,8 @@ const context = vm.createContext({
   screensaverLoaded: false, screensaverLoading: false,
   screensaverTimeFontSizes: [20, 24, 28, 32, 40, 48, 56, 64, 72, 80, 96],
   screensaverDateFontSizes: [20, 24, 28, 32, 40, 48, 56, 64, 72],
+  SCREENSAVER_TILE_DEFAULT_OPACITY: 217,
+  SCREENSAVER_MAX_WALLPAPERS: 500,
   fetch: async (url, options) => {
     assert.equal(url, 'api/screensaver');
     if (options?.method === 'POST') {
@@ -53,13 +55,27 @@ data = call('ssNormalizeLoaded', {success: true, sd_ready: false,
 assert.equal(call('ssSyncCardImages', data), false);
 assert.equal(data.wallpapers.length, stale.length);
 
-// The display stores at most 32 images; more files must not cause a save loop.
-const many = Array.from({length: 40}, (_, i) => `img${i}.jpg`);
+// The display stores at most SCREENSAVER_MAX_WALLPAPERS (500; an issue
+// reported the former 32 as too few); more files must not cause a save loop.
+const many = Array.from({length: 520}, (_, i) => `img${i}.jpg`);
 data = call('ssNormalizeLoaded', {success: true, sd_ready: true, wallpapers: [],
   available_wallpapers: many});
 assert.equal(call('ssSyncCardImages', data), true);
-assert.equal(data.wallpapers.length, 32);
+assert.equal(data.wallpapers.length, 500);
 assert.equal(call('ssSyncCardImages', data), false);
+assert.match(readRepoFile('src/ui/screensaver/screensaver_config.h'), /static constexpr size_t kMaxScreensaverWallpapers = 500;/);
+assert.match(readRepoFile('src/web/server/render/web_admin_scripts.cpp'),
+  /const SCREENSAVER_MAX_WALLPAPERS = " \+\s*String\(static_cast<unsigned>\(kMaxScreensaverWallpapers\)\)/);
+
+// Without a card no image shows or can be edited; the list says so in one line.
+data.sd_ready = false;
+context.screensaverDraft = data;
+context.screensaverWallpaperIndex = 0;
+assert.equal(call('ssCurrentWallpaper'), null);
+data.sd_ready = true;
+assert.equal(call('ssCurrentWallpaper')?.file_name, 'img0.jpg');
+const editor = readRepoFile('src/web/admin/screensaver/editor.js');
+assert.match(editor, /if \(screensaverDraft\.sd_ready !== true\) \{[\s\S]{0,200}empty\.textContent = t\('screensaverNoSd'\);/);
 
 // File manager changes store the synced list at once, without a preview image.
 const settle = () => new Promise(resolve => setTimeout(resolve, 0));
@@ -91,6 +107,10 @@ assert.match(body('bool find_first_sd_wallpaper('), /any_configured_wallpaper_on
 assert.match(body('int first_enabled_wallpaper('), /wallpaper_usable\(/);
 assert.equal((body('int next_enabled_wallpaper(').match(/wallpaper_usable\(/g) || []).length, 2);
 assert.doesNotMatch(body('int next_enabled_wallpaper('), /is_wallpaper_file\(/);
+// Shuffling checks only the picked image on the card (a few tries), never
+// the whole list per slide, and keeps no list of its own.
+assert.match(body('int next_enabled_wallpaper('), /for \(int attempt = 0; attempt < 8; \+\+attempt\) \{/);
+assert.doesNotMatch(body('int next_enabled_wallpaper('), /choices\[/);
 
 const handler = readRepoFile('src/web/server/handlers/web_admin_screensaver.cpp');
 assert.match(handler, /\\"sd_ready\\":/);

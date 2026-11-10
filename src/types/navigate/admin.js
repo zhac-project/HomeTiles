@@ -22,6 +22,12 @@ function normalizeIconName(value) {
       if (tabEl) {
         tabEl.dataset.folderName = label;
         tabEl.dataset.folderIcon = iconName;
+        // Its page's head (web_admin_html.cpp) shows the folder's name and icon.
+        const head = tabEl.querySelector('.head-bar-preview');
+        const headTitle = head?.querySelector('.head-title');
+        if (headTitle) headTitle.textContent = label;
+        const headIcon = head?.querySelector('.head-disc > i');
+        if (headIcon) headIcon.className = 'mdi mdi-' + (iconName || 'folder');
       }
       const btn = document.querySelector(
         '.folder-tab-btn[data-folder-id="' + folderNum + '"]') ||
@@ -30,22 +36,11 @@ function normalizeIconName(value) {
       if (btn) {
         btn.dataset.folderName = label;
         btn.dataset.folderIcon = iconName;
-        const labelEl = btn.querySelector('span');
+        const labelEl = btn.querySelector('.tab-label');
         if (labelEl) labelEl.textContent = label;
-        let iconEl = btn.querySelector('i.mdi');
-        if (iconName) {
-          if (!iconEl) {
-            iconEl = document.createElement('i');
-            iconEl.className = 'mdi';
-            iconEl.style.fontSize = '24px';
-            if (labelEl) btn.insertBefore(iconEl, labelEl);
-            else btn.appendChild(iconEl);
-          }
-          iconEl.className = 'mdi mdi-' + iconName;
-          iconEl.style.fontSize = '24px';
-        } else if (iconEl) {
-          iconEl.remove();
-        }
+        // The circle always holds an icon; without one the folder icon.
+        const iconEl = btn.querySelector('.tab-disc i.mdi');
+        if (iconEl) iconEl.className = 'mdi mdi-' + (iconName || (folderNum === 0 ? 'home' : 'folder'));
       }
     }
     document.querySelectorAll('select[id$="_navigate_target"]').forEach(select => {
@@ -117,7 +112,9 @@ function normalizeIconName(value) {
       targetSelect?.value ?? tile?.navigate_target ??
       tileEl?.dataset.navigateTarget ?? 0);
     const isFolderTile = type === 4 && Number.isInteger(folderId) && folderId > 0;
-    if (fields) fields.classList.toggle('is-hidden', !isFolderTile);
+    // A page has no PIN (user 2026-10-12): no PIN option for it.
+    const isPage = tab === 'folder0' && typeof pageFolders === 'function' && pageFolders().includes(folderId);
+    if (fields) fields.classList.toggle('is-hidden', !isFolderTile || isPage);
 
     const showPinEditor = isFolderTile && toggle?.checked === true;
     label?.classList.toggle('is-hidden', !showPinEditor);
@@ -182,6 +179,8 @@ function normalizeIconName(value) {
         tile.folder_pin = storedPin;
       }
       if (tileEl) tileEl.dataset.folderPinEnabled = enabled ? '1' : '0';
+      // The tile shows the lock of a protected Folder (previewTileLocked).
+      if (typeof updateTilePreview === 'function') updateTilePreview(tab);
       syncFolderPinControls(tab);
       if (status) status.textContent = navigateText('folderPinSaved');
       showNotification(navigateText('folderPinSaved'));

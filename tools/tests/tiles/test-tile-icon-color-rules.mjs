@@ -173,16 +173,16 @@ const policy = read('src/types/tile_type_policy.h');
 assert.match(policy, /tileTypeIconColorsByValue\(int type\) \{\s*return type == TILE_SENSOR \|\| type == TILE_ENERGY \|\| type == TILE_NUMBER;/);
 assert.match(policy, /tileTypeIconColorsByState\(int type\) \{\s*return type == TILE_SENSOR \|\| type == TILE_BINARY_SENSOR \|\| type == TILE_SELECT \|\|\s*type == TILE_DATETIME;/);
 assert.match(read('src/tiles/config/tile_config.h'),
-  /tile_icon_colors::normalize\(\s*record, out, sizeof\(out\), tileTypeIconColorsByValue\(type\), tileTypeIconColorsByState\(type\),\s*true, tileTypeRulesUseOwnEntity\(type\)\);/);
+  /tile_icon_colors::normalize\(\s*record, out, sizeof\(out\), tileTypeIconColorsByValue\(type\), tileTypeIconColorsByState\(type\),\s*true, tileTypeRulesUseOwnEntity\(type\), type == TILE_MEDIA\);/);
 
 const rules = code(read('src/tiles/runtime/tile_icon_color_rules.h'));
 assert.ok(rules.includes('tile_icon_disc::set_icon_color(icon, color);'), 'Colors go through the disc glow path');
-assert.match(rules, /if \(!tile_icon_disc::forced_color\(icon, forced\) &&\s*lv_color_eq\(lv_obj_get_style_text_color\(icon, LV_PART_MAIN\), color\)\) \{\s*return;/,
-  'Unchanged colors are skipped unless a rule forces the icon');
+assert.match(rules, /if \(!fill_changed && !tile_icon_disc::forced_color\(icon, forced\) &&\s*lv_color_eq\(lv_obj_get_style_text_color\(icon, LV_PART_MAIN\), color\)\) \{\s*return;/,
+  'Unchanged colors are skipped unless a rule forces the icon or the row fill changed');
 const header = read('src/tiles/config/tile_icon_colors.h');
 assert.ok(!/\bnew\b|malloc|String\b/.test(code(rules) + code(header)), 'No allocation per state update');
 const renderer = code(read('src/tiles/runtime/tile_renderer.cpp'));
-assert.match(renderer, /if \(tile && tile->icon_colors\.length\(\)\) \{\s*tile_icon_color_rules::apply\(icon, tile->icon_colors\.c_str\(\),\s*displayValue != "--", value, nullptr,\s*lv_color_white\(\)\);/,
+assert.match(renderer, /if \(tile && tile->icon_colors\.length\(\)\) \{\s*tile_icon_color_rules::apply\(icon, tile->icon_colors\.c_str\(\),\s*displayValue != "--", value, nullptr,\s*lv_color_hex\(ui_theme::text\(\)\)\);/,
   'Sensor and Energy updates color the icon from the raw state; "--" states keep the default');
 assert.match(renderer, /if \(g_build_grid\) return &g_build_grid->tiles\[index\];\s*return &tileConfig\.getActiveGrid\(\)\.tiles\[index\];/,
   'State updates read the grid that is being built');
@@ -191,14 +191,15 @@ const build = unified.slice(unified.indexOf('static void build_folder_cache_entr
 assert.match(build, /tile_renderer_set_build_grid\(&config\);\s*render_tile_grid\(entry\.grid, config,[\s\S]*apply_cached_states\(grid_type, config, false\);[\s\S]*process_binary_sensor_update_queue\(\);[\s\S]*tile_renderer_set_build_grid\(nullptr\);/,
   'Hidden folder builds (preloads) resolve icon colors from their own tiles, not the visible folder');
 const control = code(read('src/types/value/value_control.cpp'));
-assert.match(control, /const bool known = value\.valid && value\.has_state && value\.available && value\.state != "unknown";\s*tiles_request_rule_refresh\(grid, index\);\s*tile_icon_color_rules::apply\(widgets\[index\]\.icon_label, tile->icon_colors\.c_str\(\), known,\s*value\.state\.c_str\(\), display\.c_str\(\), lv_color_white\(\)\);/,
+assert.match(control, /const bool known = value\.valid && value\.has_state && value\.available && value\.state != "unknown";\s*tiles_request_rule_refresh\(grid, index\);\s*tile_icon_color_rules::apply\(widgets\[index\]\.icon_label, tile->icon_colors\.c_str\(\), known,\s*value\.state\.c_str\(\), display\.c_str\(\), lv_color_hex\(ui_theme::text\(\)\)\);/,
   'Number, Select and Date/Time match the raw state and the displayed text');
 const binary = code(read('src/types/binary_sensor/renderer.cpp'));
 assert.match(binary, /tile_icon_color_rules::apply\(\s*widgets\.icon_label, tile \? tile->icon_colors\.c_str\(\) : nullptr,\s*rule_state_known\(state\), binary_sensor_state_name\(state\.value\),\s*label\.c_str\(\), lv_color_hex\(binary_sensor_visual_color\(state\)\)\);/,
   'Binary sensor matches the raw state and its translation, default is the state color');
 assert.match(binary, /const uint32_t icon_color = tile_icon_colors::state_icon_color\(\s*tile\.icon_colors\.c_str\(\), rule_state_known\(state\), binary_sensor_state_name\(state\.value\),\s*initial_label\.c_str\(\), binary_sensor_visual_color\(state\)\);/,
   'The first Binary render uses the same rule as every state update ("Color icon" off keeps the fixed color)');
-assert.match(binary, /\? 0xFFC107\s*: 0x9E9E9E;/, 'Binary defaults stay amber and grey');
+// (The grey is the theme's resting grey: 0x9E9E9E in the dark theme.)
+assert.match(binary, /\? 0xFFC107\s*: ui_theme::icon_rest\(\);/, 'Binary defaults stay amber and grey');
 const cppFunction = (file, name) => {
   const found = cppFunctionDefinitions(read(file)).find(f => f.name === name);
   assert.ok(found, `${file}: ${name}`);
@@ -222,7 +223,10 @@ for (const marker of ['_tile_icon_color_fields" class="tile-icon-color-fields hi
   '"_tile_icon_state_section\\">\\n"', '_value" autocomplete="off" maxlength=")html";',
   '_has" data-icon-color="has">', '_color" value="#22C55E" data-icon-color="rule-color">', '_tile_icon_rule_add" data-icon-color="add">',
   '"_tile_icon_binary_section\\">\\n"', '{"on", tr.tile_icon_color_state_on, "#FFC107"}', '{"off", tr.tile_icon_color_state_off, "#9E9E9E"}',
-  '" data-unset="1" data-icon-color="binary">', 'data-icon-color="binary-clear" data-state="']) {
+  '" data-unset="1" data-icon-color="binary">', 'data-icon-color="binary-clear" data-state="',
+  // A rule row's own "Fuellen" (user 2026-10-11).
+  '_fill" data-icon-color="row-fill"> )html";', '_fill" data-icon-color="binary-fill" data-state=")html";',
+  'appendHtmlEscaped(html, tr.tile_rule_fill);']) {
   assert.ok(html.includes(marker), `icon color HTML: ${marker}`);
 }
 assert.ok(read('src/types/types_registry.cpp').includes('if (ctx.tab_id) append_tile_icon_color_fields_html(html, *ctx.tab_id);'),
@@ -250,11 +254,12 @@ const translations = {
     'Feu tricolore', 'Batterie', 'Humidité', 'Couleur unique', null, "Couleur selon l'état", 'État', 'contient',
     'Ajouter un état', 'Supprimer', null, 'Activé', 'Désactivé'],
 };
-const glowLabels = {de: '"Kreis in Icon-Farbe",', en: '"Circle in icon color",', fr: '"Cercle couleur de l\'icône",'};
+// The strings follow "From cover" and the Off/On pair of each table in
+// struct order.
+const coverLabels = {de: '"Aus Cover",', en: '"From cover",', fr: '"De la pochette",'};
 for (const [language, texts] of Object.entries(translations)) {
-  // The strings follow the glow label of each table in struct order.
-  const start = tables[language].indexOf(glowLabels[language]) + glowLabels[language].length;
-  const entries = [...tables[language].slice(start).matchAll(/^\s*"((?:[^"\\]|\\.)*)",/gm)].slice(0, texts.length).map(m => m[1]);
+  const start = tables[language].indexOf(coverLabels[language]) + coverLabels[language].length;
+  const entries = [...tables[language].slice(start).matchAll(/^\s*"((?:[^"\\]|\\.)*)",/gm)].slice(2, 2 + texts.length).map(m => m[1]);
   texts.forEach((text, index) => {
     if (text === null) assert.ok(entries[index].length > 20, `${language}: hint ${index}`);
     else assert.equal(entries[index], text.replace(/'/g, "'"), `${language}: ${fields[index]}`);
@@ -310,16 +315,20 @@ struct FS {bool exists(const String&p){return files.count(p)||directories.count(
  }} filesystem;
 FS& storageFS(){return filesystem;}bool storageReady(){return ready;}
 constexpr size_t TILES_PER_GRID=4;
-const char*kTitlePathDir="/_tile_titles",*kImagePathDir="/_tile_images",*kEntityPathDir="/_tile_entities",*kIconColorPathDir="/_tile_icon_colors";
+const char*kTitlePathDir="/_tile_titles",*kImagePathDir="/_tile_images",*kEntityPathDir="/_tile_entities",*kIconColorPathDir="/_tile_icon_colors",*kWeatherSensorPathDir="/_tile_weather_sensors",*kFlowEntityPathDir="/_tile_flow_entities";
 bool g_sidecar_index_built=false;
-std::vector<uint32_t> g_title_sidecar_keys,g_image_sidecar_keys,g_entity_sidecar_keys,g_icon_color_sidecar_keys;
+std::vector<uint32_t> g_title_sidecar_keys,g_image_sidecar_keys,g_entity_sidecar_keys,g_icon_color_sidecar_keys,g_weather_sensor_sidecar_keys,g_flow_entity_sidecar_keys;
+// The PSRAM sidecar text cache (tile_config.cpp) with std containers, no lock.
+using PsString=std::string;struct SidecarText{uint32_t key;PsString text;};using SidecarTexts=std::vector<SidecarText>;
+SidecarTexts g_image_sidecar_texts,g_entity_sidecar_texts,g_title_sidecar_texts,g_icon_color_sidecar_texts,g_weather_sensor_sidecar_texts,g_flow_entity_sidecar_texts;
+struct SidecarTextsGuard{SidecarTextsGuard(){}~SidecarTextsGuard(){}};
 struct Tile {TileType type=TILE_EMPTY;String icon_colors;};struct TileGridConfig{Tile tiles[TILES_PER_GRID];};
 ${normalizeTile}
-` + ['sidecarKey', 'sidecarKeyPresent', 'sidecarKeyAdd', 'sidecarKeyRemove', 'scanSidecarDir', 'ensureSidecarIndexBuilt',
+` + ['sidecarKey', 'sidecarKeyPresent', 'sidecarKeyAdd', 'sidecarTextCached', 'sidecarTextStore', 'sidecarTextForget', 'sidecarTextsFor', 'sidecarKeyRemove', 'scanSidecarDir', 'ensureSidecarIndexBuilt',
     'tmpPathFor', 'backupPathFor', 'replaceFileWithPreparedTmp', 'iconColorPathFile', 'readIconColorsSd',
     'writeIconColorsSd', 'applyIconColorsFromSd'].map(fn).join('\n') + String.raw`
 std::string norm(const char* in,bool bar,bool rows){char out[tile_icon_colors::kMaxRecordBytes+1];tile_icon_colors::normalize(in,out,sizeof(out),bar,rows);return out;}
-void reboot(){g_sidecar_index_built=false;g_icon_color_sidecar_keys.clear();}
+void reboot(){g_sidecar_index_built=false;g_icon_color_sidecar_keys.clear();g_image_sidecar_texts.clear();g_entity_sidecar_texts.clear();g_title_sidecar_texts.clear();g_icon_color_sidecar_texts.clear();}
 int main(){
  using namespace tile_icon_colors;
  struct N{const char* in;bool bar;bool rows;};
@@ -342,10 +351,31 @@ int main(){
  assert(normLayer("v2\n\nsrc rules sensor.waste bogus",false,false,false)=="");
  assert(own_state_colors_icon("v2\n\nhas F44336 6")&&!own_state_colors_icon("v2\n\nsrc rules self off")&&!own_state_colors_icon("v2\n\nsrc rules sensor.x"));
  uint32_t rgb=0;assert(!resolve("","on",nullptr,rgb)&&!resolve(nullptr,"on",nullptr,rgb)&&!resolve("v2\n\nis FFC107 on",nullptr,nullptr,rgb));
+ // A state line's own "Fuellen" (user 2026-10-11): "is+" fills, "is-" keeps the
+ // tile plain, a plain "is" follows the "fill" line; numeric lines never carry it.
+ {char out[kMaxRecordBytes+1];normalize("v2\n\nis+ ff0000 on\nhas- 00ff00 x\nge+ 000000 5\nis* 111111 y\nis 222222 z",out,sizeof(out),false,true);
+  assert(std::string(out)=="v2\n\nis+ FF0000 on\nhas- 00FF00 x\nis 222222 z");}
+ assert(state_fill("v2\n\nis+ FF0000 on\nis- 00FF00 off",true,"on",nullptr)==RowFill::On);
+ assert(state_fill("v2\n\nis+ FF0000 on\nis- 00FF00 off",true,"off",nullptr)==RowFill::Off);
+ assert(state_fill("v2\n\nis+ FF0000 on\nis- 00FF00 off",true,"x","Aus")==RowFill::Inherit);
+ assert(state_fill("v2\n\nis FF0000 on",true,"on",nullptr)==RowFill::Inherit);
+ assert(state_fill("v2\n\nis+ FF0000 on",false,"on",nullptr)==RowFill::Inherit);
+ assert(state_fill("v2\n\nsrc rules self off\nis+ FF0000 on",true,"on",nullptr)==RowFill::Inherit);
+ assert(state_fill("v2\n\nsrc rules sensor.x\nis+ FF0000 on",true,"on",nullptr)==RowFill::Inherit);
+ assert(state_fill("v2\n\nhas+ FF0000 Ein",true,"on","Ein")==RowFill::On);
+ assert(rows_fill("v2\n\nis- FF0000 off\nhas+ 00FF00 x")&&!rows_fill("v2\n\nis FF0000 on\nis- 00FF00 off")&&!rows_fill(""));
+ {RowFill f=RowFill::On;assert(resolve("v2\n\nbar smooth 0 10 0:000000 1000:FFFFFF\nis+ FF0000 on","5",nullptr,rgb,true,&f)&&f==RowFill::Inherit);
+  assert(resolve("v2\n00FF00\nis- FF0000 on","off",nullptr,rgb,true,&f)&&rgb==0x00FF00&&f==RowFill::Inherit);
+  assert(resolve("v2\n\nis- FF0000 on","on",nullptr,rgb,false,&f)&&rgb==0xFF0000&&f==RowFill::Off);}
  // Worst case (source, bar and six states) fits the sidecar limit.
- std::string worst="v2\nFFFFFF\nfill 50\nsrc rules a."+std::string(126,'b')+" tile=50 noicon off\nbar smooth -12345678901 999999999999 1000:000000 1000:000000 1000:000000 1000:000000 1000:000000 1000:000000";
- for(int i=0;i<6;++i){worst+="\nhas FFFFFF ";worst+=std::string(64,'w');}
- {char out[kMaxRecordBytes+1];assert(normalize(worst.c_str(),out,sizeof(out),false,false,true)==kMaxRecordBytes);}
+ // Every stop and line carries the longest own icon (user 2026-10-28).
+ const std::string icon=","+std::string(kMaxIconBytes,'i');
+ std::string worst="v2\nFFFFFF\nfill 50\ncover icon tile=50\nsrc rules a."+std::string(126,'b')+" tile=50 noicon off\nbar smooth -12345678901 999999999999";
+ for(int i=0;i<6;++i)worst+=" 1000:000000"+icon;
+ // The longest state line carries its own fill mark ("has+").
+ for(int i=0;i<6;++i){worst+="\nhas+ FFFFFF"+icon+" ";worst+=std::string(64,'w');}
+ // The Media "cover" line counts too (allow_cover).
+ {char out[kMaxRecordBytes+1];assert(normalize(worst.c_str(),out,sizeof(out),false,false,true,false,true)==kMaxRecordBytes);}
  // Icon-and-title tiles: a source entity; "rules" keeps the bar and states,
  // "auto" drops them; other types never keep a source line.
  assert(normalizeTileIconColors(TILE_FOLDER,"v2\nff0000\nsrc rules sensor.waste\nhas f44336 6\nbar steps 0 10 0:000000 1000:FFFFFF")=="v2\nFF0000\nsrc rules sensor.waste\nbar steps 0 10 0:000000 1000:FFFFFF\nhas F44336 6");
@@ -380,8 +410,10 @@ int main(){
   TileGridConfig grid;grid.tiles[2].type=type;reboot();applyIconColorsFromSd(3,grid);assert(grid.tiles[2].icon_colors=="v2\nFF8800");
  }
  // Tiles with their own state colors keep a fixed color and their rules;
- // own rules there may use the bar and the state list.
- assert(normalizeTileIconColors(TILE_SWITCH,full.c_str())=="v2\nFF8800");
+ // own rules there may use the bar and the state list, in the rule layer
+ // ("src rules self"; records that lost the line get it back, issue #102).
+ assert(normalizeTileIconColors(TILE_SWITCH,full.c_str())=="v2\nFF8800\nsrc rules self\nbar smooth 0 100 0:3B82F6 1000:EF4444\nis 4CAF50 on");
+ assert(normalizeTileIconColors(TILE_SWITCH,"v2\n\nsrc rules self\nis 4CAF50 on")=="v2\n\nsrc rules self\nis 4CAF50 on");
  assert(normalizeTileIconColors(TILE_SWITCH,"v2\nFF8800\nsrc rules self tile=30\nis 4CAF50 on")=="v2\nFF8800\nsrc rules self tile=30\nis 4CAF50 on");
  assert(normalizeTileIconColors(TILE_FOLDER,"v2\n\nsrc rules self\nis 4CAF50 on")=="");
  assert(normalizeTileIconColors(TILE_CLOCK,"v2\n\nsrc auto light.x tile=20")=="v2\n\nsrc auto light.x tile=20");
@@ -436,21 +468,20 @@ int main(){
 const rows = [0, 1, 2, 3, 4, 5].map(i => `<div class="tile-icon-rule hidden" id="t_tile_icon_rule_${i}">
 <input type="text" id="t_tile_icon_rule_${i}_value" data-icon-color="value">
 <label class="icon-color-contains"><input type="checkbox" id="t_tile_icon_rule_${i}_has" data-icon-color="has"> contains</label>
+<label class="icon-color-contains"><input type="checkbox" id="t_tile_icon_rule_${i}_fill" data-icon-color="row-fill"> fill</label>
 <input type="color" id="t_tile_icon_rule_${i}_color" value="#22C55E" data-icon-color="rule-color">
 <button type="button" class="tile-color-reset-btn" data-icon-color="remove" data-rule="${i}">x</button></div>`).join('');
 const block = `<div id="t_tile_icon_color_fields" class="tile-icon-color-fields hidden" data-tab="t">
-<input type="color" id="t_tile_icon_color" value="#FFFFFF" data-unset="1" data-icon-color="color">
-<button type="button" id="clear" data-icon-color="clear">r</button>
+<div class="icon-color-segmented choice-row tile-icon-color-modes" id="t_tile_icon_color_modes"><button type="button" id="mode_auto" data-icon-color="icon-color-mode" data-mode="auto">A</button><button type="button" id="mode_own" data-icon-color="icon-color-mode" data-mode="own">O</button><button type="button" id="mode_cover" data-icon-color="icon-color-mode" data-mode="cover">C</button></div>
+<div class="tile-color-row" id="t_tile_icon_color_row"><input type="color" id="t_tile_icon_color" value="#FFFFFF" data-unset="1" data-icon-color="color"></div>
 <div class="icon-color-section hidden" id="t_tile_icon_source_section"><input type="hidden" id="t_tile_icon_rules_on" value="0">
 <div class="icon-color-segmented"><button type="button" data-icon-color="rules-on" data-mode="0">Off</button><button type="button" data-icon-color="rules-on" data-mode="1">On</button></div>
 <div class="icon-color-rules-body hidden" id="t_tile_icon_rules_body"><input type="hidden" id="t_tile_icon_source_kind" value="self">
 <div class="icon-color-segmented" id="t_tile_icon_source_kinds"><button type="button" data-icon-color="source-kind" data-mode="self">Own</button><button type="button" data-icon-color="source-kind" data-mode="other">Other</button></div>
-<select id="t_tile_icon_source" data-icon-color="source"><option value="">None</option></select><input type="hidden" id="t_tile_icon_source_mode" value="rules">
+<input type="hidden" id="t_tile_icon_source" data-icon-color="source" data-entity-picker="icon_sources"><input type="hidden" id="t_tile_icon_source_mode" value="rules">
 <div class="icon-color-segmented" id="t_tile_icon_source_modes"><button type="button" data-icon-color="source-mode" data-mode="auto">A</button><button type="button" data-icon-color="source-mode" data-mode="rules">R</button></div>
-<label class="inline-checkbox"><input type="checkbox" id="t_tile_icon_rule_icon" data-icon-color="rule-target" checked> Icon</label>
-<label class="inline-checkbox"><input type="checkbox" id="t_tile_icon_rule_tile" data-icon-color="rule-target"> Tile</label>
-<div class="icon-color-strength hidden" id="t_tile_icon_rule_strength_row"><input type="range" id="t_tile_icon_rule_strength" min="10" max="50" step="5" value="20" data-icon-color="rule-strength"><output id="t_tile_icon_rule_strength_value">20 %</output></div>
-<p class="hint hidden" id="t_tile_icon_rule_follows_icon">follows</p><input type="checkbox" id="t_tile_icon_fill" hidden></div></div>
+</div></div>
+<div class="tile-icon-color-fields icon-color-fill" id="t_tile_icon_fill_row" data-tab="t"><label class="inline-checkbox"><input type="checkbox" id="t_tile_icon_fill" data-icon-color="fill-target"> Fill</label></div>
 <div class="icon-color-section hidden" id="t_tile_icon_bar_section"><input type="hidden" id="t_tile_icon_bar" value="">
 <div class="icon-color-segmented"><button type="button" data-icon-color="mode" data-mode="off">Off</button><button type="button" data-icon-color="mode" data-mode="smooth">Smooth</button><button type="button" data-icon-color="mode" data-mode="steps">Steps</button></div>
 <div class="icon-color-bar-editor hidden" id="t_tile_icon_bar_editor"><div class="icon-color-presets">
@@ -462,6 +493,7 @@ ${['cold_warm', 'traffic', 'battery', 'humidity', 'single'].map(p => `<button ty
 <div class="icon-color-section hidden" id="t_tile_icon_state_section">${rows}
 <button type="button" class="btn btn-secondary tile-icon-rule-add" id="t_tile_icon_rule_add" data-icon-color="add">+</button></div>
 <div class="icon-color-section hidden" id="t_tile_icon_binary_section">
+<input type="checkbox" id="t_tile_icon_on_fill" data-icon-color="binary-fill" data-state="on"><input type="checkbox" id="t_tile_icon_off_fill" data-icon-color="binary-fill" data-state="off">
 <input type="color" id="t_tile_icon_on" value="#FFC107" data-default="#FFC107" data-unset="1" data-icon-color="binary"><button type="button" id="clear_on" data-icon-color="binary-clear" data-state="on">r</button>
 <input type="color" id="t_tile_icon_off" value="#9E9E9E" data-default="#9E9E9E" data-unset="1" data-icon-color="binary"><button type="button" id="clear_off" data-icon-color="binary-clear" data-state="off">r</button></div></div>`;
 const registry = Object.fromEntries(Object.entries(handlers).map(([type, [name]]) =>
@@ -543,10 +575,14 @@ try{
  check(snapshot()===''&&hidden('t_tile_icon_bar_editor'),'Off removes the bar');
  click(document.querySelector('[data-mode="steps"]'));
  check(snapshot().startsWith('v2\\n\\nbar steps -10.5 40 1000:123456 1000:EAB308'),'Turning it on again restores the last stops: '+snapshot());
- // Fixed color stays the fallback and clears to white.
+ // Icon color: Automatic hides the field, Custom shows it, Automatic again
+ // forgets the color; From cover is Media only.
+ const activeMode=()=>document.querySelector('#t_tile_icon_color_modes .active')?.dataset.mode;
+ check(activeMode()==='auto'&&hidden('t_tile_icon_color_row')&&hidden('mode_cover'),'Automatic without a field, no cover choice');
+ click($('mode_own'));check(activeMode()==='own'&&!hidden('t_tile_icon_color_row')&&snapshot().startsWith('v2\\nFFFFFF\\nbar'),'Custom shows the field: '+snapshot());
  $('t_tile_icon_color').value='#00bcd4';$('t_tile_icon_color').dispatchEvent(new Event('input',{bubbles:true}));
  check(snapshot().startsWith('v2\\n00BCD4\\nbar steps'),'Fixed color is kept');
- click($('clear'));check(snapshot().startsWith('v2\\n\\nbar')&&$('t_tile_icon_color').value==='#ffffff','Clear shows white');
+ click($('mode_auto'));check(snapshot().startsWith('v2\\n\\nbar')&&$('t_tile_icon_color').value==='#ffffff'&&hidden('t_tile_icon_color_row'),'Automatic forgets the color');
  callTypeHandler(getTileTypeMeta('1'),'reset','t');check(snapshot()==='','Reset clears everything');
  // Text Sensor (maintainer case): Rules on, the state list, contains 6.
  load('1',{sensor_entity:'sensor.waste',icon_colors:''});
@@ -573,30 +609,38 @@ try{
  $('t_tile_icon_rule_0_color').value='#f44336';$('t_tile_icon_rule_0_color').dispatchEvent(new Event('input',{bubbles:true}));
  check(snapshot()==='v2\\n\\nhas F44336 6','Contains row (own rules stay implicit): '+snapshot());
  check(resolveIconColorRecord(snapshot(),'in 6 Tagen rausstellen',null)==='#F44336','Preview colors the waste state');
- // Tint the tile, then switch the rules off: settings stay, no effect.
- $('t_tile_icon_rule_tile').checked=true;$('t_tile_icon_rule_tile').dispatchEvent(new Event('change',{bubbles:true}));
- check(!hidden('t_tile_icon_rule_strength_row')&&snapshot()==='v2\\n\\nsrc rules self tile=20\\nhas F44336 6','Tint tile: '+snapshot());
- $('t_tile_icon_rule_strength').value='35';$('t_tile_icon_rule_strength').dispatchEvent(new Event('input',{bubbles:true}));
- check($('t_tile_icon_rule_strength_value').textContent==='35 %'&&snapshot()==='v2\\n\\nsrc rules self tile=35\\nhas F44336 6','Strength: '+snapshot());
- $('t_tile_icon_rule_icon').checked=false;$('t_tile_icon_rule_icon').dispatchEvent(new Event('change',{bubbles:true}));
- check(snapshot()==='v2\\n\\nsrc rules self tile=35 noicon\\nhas F44336 6','Tile only: '+snapshot());
- // Tile color "From icon": the tile follows the icon, so "Tint tile" stays
- // visible but greyed out and not clickable (its setting is kept) and a note
- // says why; Global makes it active again. Nothing disappears.
- const tintLabel=()=>$('t_tile_icon_rule_tile').closest('label');
- $('t_tile_icon_fill').checked=true;syncIconColorFields('t');
- check(!tintLabel().classList.contains('hidden')&&tintLabel().classList.contains('is-disabled')&&$('t_tile_icon_rule_tile').disabled&&$('t_tile_icon_rule_tile').checked&&
-  !hidden('t_tile_icon_rule_strength_row')&&$('t_tile_icon_rule_strength_row').classList.contains('is-disabled')&&$('t_tile_icon_rule_strength').disabled&&
-  !hidden('t_tile_icon_rule_follows_icon')&&getComputedStyle(tintLabel()).opacity<0.6&&
-  snapshot()==='v2\\n\\nfill 20\\nsrc rules self tile=35 noicon\\nhas F44336 6','From icon greys Tint tile out and keeps it: '+snapshot());
- $('t_tile_icon_fill').checked=false;syncIconColorFields('t');
- check(!tintLabel().classList.contains('is-disabled')&&!$('t_tile_icon_rule_tile').disabled&&!$('t_tile_icon_rule_strength').disabled&&
-  !$('t_tile_icon_rule_strength_row').classList.contains('is-disabled')&&hidden('t_tile_icon_rule_follows_icon'),'Global makes Tint tile active again');
+ // "Fill" (user 2026-10-11): the tile takes the color its icon shows; the
+ // rules color only the icon (no Icon/Tile targets, no strengths).
+ check(!document.querySelector('[data-icon-color="rule-target"],[data-icon-color="rule-strength"]'),'No rule targets or strengths');
+ $('t_tile_icon_fill').checked=true;$('t_tile_icon_fill').dispatchEvent(new Event('change',{bubbles:true}));
+ check(snapshot()==='v2\\n\\nfill 20\\nhas F44336 6','Fill: '+snapshot());
+ $('t_tile_icon_fill').checked=false;$('t_tile_icon_fill').dispatchEvent(new Event('change',{bubbles:true}));
+ check(snapshot()==='v2\\n\\nhas F44336 6','No fill: '+snapshot());
+ // Switching the rules off keeps them without effect.
  click(document.querySelector('[data-icon-color="rules-on"][data-mode="0"]'));
- check(hidden('t_tile_icon_rules_body')&&snapshot()==='v2\\n\\nsrc rules self tile=35 noicon off\\nhas F44336 6','Off keeps the settings: '+snapshot());
+ check(hidden('t_tile_icon_rules_body')&&snapshot()==='v2\\n\\nsrc rules self off\\nhas F44336 6','Off keeps the settings: '+snapshot());
  click(document.querySelector('[data-icon-color="rules-on"][data-mode="1"]'));
- $('t_tile_icon_rule_icon').checked=true;$('t_tile_icon_rule_icon').dispatchEvent(new Event('change',{bubbles:true}));
- $('t_tile_icon_rule_tile').checked=false;$('t_tile_icon_rule_tile').dispatchEvent(new Event('change',{bubbles:true}));
+ check(snapshot()==='v2\\n\\nhas F44336 6','On again: '+snapshot());
+ // A row's own "Fuellen" (user 2026-10-11): without a click the box shows
+ // "Ausfuellen" and the line stays as it is; a click gives the row its mark.
+ const rowFill=$('t_tile_icon_rule_0_fill');
+ check(!rowFill.checked&&!rowFill.dataset.mark,'A row without its own mark follows Fill (off)');
+ $('t_tile_icon_fill').checked=true;$('t_tile_icon_fill').dispatchEvent(new Event('change',{bubbles:true}));
+ check(rowFill.checked&&snapshot()==='v2\\n\\nfill 20\\nhas F44336 6','The box follows Fill, the line stays: '+snapshot());
+ $('t_tile_icon_fill').checked=false;$('t_tile_icon_fill').dispatchEvent(new Event('change',{bubbles:true}));
+ rowFill.checked=true;rowFill.dispatchEvent(new Event('change',{bubbles:true}));
+ check(snapshot()==='v2\\n\\nhas+ F44336 6','A ticked row fills: '+snapshot());
+ check(resolveIconColorRecord(snapshot(),'in 6 Tagen',null,true,(()=>{const o={};globalThis.__rowFill=o;return o;})())==='#F44336'&&globalThis.__rowFill.fill===1,
+   'The preview reads the row fill');
+ rowFill.checked=false;rowFill.dispatchEvent(new Event('change',{bubbles:true}));
+ check(snapshot()==='v2\\n\\nhas- F44336 6','An unticked row stays plain: '+snapshot());
+ $('t_tile_icon_fill').checked=true;$('t_tile_icon_fill').dispatchEvent(new Event('change',{bubbles:true}));
+ check(!rowFill.checked&&snapshot()==='v2\\n\\nfill 20\\nhas- F44336 6','Its own mark beats Fill: '+snapshot());
+ $('t_tile_icon_fill').checked=false;$('t_tile_icon_fill').dispatchEvent(new Event('change',{bubbles:true}));
+ load('1',{sensor_entity:'sensor.waste',icon_colors:'v2\\n\\nhas+ F44336 6'});
+ check(rowFill.checked&&rowFill.dataset.mark==='+'&&snapshot()==='v2\\n\\nhas+ F44336 6','A marked row loads: '+snapshot());
+ load('1',{sensor_entity:'sensor.waste',icon_colors:'v2\\n\\nhas F44336 6'});
+ check(!rowFill.checked&&!rowFill.dataset.mark&&snapshot()==='v2\\n\\nhas F44336 6','A row from before b382 loads unchanged: '+snapshot());
  for(let i=1;i<6;i++)click($('t_tile_icon_rule_add'));
  check(hidden('t_tile_icon_rule_add'),'At most six states');
  click(document.querySelector('#t_tile_icon_rule_0 [data-icon-color="remove"]'));
@@ -616,10 +660,21 @@ try{
  load('20',{icon_colors:'v2\\n\\nis 4CAF50 on\\nis 607D8B off'});
  check($('t_tile_icon_on').value==='#4caf50'&&$('t_tile_icon_off').dataset.unset==='0','Binary colors load');
  click($('clear_on'));check(snapshot()==='v2\\n\\nis 607D8B off'&&$('t_tile_icon_on').value==='#ffc107','Reset returns On to amber');
+ // On/Off "Fuellen": ticking keeps that row with the color it shows.
+ check(!$('t_tile_icon_on_fill').checked&&!$('t_tile_icon_on_fill').dataset.mark,'An unset On follows Fill');
+ $('t_tile_icon_on_fill').checked=true;$('t_tile_icon_on_fill').dispatchEvent(new Event('change',{bubbles:true}));
+ check(snapshot()==='v2\\n\\nis+ FFC107 on\\nis 607D8B off','Ticking On stores it filled: '+snapshot());
+ $('t_tile_icon_off_fill').checked=false;$('t_tile_icon_off_fill').dispatchEvent(new Event('change',{bubbles:true}));
+ check(snapshot()==='v2\\n\\nis+ FFC107 on\\nis- 607D8B off','Off unfilled: '+snapshot());
+ load('20',{icon_colors:'v2\\n\\nis+ 4CAF50 on\\nis- 607D8B off'});
+ check($('t_tile_icon_on_fill').checked&&!$('t_tile_icon_off_fill').checked&&snapshot()==='v2\\n\\nis+ 4CAF50 on\\nis- 607D8B off',
+   'On/Off fills load: '+snapshot());
+ click($('clear_on'));check(!$('t_tile_icon_on_fill').dataset.mark&&snapshot()==='v2\\n\\nis- 607D8B off','Reset forgets the On fill: '+snapshot());
  // Another entity: the Bridge entities once, Entity color or own rules.
- rebuildEntitySelect('t_tile_icon_source', iconColorSourceEntries({sensors:[{v:'sensor.waste',t:'Waste'}],
-   switches:[{v:'light.kitchen',t:'Kitchen'}],binary_sensors:[{v:'sensor.waste'},{v:'Bad Entity'}]}));
- check([...$('t_tile_icon_source').options].map(o=>o.value).join()===',sensor.waste,light.kitchen','Source list merges valid Bridge entities once');
+ // The shared entity picker lists the valid Bridge entities once.
+ check(entityPickerEntries({sensors:[{v:'sensor.waste',t:'Waste'}],switches:[{v:'light.kitchen',t:'Kitchen'}],
+   binary_sensors:[{v:'sensor.waste'},{v:'Bad Entity'}]},'icon_sources').map(e=>e.value).join()==='light.kitchen,sensor.waste',
+   'Source list merges valid Bridge entities once');
  load('4',{icon_colors:'v2\\nFF0000\\nsrc rules sensor.waste\\nhas F44336 6'});
  check(!hidden('t_tile_icon_rules_body')&&hidden('t_tile_icon_source_kinds')&&!hidden('t_tile_icon_source')&&$('t_tile_icon_source').value==='sensor.waste','Folder: another entity only');
  check(!hidden('t_tile_icon_state_section')&&hidden('t_tile_icon_bar_section'),'A text source shows the state list');
@@ -636,11 +691,17 @@ try{
  check(snapshot()==='v2\\nFF0000','No entity keeps the fixed color only');
  load('2',{icon_colors:'v2\\n\\nsrc auto light.kitchen'});
  check($('t_tile_icon_source').value==='light.kitchen'&&$('t_tile_icon_source_mode').value==='auto'&&snapshot()==='v2\\n\\nsrc auto light.kitchen','Scene loads Entity color');
- // A Switch can tint its tile with its own light color.
+ // A Switch colors its icon with its own light color; "Fill" fills the tile.
  load('5',{icon_colors:''});click(document.querySelector('[data-icon-color="rules-on"][data-mode="1"]'));
  click(document.querySelector('[data-icon-color="source-mode"][data-mode="auto"]'));
- $('t_tile_icon_rule_tile').checked=true;$('t_tile_icon_rule_tile').dispatchEvent(new Event('change',{bubbles:true}));
- check(!hidden('t_tile_icon_source_kinds')&&snapshot()==='v2\\n\\nsrc auto self tile=20','Switch tints with its own color: '+snapshot());
+ $('t_tile_icon_fill').checked=true;$('t_tile_icon_fill').dispatchEvent(new Event('change',{bubbles:true}));
+ check(!hidden('t_tile_icon_source_kinds')&&snapshot()==='v2\\n\\nfill 20\\nsrc auto self','Switch fills with its own color: '+snapshot());
+ // Migration: a former "Tint tile" rule (and "From icon" at any strength)
+ // loads as "Fill"; the rule then colors the icon.
+ load('1',{sensor_entity:'sensor.waste',icon_colors:'v2\\n\\nsrc rules self tile=35 noicon\\nhas F44336 6'});
+ check($('t_tile_icon_fill').checked&&snapshot()==='v2\\n\\nfill 20\\nhas F44336 6','A former Tint tile rule loads as Fill: '+snapshot());
+ load('1',{sensor_entity:'sensor.waste',icon_colors:'v2\\n00BCD4\\nfill 35'});
+ check($('t_tile_icon_fill').checked&&snapshot()==='v2\\n00BCD4\\nfill 20','From icon loads as Fill: '+snapshot());
  // Preview: the same colors as tile_icon_source.cpp.
  const meta2={values:{'light.kitchen':JSON.stringify({state:'on',rgb_color:[255,0,0]}),'light.off':'off',
    'sensor.waste':'in 6 Tagen rausstellen','binary_sensor.door':'on','sensor.temp':'21.5'}};
@@ -653,10 +714,8 @@ try{
  check(previewIconColor('1','v2\\n\\nsrc rules sensor.waste\\nhas F44336 6','sensor.temp',meta2,null,'')==='#F44336','A Sensor can follow another entity');
  check(previewIconColor('1','v2\\n\\nsrc rules self off\\nhas F44336 21','sensor.temp',meta2,null,'#FFFFFF')==='#FFFFFF','Switched-off rules leave the icon');
  check(previewIconColor('5','v2\\n00BCD4','light.kitchen',meta2,null,'#FFD54F')==='#00BCD4','A fixed color overrides the Switch state color');
- const tint=iconColorTilePreviewTint('5','v2\\n\\nsrc auto self tile=25','light.kitchen',meta2);
- check(tint&&tint.color==='#FF0000'&&tint.percent===25,'Tile tint from the own light color');
  check(tileTintBackground('#2A2A2A','#FF0000',25)===tileTintBackground('#2a2a2a','#ff0000',25),'Tint is case-insensitive');
- check(!iconColorTilePreviewTint('1','v2\\n\\nsrc rules self tile=25\\nhas F44336 6','sensor.temp',meta2),'No rule match, no tint');
+ check(typeof iconColorTilePreviewTint==='undefined'&&typeof iconColorSourceAutoActive==='undefined','No rule tile tint in the preview');
  setType('0');syncIconColorFields('t');check(hidden('t_tile_icon_color_fields'),'Types without rules hide the block');
  document.body.dataset.result='pass';
 }catch(error){document.body.dataset.result='fail';document.getElementById('result').textContent=error.stack;}

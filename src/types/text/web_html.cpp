@@ -37,6 +37,38 @@ void append_text_fields_html(String& html, const String& tab_id) {
               <div style="font-size:11px;color:#8a8a8a;margin-top:4px;">)html";
   html += tr.text_max_chars;
   html += R"html(</div>
+              <label>)html";
+  html += tr.text_align_horizontal;
+  html += R"html(</label>
+              <select id=")html";
+  html += tab_id;
+  html += R"html(_text_align">
+                <option value="0">)html";
+  html += tr.alignment_center;
+  html += R"html(</option>
+                <option value="1">)html";
+  html += tr.alignment_left;
+  html += R"html(</option>
+                <option value="2">)html";
+  html += tr.alignment_right;
+  html += R"html(</option>
+              </select>
+              <label>)html";
+  html += tr.text_align_vertical;
+  html += R"html(</label>
+              <select id=")html";
+  html += tab_id;
+  html += R"html(_text_valign">
+                <option value="0">)html";
+  html += tr.alignment_middle;
+  html += R"html(</option>
+                <option value="1">)html";
+  html += tr.alignment_top;
+  html += R"html(</option>
+                <option value="2">)html";
+  html += tr.alignment_bottom;
+  html += R"html(</option>
+              </select>
             </div>
 )html";
 }

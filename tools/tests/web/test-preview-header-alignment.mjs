@@ -8,14 +8,20 @@ const helpers = [
   'isEditablePreview', 'normalizeSensorValueFont', 'getSensorValueFontClass',
   'resolveIconName', 'normalizeMdiIconName', 'isExplicitlyDisabledValue',
   'tileColorInputIsDefault', 'tileBgToHex', 'tileBgValueIsSet', 'tileBackgroundCss',
-  'applyIconDiscTint', 'iconDiscTinted', 'cssColorChannels',
-  'tileBgFollowsDefault', 'tileColorHexIsDefaultGrey',
+  'applyIconDiscTint', 'iconDiscTinted', 'cssColorMatch', 'cssColorChannels', 'cssColorAlpha', 'toneToLinear', 'toneToSrgb', 'toneOklch',
+  'toneLinear', 'toneRgb', 'toneBlend', 'toneFill', 'toneReadableIcon', 'toneHex',
+  'panelLight', 'panelThemeLight', 'toneNoColor', 'tileFillOf', 'panelVar', 'panelRole', 'surfaceRoleTable', 'panelRoleHex', 'toneStep',
+  'tileBgFollowsDefault', 'tileColorHexIsDefaultGrey', 'applyFrameLine', 'tileTypeKeepsOwnColor',
   'isDefaultTileGrey', 'tileColorMode', 'syncTileColorMode', 'previewIconColor', 'iconColorRuleState',
-  'tileTypeHasDiscToggle', 'tileTypeHasColoredIcon',
   'rgbToHex', 'applyTileAriaLabel',
   'resolveUnitValue', 'isScreensaverTileTab', 'getTileResizeHandlesHtml',
-  'applyCompactSensorPreview', 'compactValueSize', 'syncCompactValueFontOptions', 'isCompactSensorType', 'renderTileFromData', 'updateTilePreview'
-].map(extractDeliveredFunction).join('\n');
+  'applyCompactSensorPreview', 'compactValueSize', 'syncCompactValueFontOptions', 'isCompactSensorType', 'isEditableValueType', 'editableCompactValueFont',
+  'syncEditableValueFontOptions', 'renderTileFromData', 'updateTilePreview', 'resetTileClasses',
+  'parseWeatherPreviewPayload', 'temperatureUnitOf', 'convertTemperature', 'applyWeatherSensorOverrides', 'applyWeatherPreview', 'parseMediaPreviewPayload', 'mediaPreviewIcon', 'applyMediaPreview', 'mediaPreviewBarsColor', 'applyMediaCoverTint'
+].map(extractDeliveredFunction).join('\n') + '\n' +
+  // The preview's color constants, taken from the real source.
+  [...readRepoFile('src/web/admin/tiles/grid-preview.js')
+    .matchAll(/^\s*(const (?:ICON_FILL_DEFAULT|KEEPS_OWN_COLOR_TYPES) = [^\n]*;)$/gm)].map(m => m[1]).join('\n');
 const html = `<!doctype html><html><head><style>
 ${readRepoFile('src/web/assets/admin.css')}
 body { padding:20px; } #fixtures { display:flex; flex-wrap:wrap; gap:16px; }

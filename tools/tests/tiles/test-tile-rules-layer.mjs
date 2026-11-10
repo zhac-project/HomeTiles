@@ -1,9 +1,11 @@
 // Rules for every tile type (the "src" line of tile_icon_colors.h): the
 // tile's own entity or another one, entity color or own rules, coloring the
-// icon (forced over the type's state color) and/or tinting the tile with a
-// readable background. The device subscribes to another entity, reapplies
-// the rules on each state, after folder switches and in the screensaver; the
-// Web Admin edits them in the "Rules" section and previews the same colors.
+// icon (forced over the type's state color). Only "Fill" fills the tile, with
+// the color the icon shows (user 2026-10-11); a former "Tint tile" rule
+// colors the icon and fills the tile. The device subscribes to another
+// entity, reapplies the rules on each state, after folder switches and in the
+// screensaver; the Web Admin edits them in the "Rules" section and previews
+// the same colors.
 import assert from 'node:assert/strict';
 import {readRepoFile} from '../../lib/admin-source.mjs';
 
@@ -18,7 +20,7 @@ for (const marker of [
   'inline bool own_state_colors_icon(const char* record) {',
   'if (layer.self && !allow_self) layer = Source{};',
   'if (!layer.self || (!allow_bar && !allow_rows)) {',
-  '!(layer.mode == SourceMode::Rules && layer.self && layer.icon &&',
+  '!(own_rules && layer.mode == SourceMode::Rules && layer.self && layer.icon &&',
   'if (!fixed_fallback) return false;',
   'inline constexpr uint8_t kTintMinimum = 10;',
   'inline constexpr uint8_t kTintMaximum = 50;',
@@ -26,7 +28,7 @@ for (const marker of [
 const policy = read('src/types/tile_type_policy.h');
 assert.match(policy, /static constexpr bool tileTypeRulesUseOwnEntity\(int type\) \{\s*return type == TILE_SENSOR \|\| type == TILE_SWITCH \|\| type == TILE_WEATHER \|\|/);
 assert.match(read('src/tiles/config/tile_config.h'),
-  /tileTypeIconColorsByState\(type\),\s*true, tileTypeRulesUseOwnEntity\(type\)\);/);
+  /tileTypeIconColorsByState\(type\),\s*true, tileTypeRulesUseOwnEntity\(type\), type == TILE_MEDIA\);/);
 
 // Tint: mixed with the rule color, darkened until white text reads 4.5:1.
 const tint = read('src/tiles/config/tile_tint.h');
@@ -55,7 +57,7 @@ for (const marker of [
 ]) assert.ok(tabs.includes(marker), `dispatch: ${marker}`);
 assert.ok(read('src/types/value/value_control.cpp').includes('tiles_request_rule_refresh(grid, index);'), 'Editable values reapply rules');
 assert.match(read('src/tiles/runtime/tile_renderer.cpp'),
-  /tile_icon_source::refresh_card\(tile_obj, tile\);\s*tile_icon_disc::apply_tile_options\(tile_obj, tile\.icon_disc_mode, tile\.icon_glow\);/);
+  /tile_icon_source::refresh_card\(tile_obj, tile\);\s*tile_icon_source::settle_filled\(tile_obj\);[\s\S]{0,160}tile_icon_disc::apply_tile_options\(tile_obj, 0, true\);/);
 const saver = read('src/ui/screensaver/image_screensaver.cpp');
 assert.ok(saver.includes('const String rule_entity = tile_icon_source::rule_entity(tile);') &&
   saver.includes('if (rule_payload != st->slot_rule_payloads[i]) {'));
@@ -66,13 +68,18 @@ for (const marker of [
   'if (switch_domain(domain)) return switch_payload_icon_color(payload, rgb, &active);',
   'if (domain == "climate") return climate_payload_icon_color(payload, rgb, &active);',
   'if (domain == "cover") return cover_payload_icon_color(payload, rgb, &active);',
-  'return tile_icon_colors::resolve(record.c_str(), state.c_str(), display, rgb, false);',
+  // The matching row's own icon too (tile_rule_icon.h, user 2026-10-28).
+  'return tile_icon_colors::resolve(record.c_str(), state.c_str(), display, rgb, false, fill, icon);',
   'tile_icon_disc::force_icon_color(icon, lv_color_hex(rgb));',
   'tile_icon_disc::force_icon_color(icon, lv_color_hex(fixed));',
   'tile_icon_disc::release_icon_color(icon);',
-  'tile_tint::choose(colored && active, rgb, layer.tile, fill, disc_icon_rgb(find_disc(card)));',
-  'apply_tint_choice(card, choice);',
-  'const uint32_t tint = tile_tint::background(tileDefaultBgColor(), color, percent);',
+  'const bool rule_icon = colored && tile_icon_colors::rule_colors_icon(layer);',
+  'set_icon_fill_marker(card, tileFills(tile) ? tile_icon_colors::kTintDefault : 0);',
+  // A rule layer's matching row may fill the tile or keep it plain.
+  'tile_icon_disc::set_rule_fill(card, tile_icon_color_rules::rule_fill_of(colored ? row_fill',
+  'show_fill(card, find_disc(card));',
+  'apply_tint_choice(card, with_white(card, without_white(tile_tint::choose(false, 0, 0, fill, disc_icon_rgb(disc))),',
+  'uint32_t tint = tile_tint::background(tileDefaultBgColor(), color, percent);',
 ]) assert.ok(source.includes(marker), `tile_icon_source: ${marker}`);
 const disc = read('src/tiles/runtime/tile_icon_disc.h');
 assert.match(disc, /if \(forced_color\(icon, forced\)\) \{\s*lv_obj_set_style_text_color\(icon, color, kIconRequested\);\s*color = forced;/,
@@ -84,18 +91,16 @@ assert.ok(read('src/tiles/runtime/tile_icon_color_rules.h').includes('lv_color_h
 const html = read('src/web/server/render/tile_icon_colors_html.cpp');
 for (const marker of ['appendHtmlEscaped(html, tr.tile_rules);', '_tile_icon_rules_on" value="0">',
   '"rules-on", "data-mode", "1", tr.icon_disc_on', '"source-kind", "data-mode", "self", tr.tile_rules_own_entity',
-  '"source-kind", "data-mode", "other", tr.tile_rules_other_entity', '_tile_icon_rule_icon" data-icon-color="rule-target" checked> ',
-  '_tile_icon_rule_tile" data-icon-color="rule-target"> ', 'html += String(tile_icon_colors::kTintMinimum);',
-  'data-icon-color="strength-reset"'])
+  '"source-kind", "data-mode", "other", tr.tile_rules_other_entity'])
   assert.ok(html.includes(marker), `HTML: ${marker}`);
+assert.doesNotMatch(html, /rule-target|strength-reset|_tile_icon_rule_tile|_tile_icon_rule_strength/, 'No tile tint in the rules');
 for (const [file, name] of [['src/types/switch/admin.js', 'Switch'], ['src/types/cover/admin.js', 'Cover'],
   ['src/types/media/admin.js', 'Media'], ['src/types/weather/admin.js', 'Weather'], ['src/types/clock/admin.js', 'Clock'],
   ['src/types/text/admin.js', 'Text'], ['src/types/climate/admin-editor.js', 'Climate']]) {
   assert.ok(read(file).includes(`function load${name}Fields(tab, data) {\n    loadIconColorFields(tab, data);`), `${name} loads its rules`);
 }
-assert.ok(read('src/web/admin/tiles/icon-colors.js').includes("} else if (role === 'strength-reset') {") &&
-  read('src/web/admin/tiles/icon-colors.js').includes("if (strength) strength.value = '20';"), 'Strength reset returns to 20 %');
 const i18n = read('src/core/i18n/i18n.cpp');
-for (const text of ['"Regeln"', '"Rules"', '"Règles"', '"Eigene Entität"', '"Other entity"', '"Kachel tönen"', '"Tint tile"', '"Intensité"'])
+for (const text of ['"Regeln"', '"Rules"', '"Règles"', '"Eigene Entität"', '"Other entity"'])
   assert.ok(i18n.includes(text), `translation ${text}`);
-console.log('Rules for every tile: record, tint, routes, dispatch, forced icon, screensaver and editor pass');
+assert.doesNotMatch(i18n, /"Kachel tönen"|"Tint tile"|"Teinter la tuile"|"Zabarw kafelek"/, 'No Tint tile label');
+console.log('Rules for every tile: record, routes, dispatch, forced icon, fill from the icon, screensaver and editor pass');

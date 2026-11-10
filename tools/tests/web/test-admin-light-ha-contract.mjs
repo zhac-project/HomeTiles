@@ -59,6 +59,9 @@ class TestElement {
     if (this._innerHTML.includes('class="tile-switch"')) {
       this.childrenBySelector['.tile-switch'] = new TestElement();
     }
+    if (this._innerHTML.includes('tile-switch-state')) {
+      this.childrenBySelector['.tile-switch-state'] = new TestElement();
+    }
   }
 
   get innerHTML() {
@@ -128,7 +131,9 @@ const sandbox = {
   requestAnimationFrame: noop,
   addEventListener: noop,
   getComputedStyle: element => ({
-    backgroundColor: element?.style?.background || '#353535'
+    backgroundColor: element?.style?.background || '#353535',
+    // No panel theme roles here: the dark theme (grid-preview.js panelVar).
+    getPropertyValue: () => ''
   }),
   fetch: () => Promise.reject(new Error('unexpected fetch')),
   FormData,
@@ -222,7 +227,8 @@ const result = await vm.runInContext(`(async () => {
   const initial = {
     hasIcon: !!initialIcon,
     hasSwitch: !!initialSwitch,
-    isOn: initialSwitch?.classList.contains('is-on') || false
+    isOn: initialSwitch?.classList.contains('is-on') || false,
+    stateText: tile.querySelector('.tile-switch-state')?.textContent || ''
   };
 
   sensorMetaCache.values['light.test'] = JSON.stringify({
@@ -238,6 +244,7 @@ const result = await vm.runInContext(`(async () => {
   const unavailableSwitch = tile.querySelector('.tile-switch');
   return {
     initial,
+    unavailableText: tile.querySelector('.tile-switch-state')?.textContent || '',
     parsed: parseSwitchPayload(sensorMetaCache.values['light.test']),
     unavailableIconColor: unavailableIcon?.style.color || '',
     unavailableIsOn:
@@ -246,7 +253,7 @@ const result = await vm.runInContext(`(async () => {
 })()`, sandbox);
 
 if (!result.initial.hasIcon || !result.initial.hasSwitch ||
-    !result.initial.isOn) {
+    !result.initial.isOn || result.initial.stateText !== 'On') {
   throw new Error(
     'Real Light preview path did not render its active state: ' +
     JSON.stringify(result.initial));
@@ -255,7 +262,7 @@ if (result.parsed.available !== false) {
   throw new Error('Light unavailable state did not override stale metadata');
 }
 if (result.unavailableIconColor !== '#B0B0B0' ||
-    result.unavailableIsOn) {
+    result.unavailableIsOn || result.unavailableText !== 'Unavailable') {
   throw new Error('Unavailable Light preview retained an active visual state');
 }
 

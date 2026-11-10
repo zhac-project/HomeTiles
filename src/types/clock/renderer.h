@@ -8,6 +8,11 @@ struct ClockWidgetConfig {
   // Prefix the date line with the weekday (e.g. "Tuesday, 15.07.2026").
   // Without a date, show the weekday alone on the line.
   bool show_weekday = false;
+  // The short weekday ("Sa") instead of the full name (clock tile option).
+  bool weekday_short = false;
+  // A changed digit rolls up once (clock tile option, user 2026-10-11); not
+  // with text_shadow.
+  bool roll = false;
   // Language code for the weekday name; nullptr falls back to English.
   const char* weekday_language = nullptr;
   bool fill_parent = false;

@@ -15,15 +15,20 @@ const listFiles = (dir, pattern) => fs.readdirSync(path.join(root, dir), {recurs
   .map(entry => path.join(dir, String(entry)).replaceAll('\\', '/'))
   .filter(file => pattern.test(file) && fs.statSync(path.join(root, file)).isFile());
 
-// "/api/…", "/assets/…", "/mqtt", "/restart", "/save", "/bridge…", "/status", "/_…" right after a quote,
-// backtick, "(" or "=": a URL the browser would resolve against the origin.
-const absoluteUrl = /(?:['"`(=]|url\(\s*['"]?)\/(?:api\/|assets\/|mqtt\b|restart\b|save\b|bridge|status\b|_)/;
-// location.href = '/' and friends: a redirect to the origin root.
-const rootRedirect = /(?:location(?:\.href)?|href)\s*=\s*['"]\/['"]/;
+// "/api/…", "/assets/…", "/mqtt", "/restart", "/save", "/bridge…", "/status" right after a quote,
+// backtick, "(" or "=", or "/_…" after a quote: a URL the browser would resolve against the
+// origin. ("(/_" is a regular expression such as .replace(/_icon$/, ''), not a URL.)
+const absoluteUrl = /(?:['"`(=]|url\(\s*['"]?)\/(?:api\/|assets\/|mqtt\b|restart\b|save\b|bridge|status\b)|['"`=]\/_/;
+// location.href = '/', location.assign('/') and friends: a redirect to the origin root.
+const rootRedirect = /(?:location(?:\.href)?|href)\s*=\s*['"]\/['"]|location\.(?:assign|replace)\(\s*['"]\/['"]/;
+// Comment lines may name a route ("(/api/layouts settings)"); they are not requests.
+const isComment = line => /^\s*(?:\/\/|\/\*|\*)/.test(line);
 
 const bundle = JSON.parse(read('src/web/admin/bundle.json'));
 const sources = [
   ...bundle.sources,
+  // The login page's script: a remote session logs in through the proxy too.
+  'src/web/assets/auth.js',
   'src/web/assets/admin.css',
   ...listFiles('src/web/server/render', /\.cpp$/),
   ...listFiles('src/types', /\/web_(?:html|scripts|styles)\.cpp$/),
@@ -33,6 +38,7 @@ assert.ok(bundle.sources.length > 20, 'the admin bundle lists its sources');
 const offenders = [];
 for (const file of sources) {
   read(file).split('\n').forEach((line, index) => {
+    if (isComment(line)) return;
     if (absoluteUrl.test(line) || rootRedirect.test(line)) offenders.push(`${file}:${index + 1}: ${line.trim()}`);
   });
 }
@@ -55,6 +61,10 @@ for (const key of ['Css', 'Js']) {
 }
 assert.match(read('src/web/server/render/web_admin_styles.cpp'), /html \+= adminCssAssetPath\(\) \+ 1;/);
 assert.match(read('src/web/server/render/web_admin_scripts.cpp'), /html \+= adminJsAssetPath\(\) \+ 1;/);
+for (const file of ['web_admin_scripts.cpp', 'web_admin_security_html.cpp']) {
+  const source = read(`src/web/server/render/${file}`);
+  assert.doesNotMatch(source, /html \+= authJsAssetPath\(\);/, `${file} links the login script relatively`);
+}
 
 // The delivered bundle is the one generated from these sources.
 assert.doesNotMatch(read('src/web/assets/admin.js'), /fetch\(['"`]\/api\//, 'admin.js is regenerated');

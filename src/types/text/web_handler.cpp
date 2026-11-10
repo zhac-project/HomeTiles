@@ -1,4 +1,5 @@
 #include "src/types/text/web_handler.h"
+#include "src/types/text/text_options.h"
 
 void apply_text_fields_from_request(WebServer& server, Tile& tile) {
   tile.scene_alias = server.hasArg("text_value") ? server.arg("text_value") : "";
@@ -11,5 +12,7 @@ void apply_text_fields_from_request(WebServer& server, Tile& tile) {
     tile.sensor_display_mode = server.arg("tile_border").toInt() == 0 ? 1 : 0;
   }
   tile.sensor_gauge_min = 0;
-  tile.sensor_gauge_max = 100;
+  // The alignment (text_options.h); without it centered, as before.
+  tile.sensor_gauge_max = server.hasArg("text_options") ? text_tile::normalize(server.arg("text_options").toInt())
+                                                        : text_tile::kBase;
 }

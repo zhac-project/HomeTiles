@@ -269,12 +269,27 @@ vm.runInContext(`
   });
   updateTilePreview('folder1');
 `, sandbox);
+// A Cover with a position: the header with "Open · 40 %" and the position
+// bar (user 2026-10-01, like the Switch dimmer).
 const previewHtml = elements['folder1-tile-3'].innerHTML;
-if (!previewHtml.includes('tile-value tile-cover-value') ||
-    !previewHtml.includes('Offen<br>40%') ||
+if (!previewHtml.includes('tile-value tile-switch-state') ||
+    !previewHtml.includes('Offen · 40<span class="tile-unit">%</span>') ||
+    !previewHtml.includes('<div class="tile-switch" data-bar="dimmer">') ||
     !previewHtml.includes('style="color:#926bc7"') ||
     previewHtml.includes('tile-cover-state')) {
-  throw new Error('Cover preview did not render through the real WebUI path');
+  throw new Error('Cover preview did not render through the real WebUI path: ' + previewHtml);
+}
+// Without a position control: the centered state and position.
+vm.runInContext(`
+  sensorMetaCache.values['cover.test'] = JSON.stringify({
+    state: 'open', available: true, current_position: 40, supported_features: 11
+  });
+  updateTilePreview('folder1');
+`, sandbox);
+const plainHtml = elements['folder1-tile-3'].innerHTML;
+if (!plainHtml.includes('tile-value tile-cover-value') || !plainHtml.includes('Offen<br>40%') ||
+    plainHtml.includes('tile-switch')) {
+  throw new Error('A Cover without a position keeps the centered value: ' + plainHtml);
 }
 
 const localizedCoverStates = vm.runInContext(`[
@@ -315,7 +330,7 @@ if (JSON.stringify(officialCoverIcons) !== JSON.stringify(expectedCoverIcons)) {
 
 const adminCss = readText(
   new URL('../../../src/web/assets/admin.css', import.meta.url));
-if (!/\.tile\.sensor,\s*\.tile\.cover\s*\{/.test(adminCss) ||
+if (!/\.tile\.sensor,\s*\.tile\.cover,\s*\.tile\.device\s*\{/.test(adminCss) ||
     !/\.tile:is\(\.sensor,[^)]*\.cover[^)]*\) > \.tile-title\s*\{/.test(adminCss) ||
     !/\.tile:is\(\.sensor,[^)]*\.cover[^)]*\) > \.tile-icon\s*\{/.test(adminCss)) {
   throw new Error('Cover preview no longer shares the Sensor tile layout');
@@ -353,7 +368,7 @@ for (const marker of [
     throw new Error(`Cover live-icon refresh contract is missing: ${marker}`);
   }
 }
-if (!/set_label_style\(widget\.value_label,\s*lv_color_white\(\),\s*tile_layout::header_title_font\(\)\)/s.test(coverRenderer)) {
+if (!/set_label_style\(widget\.value_label,\s*lv_color_hex\(ui_theme::text\(\)\),\s*tile_layout::header_title_font\(\)\)/s.test(coverRenderer)) {
   throw new Error('Cover value no longer uses the smaller title font');
 }
 
@@ -423,7 +438,12 @@ for (const marker of [
   'void on_preset(lv_event_t* event)',
   'constexpr int kPresetButtonHeight = kVerticalSliderRadius * 2',
   'constexpr int kPresetButtonGap = kSliderColumnGap',
-  'active ? LV_OPA_20 : LV_OPA_TRANSP',
+  // Selected chip, mode button and the arrows take the cover color's circle
+  // step, open or closed (user 2026-10-01).
+  'active ? opa : static_cast<lv_opa_t>(LV_OPA_TRANSP)',
+  'popup_nav_style::fill(popup_surface::card(card_color), lv_color_hex(accent), color, opa);',
+  'popup_nav_style::set_bg(button, raised, raised_opa, LV_PART_MAIN | LV_STATE_PRESSED);',
+  'style_action_buttons(ctx);',
   'lv_obj_set_style_text_font(label, popup_layout::font24(), 0)',
   '"arrow-bottom-left"',
   '"arrow-top-right"',
@@ -434,15 +454,27 @@ for (const marker of [
   'lv_obj_set_style_bg_opa(button, LV_OPA_TRANSP, 0)',
   '"format-list-bulleted"',
   '"swap-vertical"',
-  'constexpr uint32_t kLivePublishIntervalMs = 500',
-  'schedule_live_publish(ctx, channel)',
-  'cancel_live_publish(ctx)',
   'lv_obj_invalidate_area(view.track, &dirty)',
   'lv_color_hex(kHaCoverActive)'
 ]) {
   if (!coverPopupSource.includes(marker)) {
     throw new Error(`Cover popup deferred-update contract is missing: ${marker}`);
   }
+}
+// A preset only sends (user 2026-10-02): the slider shows the reported
+// position on the cover's way instead of jumping to the preset and back.
+const coverPreset = coverPopupSource.slice(coverPopupSource.indexOf('void on_preset(lv_event_t* event) {'),
+  coverPopupSource.indexOf('void on_action(lv_event_t* event) {'));
+if (/set_channel_value|update_position_fill|update_tilt_handle|update_preset_group/.test(coverPreset) ||
+    !/publish_action\(ctx,[\s\S]*?kPresetValues\[i\]\);/.test(coverPreset)) {
+  throw new Error('Cover presets must only send and keep the reported position on the slider');
+}
+// Sliders send once, on release, like Home Assistant's cover sliders: a
+// template Cover answered every live command at once with the target state.
+if (/live_publish|kLivePublish/.test(coverPopupSource) ||
+    !/\n  publish_channel_value\(ctx, channel\);\n\}/.test(
+      coverPopupSource.slice(coverPopupSource.indexOf('void commit_slider(')))) {
+  throw new Error('Cover popup sliders must publish only on release');
 }
 if (coverPopupSource.includes('kAccent') ||
     !coverPopupSource.includes('constexpr uint32_t kHaCoverActive = 0x926BC7')) {

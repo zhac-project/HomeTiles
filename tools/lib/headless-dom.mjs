@@ -74,7 +74,7 @@ export function runDomHarness({
     if (typeof process.getuid === 'function' && process.getuid() === 0) {
       args.unshift('--no-sandbox');
     }
-    const run = spawnSync(browser, args, {encoding: 'utf8', timeout: timeoutMs});
+    const run = spawnSync(browser, args, {encoding: 'utf8', timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024});
     assert.equal(run.error, undefined, run.error?.message);
     assert.equal(run.status, 0, run.stderr || run.stdout);
     assert.match(run.stdout, expect,

@@ -10,25 +10,33 @@
 #include "src/core/config/config_manager.h"
 #include "src/network/bridge/ha_bridge_config.h"
 #include "src/network/network_manager.h"
+#include "src/network/secure/command_channel.h"
 #include "src/network/transport/network_transport.h"
 #include "src/network/transport/usb_ethernet_backend.h"
 #include "src/web/server/render/web_admin_scripts.h"
+#include "src/web/server/render/web_admin_html.h"
+#include "src/web/server/auth/web_admin_auth.h"
 #include "src/web/server/render/web_admin_styles.h"
 #include "src/web/server/assets/web_admin_fonts.h"
 #include "src/web/server/handlers/web_admin_tile_helpers.h"
 #include "src/tiles/config/tile_config.h"
+#include "src/tiles/config/tile_layouts.h"
 #include "src/types/types_registry.h"
 #include "src/core/diagnostics/crash_log.h"
-#include "src/network/bridge/device_entities.h"
 #include "src/core/firmware/firmware_version.h"
 #include "src/core/i18n/i18n.h"
 #include "src/devices/device.h"
+#include "src/types/calendar/calendar_model.h"
 #include "src/types/clock/clock_format.h"
+#include "src/types/clock/web_html.h"
 #include "src/types/binary_sensor/renderer.h"
 #include "src/tiles/icons/mdi_icons.h"
+#include "src/tiles/icons/mdi_icon_store.h"
 #include "src/tiles/runtime/tile_icon_disc.h"
-#include "src/types/energy/energy_data.h"
 #include "src/ui/screensaver/screensaver_config.h"
+#include "src/core/config/swipe_gestures.h"
+#include "src/ui/tabs/settings/settings_model.h"
+#include "src/ui/tabs/tiles/home_bar.h"
 #include "src/video/local_camera/local_camera.h"
 #include "src/video/local_camera/local_camera_stream_contract.h"
 #include <cstring>
@@ -105,6 +113,34 @@ static String buildGlobalDateFormatOptionsHtml(uint8_t selected_format, const i1
   return html;
 }
 
+// The first day of the week, the Calendar tile's choices (types/calendar
+// web.cpp): Automatic names the language's day, then Monday, Sunday and
+// Saturday (tm_wday values; Automatic is calendar_model::kWeekStartAuto).
+static String buildWeekStartOptionsHtml(uint8_t selected, const char* language) {
+  selected = calendar_model::normalize_week_start(selected);
+  const i18n::LocaleProfile& loc = i18n::locale(language);
+  String html;
+  html.reserve(256);
+  auto append = [&](uint8_t value, const char* label) {
+    html += "<option value=\"";
+    html += String(value);
+    html += "\"";
+    if (value == selected) html += " selected";
+    html += ">";
+    appendHtmlEscaped(html, label);
+    html += "</option>";
+  };
+  String automatic = i18n::calendar_label(language, i18n::CalendarLabel::Automatic);
+  automatic += " (";
+  automatic += loc.weekday_names[loc.first_weekday <= 6 ? loc.first_weekday : 1];
+  automatic += ")";
+  append(calendar_model::kWeekStartAuto, automatic.c_str());
+  append(1, loc.weekday_names[1]);
+  append(0, loc.weekday_names[0]);
+  append(6, loc.weekday_names[6]);
+  return html;
+}
+
 }  // namespace
 
 // One image-control slider: translated label, range, current value. The
@@ -114,7 +150,7 @@ static void appendLocalCameraImageSlider(String& html, const char* key,
                                          int max_value, int value,
                                          const char* unit) {
   html += R"html(
-                <label class="local-camera-slider" for="local_camera_)html";
+<label class="local-camera-slider" for="local_camera_)html";
   html += key;
   html += R"html("><span>)html";
   appendHtmlEscaped(html, label);
@@ -146,7 +182,7 @@ static void appendLocalCameraCustomSlider(String& html, const char* key,
                                           const char* label, int min_value,
                                           int max_value, int value) {
   html += R"html(
-                <label class="local-camera-slider" for="local_camera_custom_)html";
+<label class="local-camera-slider" for="local_camera_custom_)html";
   html += key;
   html += R"html("><span>)html";
   appendHtmlEscaped(html, label);
@@ -199,67 +235,69 @@ static const char* cloudStatusText(const i18n::Strings& tr) {
   return tr.cloud_status_off;
 }
 
-// ZHAC Cloud transport: part of the /mqtt settings form. The panel token is
-// write-only; the page shows only whether one is stored, never the value.
+// ZHAC Cloud transport: part of the /mqtt settings form, folded like the MQTT
+// row of Settings > Connection. The panel token is write-only; the page shows
+// only whether one is stored, never the value.
 static void appendCloudSettingsHtml(String& html, const DeviceConfig& cfg,
                                     const i18n::Strings& tr) {
   const bool cloud = cfg.transport == kTransportCloud;
-  const bool connected = networkManager.cloudStatus() ==
-                         HomeTilesNetworkManager::CloudStatus::Connected;
   html += R"html(
-          <div class="settings-section">
-            <div class="section-title-row">
-              <div class="section-title">)html";
+<details class="settings-fold" id="cloud_settings">
+<summary><i class="mdi mdi-cloud-outline settings-state-icon"></i><span class="settings-state-text"><span class="settings-state-title">)html";
   html += tr.admin_settings_cloud;
-  html += R"html(</div>
-              <div class="wifi-inline-status"><span class="wifi-inline-dot)html";
-  if (!connected) html += " off";
-  html += R"html("></span>)html";
+  html += R"html(</span><span class="settings-state-sub">)html";
   html += cloudStatusText(tr);
-  html += R"html(</div>
-            </div>
-            <div class="settings-grid">
-              <div class="settings-full">
-                <label for="transport">)html";
+  html += R"html(</span></span><i class="mdi mdi-chevron-right settings-fold-chev"></i></summary>
+<div class="settings-fold-body">
+<div class="settings-grid">
+<div class="settings-full">
+<label for="transport">)html";
   html += tr.cloud_transport_label;
   html += R"html(:</label>
-                <select id="transport" name="transport">
-                  <option value="mqtt")html";
+<select id="transport" name="transport">
+<option value="mqtt")html";
   if (!cloud) html += " selected";
   html += ">";
   html += tr.cloud_transport_mqtt;
   html += R"html(</option>
-                  <option value="cloud")html";
+<option value=")html";
+  html += kTransportCloudName;
+  html += '"';
   if (cloud) html += " selected";
   html += ">";
   html += tr.cloud_transport_cloud;
   html += R"html(</option>
-                </select>
-              </div>
-              <div class="settings-full">
-                <label for="cloud_url">)html";
+</select>
+</div>
+<div class="settings-full">
+<label for="cloud_url">)html";
   html += tr.cloud_url_label;
   html += R"html(:</label>
-                <input type="text" id="cloud_url" name="cloud_url" maxlength="128"
-                       autocomplete="off" spellcheck="false" placeholder="wss://" value=")html";
+<input type="text" id="cloud_url" name="cloud_url" maxlength="128"
+autocomplete="off" spellcheck="false" placeholder="wss://" value=")html";
   appendHtmlEscaped(html, cfg.cloud_url);
   html += R"html(">
-              </div>
-              <div class="settings-full">
-                <label for="cloud_token">)html";
+</div>
+<div class="settings-full">
+<label for="cloud_token">)html";
   html += tr.cloud_token_label;
   html += R"html(:</label>
-                <input type="password" id="cloud_token" name="cloud_token" maxlength="96"
-                       autocomplete="new-password" spellcheck="false" value="" placeholder=")html";
+<input type="password" id="cloud_token" name="cloud_token" maxlength="96"
+autocomplete="new-password" spellcheck="false" value="" placeholder=")html";
   html += cfg.cloud_token[0] ? tr.cloud_token_stored : tr.cloud_token_missing;
   html += R"html(">
-                <div class="settings-note">)html";
+<div class="settings-note">)html";
   html += tr.cloud_note;
   html += R"html(</div>
-              </div>
-            </div>
-          </div>
-)html";
+</div>
+</div>
+<div class="settings-fold-actions">
+<button class="btn btn-go" type="submit" form="admin_settings_form">)html";
+  html += tr.save;
+  html += R"html(</button>
+</div>
+</div>
+</details>)html";
 }
 
 // Built-in camera opt-in. Rendered only on the exact camera profile; the
@@ -273,24 +311,24 @@ static void appendLocalCameraSettingsHtml(String& html, const i18n::Strings& tr)
   }
   const char* state = local_camera::stateName();
   html += R"html(
-          <div class="settings-section" id="local_camera_section">
-            <div class="section-title">)html";
+<div class="settings-section" id="local_camera_section">
+<div class="section-title">)html";
   appendHtmlEscaped(html, tr.local_camera_section);
   html += R"html(</div>
-            <div class="settings-grid">
-              <div class="settings-full">
-                <label class="settings-checkbox">
-                  <input type="checkbox" id="local_camera_enabled" onchange="saveLocalCameraEnabled(this.checked)")html";
+<div class="settings-grid">
+<div class="settings-full">
+<label class="settings-checkbox">
+<input type="checkbox" id="local_camera_enabled" onchange="saveLocalCameraEnabled(this.checked)")html";
   if (local_camera::enabled()) html += " checked";
   html += R"html(>
-                  <span>)html";
+<span>)html";
   appendHtmlEscaped(html, tr.local_camera_enable);
   html += R"html(</span>
-                </label>
-                <div class="settings-note">)html";
+</label>
+<div class="settings-note">)html";
   appendHtmlEscaped(html, tr.local_camera_note);
   html += R"html(</div>
-                <div id="local_camera_status" class="settings-note" data-state=")html";
+<div id="local_camera_status" class="settings-note" data-state=")html";
   html += state;
   html += R"html(" data-label=")html";
   appendHtmlEscaped(html, tr.local_camera_status_label);
@@ -309,22 +347,22 @@ static void appendLocalCameraSettingsHtml(String& html, const i18n::Strings& tr)
   html += ": ";
   appendHtmlEscaped(html, localCameraStateText(state, tr));
   html += R"html(</div>
-              </div>
-              <div class="local-camera-group" id="local_camera_stream">
-                <div class="network-settings-heading">)html";
+</div>
+<div class="local-camera-group" id="local_camera_stream">
+<div class="network-settings-heading">)html";
   // Two columns: the live stream (mode, Custom sliders) on the left, the
   // experimental indicator on the right, the collapsed Advanced block below
   // over the full width. Narrow screens stack them (.settings-grid).
   appendHtmlEscaped(html, tr.local_camera_stream_section);
   html += R"html(</div>
-                <div>
-                <label for="local_camera_stream_mode">)html";
+<div>
+<label for="local_camera_stream_mode">)html";
   appendHtmlEscaped(html, tr.local_camera_stream_mode);
   html += R"html(:</label>
-                <select id="local_camera_stream_mode" onchange="saveLocalCameraStreamMode(this.value)">)html";
+<select id="local_camera_stream_mode" onchange="saveLocalCameraStreamMode(this.value)">)html";
   const uint8_t selected_mode = local_camera::streamMode();
   html += R"html(
-                  <option value="0")html";
+<option value="0")html";
   if (selected_mode == local_camera_stream::kModeAuto) html += " selected";
   html += ">";
   appendHtmlEscaped(html, tr.local_camera_stream_mode_auto);
@@ -337,7 +375,7 @@ static void appendLocalCameraSettingsHtml(String& html, const i18n::Strings& tr)
       continue;
     }
     html += R"html(
-                  <option value=")html";
+<option value=")html";
     html += String(static_cast<unsigned>(mode.id));
     html += "\"";
     if (mode.id == selected_mode) html += " selected";
@@ -346,16 +384,16 @@ static void appendLocalCameraSettingsHtml(String& html, const i18n::Strings& tr)
     html += "</option>";
   }
   html += R"html(
-                  <option value=")html";
+<option value=")html";
   html += String(static_cast<unsigned>(local_camera_stream::kModeCustom));
   html += "\"";
   if (selected_mode == local_camera_stream::kModeCustom) html += " selected";
   html += ">";
   appendHtmlEscaped(html, tr.local_camera_stream_mode_custom);
   html += R"html(</option>
-                </select>
-                </div>
-                <div class="local-camera-custom" id="local_camera_custom" data-mode=")html";
+</select>
+</div>
+<div class="local-camera-custom" id="local_camera_custom" data-mode=")html";
   // Custom mode: frames per second and JPEG quality, shown only while the
   // Custom mode is selected; the resolution stays the full image.
   html += String(static_cast<unsigned>(local_camera_stream::kModeCustom));
@@ -370,54 +408,55 @@ static void appendLocalCameraSettingsHtml(String& html, const i18n::Strings& tr)
                                 local_camera_stream::kCustomMinQuality,
                                 local_camera_stream::kMaxQuality, custom.quality);
   html += R"html(
-                </div>
-              </div>
-              <div class="local-camera-group local-camera-indicator" id="local_camera_indicator">
-                <div class="network-settings-heading">)html";
+</div>
+</div>
+<div class="local-camera-group local-camera-indicator" id="local_camera_indicator">
+<div class="network-settings-heading">)html";
   // Indicator style (experimental): the line checkbox switches the whole
   // indicator, the pill checkbox only applies while the line is shown.
   appendHtmlEscaped(html, tr.local_camera_indicator_section);
   html += R"html(</div>
-                  <label class="settings-checkbox">
-                    <input type="checkbox" id="local_camera_indicator_line" onchange="saveLocalCameraIndicator()")html";
+<label class="settings-checkbox">
+<input type="checkbox" id="local_camera_indicator_line" onchange="saveLocalCameraIndicator()")html";
   const local_camera::IndicatorStyle indicator = local_camera::indicatorStyle();
   if (indicator != local_camera::IndicatorStyle::None) html += " checked";
   html += R"html(>
-                    <span>)html";
+<span>)html";
   appendHtmlEscaped(html, tr.local_camera_indicator_line);
   html += R"html(</span>
-                  </label>
-                  <label class="settings-checkbox">
-                    <input type="checkbox" id="local_camera_indicator_pill" onchange="saveLocalCameraIndicator()")html";
+</label>
+<label class="settings-checkbox">
+<input type="checkbox" id="local_camera_indicator_pill" onchange="saveLocalCameraIndicator()")html";
   if (indicator != local_camera::IndicatorStyle::Line) html += " checked";
   if (indicator == local_camera::IndicatorStyle::None) html += " disabled";
   html += R"html(>
-                    <span>)html";
+<span>)html";
   appendHtmlEscaped(html, tr.local_camera_indicator_pill);
   html += R"html(</span>
-                  </label>
-                <div class="settings-note">)html";
+</label>
+<div class="settings-note">)html";
   appendHtmlEscaped(html, tr.local_camera_indicator_note);
   html += R"html(</div>
-              </div>
-              <details class="settings-full local-camera-advanced" id="local_camera_advanced">
-                <summary class="network-settings-heading">)html";
+</div>
+<details class="settings-full local-camera-advanced" id="local_camera_advanced">
+<summary class="network-settings-heading">)html";
   // Fine-tuning controls, collapsed by default: rotation and mirror (left),
   // red/blue swap (right), the image controls below. Every control keeps
   // saving immediately through /api/local-camera.
   appendHtmlEscaped(html, tr.local_camera_advanced);
   html += R"html(</summary>
-                <div class="settings-grid">
-              <div class="local-camera-group" id="local_camera_orientation">
-                <div>
-                <label for="local_camera_rotation">)html";
+<div class="settings-grid">
+<div class="local-camera-group" id="local_camera_orientation">
+<div>
+<label for="local_camera_rotation">)html";
+  // One rotation for every layout (an upright one adds its quarter turn).
   appendHtmlEscaped(html, tr.local_camera_rotation);
   html += R"html(:</label>
-                <select id="local_camera_rotation" onchange="saveLocalCameraRotation(this.value)">)html";
+<select id="local_camera_rotation" onchange="saveLocalCameraRotation(this.value)">)html";
   const uint8_t rotation = local_camera::rotation();
   for (uint8_t turns = 0; turns <= local_camera_contract::kRotationMax; ++turns) {
     html += R"html(
-                  <option value=")html";
+<option value=")html";
     html += String(static_cast<unsigned>(turns));
     html += "\"";
     if (turns == rotation) html += " selected";
@@ -427,32 +466,32 @@ static void appendLocalCameraSettingsHtml(String& html, const i18n::Strings& tr)
     html += "\xC2\xB0</option>";
   }
   html += R"html(
-                </select>
-                </div>
-                <label class="settings-checkbox">
-                  <input type="checkbox" id="local_camera_mirror" onchange="saveLocalCameraMirror(this.checked)")html";
+</select>
+</div>
+<label class="settings-checkbox">
+<input type="checkbox" id="local_camera_mirror" onchange="saveLocalCameraMirror(this.checked)")html";
   if (local_camera::mirror()) html += " checked";
   html += R"html(>
-                  <span>)html";
+<span>)html";
   appendHtmlEscaped(html, tr.local_camera_mirror);
   html += R"html(</span>
-                </label>
-              </div>
-              <div class="local-camera-group" id="local_camera_color">
-                <label class="settings-checkbox">
-                  <input type="checkbox" id="local_camera_rb_swap" onchange="saveLocalCameraRbSwap(this.checked)")html";
+</label>
+</div>
+<div class="local-camera-group" id="local_camera_color">
+<label class="settings-checkbox">
+<input type="checkbox" id="local_camera_rb_swap" onchange="saveLocalCameraRbSwap(this.checked)")html";
   if (local_camera::redBlueSwap()) html += " checked";
   html += R"html(>
-                  <span>)html";
+<span>)html";
   appendHtmlEscaped(html, tr.local_camera_rb_swap);
   html += R"html(</span>
-                </label>
-                <div class="settings-note">)html";
+</label>
+<div class="settings-note">)html";
   appendHtmlEscaped(html, tr.local_camera_rb_swap_note);
   html += R"html(</div>
-              </div>
-              <div class="settings-full local-camera-image" id="local_camera_image">
-                <div class="network-settings-heading">)html";
+</div>
+<div class="settings-full local-camera-image" id="local_camera_image">
+<div class="network-settings-heading">)html";
   appendHtmlEscaped(html, tr.local_camera_image_section);
   html += R"html(</div>)html";
   // Live controls: saved through /api/local-camera while dragging (debounced)
@@ -475,17 +514,23 @@ static void appendLocalCameraSettingsHtml(String& html, const i18n::Strings& tr)
                                local_camera_contract::kGainLimitMin,
                                local_camera_contract::kGainLimitMax, image.gain, "%");
   html += R"html(
-                <div class="settings-actions local-camera-image-actions">
-                  <button type="button" class="btn btn-secondary" id="local_camera_image_reset" onclick="resetLocalCameraImage()">)html";
+<div class="settings-actions local-camera-image-actions">
+<button type="button" class="btn btn-secondary" id="local_camera_image_reset" onclick="resetLocalCameraImage()">)html";
   appendHtmlEscaped(html, tr.local_camera_image_reset);
   html += R"html(</button>
-                </div>
-              </div>
-                </div>
-              </details>
-            </div>
-          </div>
+</div>
+</div>
+</div>
+</details>
+</div>
+</div>
 )html";
+}
+
+// A square or upright screen (the shown layout's): its preview keeps its
+// size and the Settings slot stands beside it (admin.css .compact-grid).
+static bool previewSlotsBeside() {
+  return grid_layout::screen_w() <= grid_layout::screen_h();
 }
 
 // Helper function to generate tile tab HTML (unified for all folders)
@@ -494,16 +539,6 @@ static void appendTileTabHTML(
     uint16_t folder_id,
     const FolderEntry& folder,
     const TileGridConfig& grid,
-    const std::vector<String>& sensorOptions,
-    const std::vector<String>& binarySensorOptions,
-    const std::vector<String>& energyOptions,
-    const std::vector<String>& weatherOptions,
-    const std::vector<SceneOption>& sceneOptions,
-    const std::vector<String>& switchOptions,
-    const std::vector<String>& mediaOptions,
-    const std::vector<String>& climateOptions,
-    const std::vector<String>& coverOptions,
-    const std::vector<String>& cameraOptions,
     const std::function<String(const String&, uint8_t)>& formatSensorValue,
     const String& navigateOptionsHtml,
     bool screensaver_mode = false
@@ -513,8 +548,8 @@ static void appendTileTabHTML(
                                    : String("folder") + String(folder_id);
 
   html += R"html(
-      <!-- Tile Folder -->
-      <div id="tab-tiles-)html";
+<!-- Tile Folder -->
+<div id="tab-tiles-)html";
   html += tab_id;
   html += R"html(" class="tab-content tile-tab" data-tab-id=")html";
   html += tab_id;
@@ -528,30 +563,92 @@ static void appendTileTabHTML(
   appendHtmlEscaped(html, folder.icon_name);
   if (screensaver_mode) html += R"html(" data-screensaver-grid="1)html";
   html += R"html(">
-        <div class="tile-editor">
-          <div class="tile-editor-main">
-          <div class="tile-grid-scroll">
-          <!-- Grid Preview -->
-          <div class="tile-grid)html";
+<div class="tile-editor">
+<div class="tile-editor-main">
+)html";
+  html += R"html(<div class="tile-grid-scroll">
+<!-- Grid Preview -->
+<div class="tile-grid)html";
   if (screensaver_mode) {
-    html += " screensaver-tile-grid";
+    html += " screensaver-tile-grid\" data-ss-theme=\"";
+    html += String(screensaverConfig.get().theme);
   } else if (configManager.getConfig().tile_borders) {
     html += " tiles-bordered";
   }
+  // The head shows with a bar layout (the layout window shows it too).
+  if (!screensaver_mode && grid_layout::head_bar()) html += " head-bar-grid";
   html += R"html(" id=")html";
   html += tab_id;
   html += R"html(Grid">
 )html";
+  if (!screensaver_mode) {
+    // The head bar's head over the grid's top margin (home_bar.cpp): the
+    // page's circle and title, the time, and the gear (Home) or the X.
+    // Hidden without a bar layout; the layout window shows it.
+    const bool home = folder_id == 0;  // the root folder (TileConfig)
+    // Home and its pages: the dots in the middle and the gear (home_bar.cpp).
+    const int page = tile_layouts::page_number(folder_id);
+    const bool home_level = home || page > 0;
+    const String icon = home ? normalizeMdiIconName(String(home_bar::home_icon()))
+                             : normalizeMdiIconName(folder.icon_name[0] ? String(folder.icon_name) : String("folder"));
+    char time_text[8];
+    home_bar::format_time(time_text, sizeof(time_text));
+    const uint8_t time_format = clock_tile::resolve_time_format(
+        clock_tile::TIME_FORMAT_AUTO, configManager.getConfig().global_time_format,
+        configManager.getConfig().language);
+    uint16_t pages[tile_layouts::kMaxPages];
+    const size_t page_count = tile_layouts::pages(pages);
+    // With pages the dots' count sizes the title (admin.css .has-dots).
+    html += "<div class=\"head-bar-preview";
+    // Home's own title and icon follow the head bar tab (display-borders.js).
+    if (home) html += " home-head";
+    if (page >= 0) html += " has-dots\" style=\"--head-dots-n:" + String(page_count + 1);
+    html += "\" aria-hidden=\"true\"><span class=\"head-disc\"><i class=\"mdi mdi-";
+    appendHtmlEscaped(html, icon);
+    html += "\"></i></span><span class=\"head-title\">";
+    appendHtmlEscaped(html, home ? String(home_bar::home_title(tr.home)) : !folder.name[0] ? String(tr.home) : String(folder.name));
+    html += "</span>";
+    if (page >= 0) {
+      html += "<span class=\"head-dots\">";
+      for (int i = 0; i <= static_cast<int>(page_count); ++i) html += i == page ? "<i class=\"on\"></i>" : "<i></i>";
+      html += "</span>";
+    }
+    // Without the time (Global tab "Kopfleiste") its place stays empty.
+    html += configManager.getConfig().head_clock ? "<span class=\"head-time\" data-hour12=\""
+                                                 : "<span class=\"head-time is-off\" data-hour12=\"";
+    html += time_format == clock_tile::TIME_FORMAT_12H ? "1" : "0";
+    html += "\">";
+    // Fixed-width digits like the panel's head (tabular_digits, .tnum).
+    for (const char* c = time_text; *c; ++c) {
+      if (*c >= '0' && *c <= '9') {
+        html += "<span class=\"tnum\">";
+        html += *c;
+        html += "</span>";
+      } else {
+        html += *c;
+      }
+    }
+    // The gear on Home and its pages only when chosen (Settings tile option).
+    html += home_level ? (configManager.getConfig().head_gear
+                              ? "</span><span class=\"head-button head-gear\"><i class=\"mdi mdi-"
+                              : "</span><span class=\"head-button head-gear is-off\"><i class=\"mdi mdi-")
+                       : "</span><span class=\"head-button\"><i class=\"mdi mdi-";
+    html += home_level ? "cog" : "window-close";
+    // A Settings PIN: the gear's lock like the Settings tile's.
+    html += home_level && configManager.getConfig().settings_pin_enabled
+                ? "\"><span class=\"tile-icon-lock mdi mdi-lock\" aria-hidden=\"true\"></span></i></span></div>\n"
+                : "\"></i></span></div>\n";
+  }
 
   if (screensaver_mode) {
     html += R"html(            <div class="screensaver-grid-image-frame">
-              <img id="screensaverPreviewImage" class="screensaver-grid-image" alt="" draggable="false" hidden>
-            </div>
-            <div id="screensaverClock" class="screensaver-grid-clock">
-              <div id="screensaverClockTime">--:--</div>
-              <div id="screensaverClockDate">--.--.----</div>
-              <span class="screensaver-clock-resize-handle" title="Resize"></span>
-            </div>
+<img id="screensaverPreviewImage" class="screensaver-grid-image" alt="" draggable="false" hidden>
+</div>
+<div id="screensaverClock" class="screensaver-grid-clock">
+<div id="screensaverClockTime">--:--</div>
+<div id="screensaverClockDate">--.--.----</div>
+<span class="screensaver-clock-resize-handle" title="Resize"></span>
+</div>
 )html";
   }
 
@@ -562,16 +659,20 @@ static void appendTileTabHTML(
     String tileStyle = "";
     const TileTypeDescriptor* type_desc = get_tile_type_descriptor(tile.type);
     const char* type_css = type_desc ? type_desc->css_class : nullptr;
-    float col = (tile.col < GRID_COLS) ? tile.col : 0;
-    float row = (tile.row < GRID_ROWS) ? tile.row : 0;
+    // The page's grid: the active layout's (an upright one has more rows);
+    // the screensaver's stored grid until the page loads its shown one.
+    const float place_cols = screensaver_mode ? GRID_COLS : tilePlaceCols();
+    const float place_rows = screensaver_mode ? GRID_ROWS : tilePlaceRows();
+    float col = (tile.col < place_cols) ? tile.col : 0;
+    float row = (tile.row < place_rows) ? tile.row : 0;
     float span_w = (tile.span_w < 0.5f) ? 1 : tile.span_w;
     float span_h = (tile.span_h < 0.5f) ? 1 : tile.span_h;
-    clamp_media_tile_layout(tile.type, col, row, span_w, span_h);
+    clamp_media_tile_layout(tile.type, col, row, span_w, span_h, place_cols, place_rows);
     if (screensaver_mode && GRID_ROWS > 1 && row < GRID_ROWS - 2) {
       row = GRID_ROWS - 2;
     }
-    if (span_w > GRID_COLS - col) span_w = GRID_COLS - col;
-    if (span_h > GRID_ROWS - row) span_h = GRID_ROWS - row;
+    if (span_w > place_cols - col) span_w = place_cols - col;
+    if (span_h > place_rows - row) span_h = place_rows - row;
 
     if (!tileBorderEnabled(tile)) cssClass += " tile-border-hidden";
     if (type_css && type_css[0]) {
@@ -581,16 +682,19 @@ static void appendTileTabHTML(
       cssClass += " empty";
     }
 
+    // A tile with an icon takes its color from the icon (tileTypeKeepsOwnColor):
+    // it starts on the theme's card like a tile without an own color.
     if (tile.type != TILE_EMPTY &&
-        tileBgColorFollowsDefault(tile.bg_color) && tile_type_follows_default_tile_color(tile.type)) {
+        (tileBgColorFollowsDefault(tile.bg_color) || !tileTypeKeepsOwnColor(tile.type)) &&
+        tile_type_follows_default_tile_color(tile.type)) {
       // Tiles without their own color follow the global default tile color
       // through one CSS variable, so the preview repaints them live.
       if (screensaver_mode) {
-        tileStyle = "background:color-mix(in srgb,var(--tile-default-bg) ";
-        tileStyle += String(tile.background_opacity * 100.0f / 255.0f, 2);
+        tileStyle = "background:color-mix(in srgb,var(--tile-card) ";
+        tileStyle += String(screensaverConfig.get().tile_opacity * 100.0f / 255.0f, 2);
         tileStyle += "%,transparent)";
       } else {
-        tileStyle = "background:var(--tile-default-bg)";
+        tileStyle = "background:var(--tile-card)";
       }
     } else if (tile.type != TILE_EMPTY) {
       uint32_t bg_color = tileBgColorIsSet(tile)
@@ -599,9 +703,10 @@ static void appendTileTabHTML(
       if (bg_color == 0) bg_color = 0x353535;
       char colorHex[10];
       if (screensaver_mode) {
+        // One opacity for every screensaver tile (ScreensaverConfigData).
         snprintf(colorHex, sizeof(colorHex), "#%06X%02X",
                  (unsigned int)bg_color,
-                 static_cast<unsigned int>(tile.background_opacity));
+                 static_cast<unsigned int>(screensaverConfig.get().tile_opacity));
       } else {
         snprintf(colorHex, sizeof(colorHex), "#%06X", (unsigned int)bg_color);
       }
@@ -622,7 +727,18 @@ static void appendTileTabHTML(
         row < (GRID_ROWS > 1 ? GRID_ROWS - 2 : 0)) {
       tileStyle += "display:none;";
     }
+    // A fully transparent screensaver card casts no shadow
+    // (apply_slot_tile_shadows).
+    if (screensaver_mode && tile.type != TILE_EMPTY && screensaverConfig.get().tile_opacity == 0) {
+      cssClass += " screensaver-bg-clear";
+    }
 
+    // No place in the active layout (tile_layouts.h): not shown, no room
+    // taken; the layout window places it.
+    if (!screensaver_mode && tile.layout_hidden) {
+      cssClass += " tile-unplaced";
+      tileStyle += "display:none;";
+    }
     if (tile_geometry::fraction_bits(col, row, span_w, span_h)) {
       cssClass += " fractional-tile";
       tileStyle += ";--tile-col:" + String(col) + ";--tile-row:" + String(row) +
@@ -634,9 +750,23 @@ static void appendTileTabHTML(
       cssClass += " sensor-compact";
       if (span_h == 0.5f) cssClass += " sensor-half";
     }
-    if (tile_geometry::compact_clock(tile.type, span_w, span_h)) cssClass += " clock-compact";
+    if (tile_geometry::compact_clock(tile.type, span_w, span_h)) {
+      cssClass += " clock-compact";
+    } else if (tile.type == TILE_CLOCK &&
+               (tile.title.length() || normalizeMdiIconName(tile.icon_name).length())) {
+      // A title or icon moves the clock down (clock/renderer.cpp).
+      cssClass += " clock-has-header";
+    }
     if (tile_geometry::compact_icon_title(tile.type, span_w, span_h)) {
       cssClass += " sensor-compact sensor-half compact-title-only";
+    }
+    if (tile_geometry::compact_switch(tile.type, span_w, span_h) ||
+        tile_geometry::compact_cover(tile.type, span_w, span_h) ||
+        tile_geometry::compact_device_control(tile.type, span_w, span_h) ||
+        tile_geometry::compact_calendar(tile.type, span_w, span_h) ||
+        tile_geometry::compact_climate(tile.type, span_w, span_h) ||
+        tile_geometry::compact_editable(tile.type, span_w, span_h)) {
+      cssClass += " sensor-compact sensor-half";
     }
     html += "<div class=\"";
     html += cssClass;
@@ -652,13 +782,20 @@ static void appendTileTabHTML(
     html += String(span_h);
     html += "\" data-type=\"";
     html += String(static_cast<unsigned>(tile.type));
-    html += "\" data-icon-disc=\"";
-    html += String(tile.icon_disc_mode);
-    html += "\" data-icon-glow=\"";
-    html += tile.icon_glow ? "1" : "0";
+    // Every circle shows in its icon's color (user 2026-10-11: no circle
+    // options); the stored per-tile disc fields are no longer drawn.
+    html += "\" data-icon-disc=\"0\" data-icon-glow=\"1";
+
+    // A PIN-protected Folder or Settings tile shows a lock in its icon
+    // (navigate renderer, previewTileLocked in the browser).
+    const bool tile_locked =
+        (tile.type == TILE_SETTINGS && configManager.getConfig().settings_pin_enabled) ||
+        (tile.type == TILE_FOLDER && tileConfig.isFolderPinEnabled(getNavigateTargetId(tile)));
     if (tile.type == TILE_FOLDER) {
       html += "\" data-navigate-target=\"";
       html += String(getNavigateTargetId(tile));
+      html += "\" data-folder-pin-enabled=\"";
+      html += tile_locked ? "1" : "0";
     }
     html += "\" draggable=\"true\" id=\"";
     html += tab_id;
@@ -702,20 +839,23 @@ static void appendTileTabHTML(
       }
       // Scene tiles without an icon use their scene entity's icon, as on the device.
       if (tile.type == TILE_SCENE && !iconName.length() &&
-          !isMdiIconDisabled(tile.icon_name) && tile.scene_alias.length()) {
-        const String scene_entity = haBridgeConfig.findSceneEntity(tile.scene_alias);
+          !isMdiIconDisabled(tile.icon_name) && sceneTarget(tile).length()) {
+        const String scene_entity = haBridgeConfig.findSceneEntity(sceneTarget(tile));
         if (scene_entity.length()) {
           iconName = normalizeMdiIconName(haBridgeConfig.findEntityIcon(scene_entity));
         }
       }
 
+      // Without an own icon a protected tile shows the lock as its icon.
+      const bool lock_is_icon = tile_locked && !iconName.length();
+      if (lock_is_icon) iconName = "lock";
       bool hasIcon = iconName.length() > 0;
 
       if (hasIcon) {
         html += "<i class=\"mdi mdi-";
         appendHtmlEscaped(html, iconName);
         html += " tile-icon";
-        if (binary_sensor_preview && tile.icon_glow &&
+        if (binary_sensor_preview &&
             tile_icon_disc::icon_color_tints(binary_sensor_visual_color(binary_sensor_state))) {
           html += " tile-icon-tinted";
         }
@@ -729,7 +869,11 @@ static void appendTileTabHTML(
           html += color_hex;
           html += "\"";
         }
-        html += "></i>";
+        html += ">";
+        if (tile_locked && !lock_is_icon) {
+          html += "<span class=\"tile-icon-lock mdi mdi-lock\" aria-hidden=\"true\"></span>";
+        }
+        html += "</i>";
       }
 
       // Show a title only when one is configured.
@@ -744,12 +888,8 @@ static void appendTileTabHTML(
       }
     }
 
-    if (preview_kind && strcmp(preview_kind, "weather") == 0) {
-      html += "<div class=\"tile-ghost-icon\"><i class=\"mdi mdi-weather-partly-cloudy\"></i></div>";
-    }
-    if (preview_kind && strcmp(preview_kind, "media") == 0) {
-      html += "<div class=\"tile-ghost-icon\"><i class=\"mdi mdi-music\"></i></div>";
-    }
+    // Weather and media tiles get their state from the preview script
+    // (applyWeatherPreview, applyMediaPreview) once the values arrive.
     if (preview_kind && strcmp(preview_kind, "sensor") == 0) {
       html += "<div class=\"tile-value\" id=\"";
       html += tab_id;
@@ -779,7 +919,15 @@ static void appendTileTabHTML(
       html += tile.sensor_value_font == 1 ? "20" : tile.sensor_value_font == 2 ? "24" :
               tile.sensor_value_font == 3 ? "32" : tile.sensor_value_font == 4 ? "40" : "default";
       html += "\">";
-      appendHtmlEscaped(html, editable_display_value(parse_editable_value(haBridgeConfig.findEditableValue(tile.sensor_entity))));
+      // The unit a step smaller after the number, as the panel shows it.
+      const EditableValue editable = parse_editable_value(haBridgeConfig.findEditableValue(tile.sensor_entity));
+      appendHtmlEscaped(html, editable_display_number(editable));
+      const String editable_unit = editable_display_unit(editable);
+      if (editable_unit.length()) {
+        html += "<span class=\"tile-unit\">";
+        appendHtmlEscaped(html, editable_unit);
+        html += "</span>";
+      }
       html += "</div>";
     }
     if (binary_sensor_preview) {
@@ -812,11 +960,25 @@ static void appendTileTabHTML(
       if (flags == 0xFF) flags = 1;
       flags &= 0x03;
       if (flags == 0) flags = 1;
+      // Each line in its stored size with the LVGL line height
+      // (getClockPreviewTextStyle in the browser).
+      auto append_line = [&html](const char* css_class, uint8_t size, const char* placeholder) {
+        char attributes[200];
+        snprintf(attributes, sizeof(attributes),
+                 "<div class=\"%s\" data-clock-font=\"%u\" style=\"font-size:var(--fs%u);"
+                 "line-height:var(--lh%u);top:var(--ldy%u, 0px)\">",
+                 css_class, static_cast<unsigned>(size), static_cast<unsigned>(size),
+                 static_cast<unsigned>(size), static_cast<unsigned>(size));
+        html += attributes;
+        html += placeholder;
+        html += "</div>";
+      };
       if (flags & 1) {
-        html += "<div class=\"tile-clock-time\">--:--</div>";
+        append_line("tile-clock-time", clock_tile::normalize_font_size(tile.key_code, 40), "--:--");
       }
       if (flags & 2) {
-        html += "<div class=\"tile-clock-date\">--.--.----</div>";
+        append_line("tile-clock-date", clock_tile::normalize_date_font_size(tile.key_modifier, 20),
+                    "--.--.----");
       }
     }
 
@@ -824,8 +986,8 @@ static void appendTileTabHTML(
   }
 
   html += R"html(
-          </div>
-          </div>
+</div>
+</div>
 )html";
   if (!screensaver_mode && folder_id == 0) {
     const DeviceConfig& cfg = configManager.getConfig();
@@ -860,10 +1022,35 @@ static void appendTileTabHTML(
     char hidden_color_hex[8];
     snprintf(hidden_color_hex, sizeof(hidden_color_hex), "#%06X",
              static_cast<unsigned>(hidden_color));
-    html += "<div class=\"settings-hidden-parking\"><div id=\"settingsHiddenSlot\" class=\"tile-grid settings-hidden-slot";
+    // The head bar layouts (user 2026-10-13, build/design-mockups/pages/
+    // felder-*.png): Home's five page fields and its Settings field are
+    // cells of its grid beside or under the screen, the tiles' size, one
+    // word over the page fields. page-fields.js moves these into the grid
+    // and places them; the holder keeps the page places (/api/pages).
+    const bool page_fields = grid_layout::head_bar();
+    if (page_fields) {
+      uint16_t pages[tile_layouts::kMaxPages];
+      const size_t count = tile_layouts::page_slots(pages);
+      html += "<div id=\"pageSlots\" class=\"page-fields\" data-pages=\"";
+      for (size_t i = 0; i < count; ++i) {
+        if (i) html += ",";
+        html += String(pages[i]);
+      }
+      html += "\"><div class=\"page-fields-label\">";
+      appendHtmlEscaped(html, tr.pages_title);
+      html += "</div>";
+      for (size_t i = 0; i < tile_layouts::kMaxPages; ++i) {
+        html += "<div class=\"page-field\" data-slot=\"" + String(i) + "\"></div>";
+      }
+    } else {
+      html += "<div class=\"settings-hidden-parking\">";
+    }
+    html += "<div id=\"settingsHiddenSlot\" class=\"tile-grid settings-hidden-slot";
     if (configManager.getConfig().tile_borders) html += " tiles-bordered";
     if (hidden) html += " has-tile";
-    html += "\"><div id=\"settingsHiddenTile\" class=\"tile settings-hidden-tile ";
+    html += "\"";
+    if (page_fields) html += " data-in-grid=\"1\"";
+    html += "><div id=\"settingsHiddenTile\" class=\"tile settings-hidden-tile ";
     html += hidden ? "navigate" : "empty";
     html += "\"";
     html += hidden ? " draggable=\"true\"" : " draggable=\"false\"";
@@ -882,207 +1069,357 @@ static void appendTileTabHTML(
             "\" style=\"background:" +
             String(hidden ? hidden_color_hex : "transparent") + "\"";
     if (hidden) {
+      // A parked Settings tile shows the lock of the Settings PIN too
+      // (previewTileLocked in the browser); without an icon the lock is it.
+      const bool hidden_locked = cfg.settings_pin_enabled;
+      if (hidden_locked && !hidden_icon.length()) hidden_icon = "lock";
       html += "><i class=\"mdi mdi-";
       appendHtmlEscaped(html, hidden_icon);
-      html += " tile-icon\"></i><div class=\"tile-title\">";
+      html += " tile-icon\">";
+      if (hidden_locked && hidden_icon != "lock") {
+        html += "<span class=\"tile-icon-lock mdi mdi-lock\" aria-hidden=\"true\"></span>";
+      }
+      html += "</i><div class=\"tile-title\">";
       appendTileTitleHtml(html, hidden_title);
       html += "</div>";
     } else {
       html += "><i class=\"mdi mdi-tray-arrow-down tile-icon\"></i>";
     }
-    html += "</div></div><div id=\"settingsHiddenHint\" class=\"settings-hidden-hint";
-    if (hidden) html += " is-hidden";
-    html += "\">";
-    appendHtmlEscaped(html, tr.settings_tile_parking);
     html += "</div></div>";
+    // The classic layout: beside the slot its drop hint while it is empty,
+    // and the tile editing hint the other grids show in their footer.
+    if (!page_fields) {
+      html += "<div class=\"settings-parking-texts\"><div id=\"settingsHiddenHint\" class=\"settings-hidden-hint";
+      if (hidden) html += " is-hidden";
+      html += "\">";
+      appendHtmlEscaped(html, tr.settings_tile_parking);
+      html += "</div><p class=\"hint\">";
+      html += tr.admin_tile_hint;
+      html += "</p></div>";
+    }
+    html += "</div>";
+  } else if (!screensaver_mode) {
+    // A folder shows Delete Folder where Home keeps its Settings parking
+    // slot: beside the grid on four-column devices, below it on the others.
+    // No editing hint there (user 2026-10-12: the long text annoyed).
+    html += "<div class=\"settings-hidden-parking folder-side\"><div class=\"settings-parking-texts\">";
+    html += "<button type=\"button\" class=\"btn btn-danger btn-delete-folder\" onclick=\"deleteFolder('";
+    html += tab_id;
+    html += "')\">";
+    html += tr.admin_delete_folder_tab;
+    html += "</button></div></div>";
   }
-  html += R"html(          <div class="folder-footer">
-)html";
-  const String radius_value = String(configManager.getConfig().tile_radius);
-  auto append_radius_input = [&](const String& id) {
-    html += "<input class=\"global-tile-radius\"";
-    if (id.length()) html += " id=\"" + id + "\"";
-    html += " type=\"range\" min=\"";
-    html += String(tile_radius::kMinimum);
-    html += "\" max=\"";
-    html += String(tile_radius::kMaximum);
-    html += "\" step=\"1\" value=\"";
-    html += radius_value;
-    html += "\" oninput=\"previewTileRadiusLive(this.value)\" onchange=\"saveTileRadius(this.value)\"><output class=\"global-tile-radius-value\">";
-    html += radius_value;
-    html += "</output>";
-  };
+  // The global tile settings moved into the settings panel (its "Global"
+  // tab); no page has a footer under the grid (user 2026-10-12: the
+  // screensaver's hint stood under an upright preview).
+  String global_panel;
   if (!screensaver_mode) {
     // Global display settings in the Tile Settings style: two compact
     // columns, checkboxes like Glow, fields with a small label above them
     // like Column/Row, and the Color field with its reset button.
     const DeviceConfig& display = configManager.getConfig();
+    // Tile color, circles and radius are fixed (user 2026-10-11): only the
+    // frame lines, the layout and the design stay global.
     const String borders_id = tab_id + "_global_tile_borders";
-    const String discs_id = tab_id + "_global_icon_discs";
-    const String radius_id = tab_id + "_global_tile_radius";
-    const String color_id = tab_id + "_global_tile_color";
-    const String glow_id = tab_id + "_global_icon_glow";
-    const String glow_value = String(icon_glow::clamp(display.icon_glow));
-    html += "<section class=\"global-settings-panel\"><h3>";
-    appendHtmlEscaped(html, tr.global_settings_heading);
-    html += "</h3><div class=\"global-settings-grid\"><label class=\"inline-checkbox\">"
+    const String theme_id = tab_id + "_global_theme";
+    global_panel += "<section class=\"global-settings-panel\"><h3>";
+    appendHtmlEscaped(global_panel, tr.panel_tab_global);
+    global_panel += "</h3><div class=\"global-settings-grid\"><label class=\"inline-checkbox\">"
             "<input class=\"normal-tile-border-toggle\" id=\"" +
             borders_id + "\" type=\"checkbox\" onchange=\"saveNormalTileBorders(this.checked)\"";
-    if (display.tile_borders) html += " checked";
-    html += "> ";
-    appendHtmlEscaped(html, tr.screensaver_tile_border);
-    html += "</label><label class=\"inline-checkbox\"><input class=\"global-icon-disc-toggle\" id=\"" +
-            discs_id + "\" type=\"checkbox\" onchange=\"saveIconDiscs(this.checked)\"";
-    if (display.icon_discs) html += " checked";
-    html += "> ";
-    appendHtmlEscaped(html, tr.icon_discs);
-    html += "</label><div class=\"global-settings-field\"><label for=\"" + radius_id + "\">";
-    appendHtmlEscaped(html, tr.tile_radius);
-    html += "</label><div class=\"global-radius-field\">";
-    append_radius_input(radius_id);
-    html += "</div></div><div class=\"global-settings-field\"><label for=\"" + glow_id + "\">";
-    appendHtmlEscaped(html, tr.icon_glow_strength);
-    html += "</label><div class=\"global-radius-field\"><input class=\"global-icon-glow\" id=\"" + glow_id +
-            "\" type=\"range\" min=\"" + String(icon_glow::kMinimum) + "\" max=\"" +
-            String(icon_glow::kMaximum) + "\" step=\"" + String(icon_glow::kStep) + "\" value=\"" + glow_value +
-            "\" oninput=\"previewIconGlowLive(this.value)\" onchange=\"saveIconGlow(this.value)\">"
-            "<output class=\"global-icon-glow-value\">" + glow_value + " %</output>"
-            "<button type=\"button\" class=\"tile-color-reset-btn global-icon-glow-reset\" title=\"Reset\" "
-            "onclick=\"saveIconGlow(" + String(icon_glow::kDefault) + ")\"><i class=\"mdi mdi-restore\"></i></button>"
-            "</div></div>";
-    html += "<div class=\"global-settings-field\"><label for=\"" + color_id + "\">";
-    appendHtmlEscaped(html, tr.default_tile_color);
-    char default_color_hex[8];
-    snprintf(default_color_hex, sizeof(default_color_hex), "#%06X",
-             static_cast<unsigned>(tileDefaultBgColor()));
-    char factory_color_hex[8];
-    snprintf(factory_color_hex, sizeof(factory_color_hex), "#%06X",
-             static_cast<unsigned>(tile_color::kDefault));
-    html += "</label><div class=\"tile-color-row\"><input class=\"global-tile-color\" id=\"" + color_id +
-            "\" type=\"color\" value=\"";
-    html += default_color_hex;
-    html += "\" oninput=\"previewDefaultTileColor(this.value)\" "
-            "onchange=\"saveDefaultTileColor(this.value)\">"
-            "<button type=\"button\" class=\"tile-color-reset-btn\" title=\"Reset\" "
-            "onclick=\"saveDefaultTileColor('";
-    html += factory_color_hex;
-    html += "')\"><i class=\"mdi mdi-restore\"></i></button></div></div></div></section>\n";
-    html += R"html(            <p class="hint">)html";
-  } else {
-    html += R"html(            <div class="folder-footer-options">
-              <label class="inline-checkbox"><input id="screensaverTileBorder" type="checkbox"> )html";
-    html += tr.screensaver_tile_border;
-    html += R"html(</label>
-)html";
-    html += "<label class=\"tile-radius-control\"><span>";
-    appendHtmlEscaped(html, tr.tile_radius);
-    html += "</span>";
-    append_radius_input(String());
-    html += "</label>";
-    html += R"html(              <label class="inline-checkbox"><input id="screensaverTileShadow" type="checkbox"> )html";
-    html += tr.screensaver_tile_shadow;
-    html += R"html(</label>
-)html";
-    html += R"html(            </div>
-            <p class="hint">)html";
-  }
-  if (screensaver_mode) {
-    html += tr.screensaver_hint;
-  } else {
-    html += tr.admin_tile_hint;
-  }
-  html += R"html(</p>
-)html";
-  if (!screensaver_mode && folder_id != 0) {
-    html += R"html(            <button type="button" class="btn btn-danger btn-delete-folder" onclick="deleteFolder(')html";
-    html += tab_id;
-    html += R"html(')">)html";
-    html += tr.admin_delete_folder_tab;
-    html += R"html(</button>
-)html";
-  }
-  html += R"html(          </div>
-          </div>
+    if (display.tile_borders) global_panel += " checked";
+    global_panel += "> ";
+    appendHtmlEscaped(global_panel, tr.screensaver_tile_border);
+    global_panel += "</label>";
 
-          <!-- Settings Panel -->
-          <div class="tile-settings" id=")html";
+    // The layout (grid_layout.h): a field like the tile color, its pen opens
+    // the layout window (tiles/layout-window.js).
+    {
+      const grid_layout::Shown& shown = grid_layout::shown();
+      const char* name = grid_layout::active() == grid_layout::Layout::kBar        ? tr.layout_bar
+                         : grid_layout::active() == grid_layout::Layout::kPortrait ? tr.layout_portrait
+                                                                                   : tr.layout_classic;
+      global_panel += "<div class=\"global-settings-field\"><label>";
+      appendHtmlEscaped(global_panel, tr.layout_label);
+      global_panel += "</label><button type=\"button\" class=\"layout-choice\" onclick=\"openLayoutWindow()\" title=\"";
+      appendHtmlEscaped(global_panel, tr.layout_change);
+      global_panel += "\"><span class=\"layout-current\">";
+      appendHtmlEscaped(global_panel, name);
+      global_panel += " · " + String(shown.cols) + " × " + String(shown.rows);
+      global_panel += "</span><i class=\"mdi mdi-pencil-outline\"></i></button></div>";
+    }
+    // The theme (ui_theme.h): the panel switches while running. A segmented
+    // choice like Tile | Global (user 2026-10-11): Dark, Light, Automatic
+    // (theme_schedule.h: light by day).
+    global_panel += "<div class=\"global-settings-field\"><label>";
+    appendHtmlEscaped(global_panel, tr.theme_label);
+    global_panel += "</label><div class=\"icon-color-segmented choice-row global-theme\" id=\"" + theme_id +
+                    "\" role=\"group\">";
+    for (uint8_t theme = 0; theme < 3; ++theme) {
+      global_panel += "<button type=\"button\" data-theme=\"" + String(theme) + "\" onclick=\"saveTheme('" +
+                      String(theme) + "')\"";
+      if (display.theme == theme) global_panel += " class=\"active\"";
+      global_panel += ">";
+      appendHtmlEscaped(global_panel, theme == 2 ? tr.theme_auto : theme ? tr.theme_light : tr.theme_dark);
+      global_panel += "</button>";
+    }
+    global_panel += "</div></div>";
+    // The gesture menu (swipe_gestures.h, user 2026-10-11): one action per
+    // edge, each action once (tiles/gestures.js swaps on a second use).
+    {
+      uint8_t actions[swipe_gestures::kEdgeCount];
+      swipe_gestures::actions(display, actions);
+      const char* edge_labels[swipe_gestures::kEdgeCount] = {tr.edge_left, tr.edge_right, tr.edge_top, tr.edge_bottom};
+      const char* action_labels[swipe_gestures::kActionCount] = {tr.icon_disc_off, tr.tile_type_settings, tr.home,
+                                                                tr.tile_type_back, tr.panel_tab_screensaver};
+      // Top, bottom, left, right: the usual order of a phone's gestures.
+      const uint8_t order[swipe_gestures::kEdgeCount] = {2, 3, 0, 1};
+      // In the same grid, so every label and field lines up (user
+      // 2026-10-11).
+      // Its caption like the tile settings' (Farbe, Erweitert; user
+      // 2026-10-13).
+      global_panel += "<div class=\"gesture-settings\"><div class=\"tile-settings-group\">";
+      appendHtmlEscaped(global_panel, tr.swipe_gestures_heading);
+      global_panel += "</div>";
+      for (const uint8_t edge : order) {
+        const String id = tab_id + "_gesture_" + String(edge);
+        global_panel += "<div class=\"global-settings-field\"><label for=\"" + id + "\">";
+        appendHtmlEscaped(global_panel, edge_labels[edge]);
+        global_panel += "</label><select class=\"gesture-edge\" id=\"" + id + "\" data-edge=\"" + String(edge) +
+                        "\" data-action=\"" + String(actions[edge]) + "\" onchange=\"saveGestureEdge(this)\">";
+        for (uint8_t action = 0; action < swipe_gestures::kActionCount; ++action) {
+          global_panel += "<option value=\"" + String(action) + "\"";
+          if (actions[edge] == action) global_panel += " selected";
+          global_panel += ">";
+          appendHtmlEscaped(global_panel, action_labels[action]);
+          global_panel += "</option>";
+        }
+        global_panel += "</select></div>";
+      }
+      global_panel += "</div>";
+    }
+    global_panel += "</div></section>\n";
+  }
+  // The head bar's own tab (user 2026-10-13, mockup build/design-mockups/
+  // pages/kopf-tab.png): Home's title and icon like a tile's (Auto: "Home"
+  // in the panel's language and the house), then the gear (the Settings
+  // tile's own option, kept in step by its class), the time and the pages'
+  // overview on the dots, one under the other. The classic layout has no
+  // head, so no tab.
+  String head_panel;
+  if (!screensaver_mode && grid_layout::head_bar()) {
+    const DeviceConfig& display = configManager.getConfig();
+    const String head_id = tab_id + "_head";
+    head_panel += "<section class=\"global-settings-panel\"><h3>";
+    appendHtmlEscaped(head_panel, tr.head_bar_heading);
+    // Title and Icon as in a tile's head (tiles/tile-head.js): its Auto puts
+    // data-auto-title in, the icon list's Automatic is data-auto-icon.
+    head_panel += "</h3><div class=\"tile-head-row\"><div><div class=\"tile-title-label\"><label for=\"" + head_id +
+                  "_tile_title\">";
+    appendHtmlEscaped(head_panel, tr.head_bar_home_title);
+    head_panel += "</label><button type=\"button\" class=\"tile-title-auto\" id=\"" + head_id +
+                  "_tile_title_auto\" data-auto-title=\"";
+    appendHtmlEscaped(head_panel, tr.home);
+    head_panel += "\" aria-pressed=\"false\" title=\"";
+    appendHtmlEscaped(head_panel, tr.head_bar_home_auto_hint);
+    head_panel += "\">";
+    appendHtmlEscaped(head_panel, tr.tile_title_auto);
+    head_panel += "</button></div><textarea rows=\"1\" maxlength=\"31\" class=\"tile-title-input home-head-title\" "
+                  "spellcheck=\"false\" id=\"" + head_id + "_tile_title\" placeholder=\"";
+    appendHtmlEscaped(head_panel, tr.home);
+    head_panel += "\">";
+    appendHtmlEscaped(head_panel, home_bar::home_title(tr.home));
+    head_panel += "</textarea></div><div><label for=\"" + head_id + "_tile_icon_picker\">";
+    appendHtmlEscaped(head_panel, tr.tile_group_icon);
+    head_panel += "</label><input type=\"hidden\" class=\"home-head-icon\" id=\"" + head_id +
+                  "_tile_icon\" data-tile-icon data-auto-icon=\"home\" value=\"";
+    appendHtmlEscaped(head_panel, display.head_icon);
+    head_panel += "\"><button type=\"button\" class=\"tile-icon-picker\" id=\"" + head_id +
+                  "_tile_icon_picker\" aria-haspopup=\"listbox\"></button></div></div>";
+    const auto head_toggle = [&](const char* name, const char* onchange, bool on, const char* label) {
+      head_panel += "<label class=\"folder-pin-toggle\"><input type=\"checkbox\" class=\"";
+      head_panel += name;
+      head_panel += "\" id=\"" + tab_id + "_" + name + "\" onchange=\"";
+      head_panel += onchange;
+      head_panel += "\"";
+      if (on) head_panel += " checked";
+      head_panel += "><span>";
+      appendHtmlEscaped(head_panel, label);
+      head_panel += "</span></label>";
+    };
+    head_panel += "<div class=\"head-bar-toggles\">";
+    head_toggle("settings-head-gear", "saveHeadGear(this.checked)", display.head_gear, tr.head_bar_gear);
+    head_toggle("head-bar-clock", "saveHeadSwitch('clock', this.checked)", display.head_clock, tr.head_bar_clock);
+    head_toggle("head-bar-overview", "saveHeadSwitch('overview', this.checked)", display.head_overview,
+                tr.head_bar_overview);
+    head_panel += "</div></section>\n";
+  }
+  html += R"html(</div>
+
+<!-- Settings Panel -->
+<div class="tile-settings" id=")html";
   html += tab_id;
-  html += R"html(Settings">
+  html += R"html(Settings" data-pane="global">
 )html";
+  // Tabs on top of the panel: the selected tile's settings, or the global
+  // tile settings; the screensaver page has Tile | Slideshow | Global (user
+  // 2026-10-11). Selecting a tile shows its settings again
+  // (tiles/settings-pane.js).
+  html += "<div class=\"icon-color-segmented choice-row panel-tabs\" role=\"tablist\">";
+  html += "<button type=\"button\" data-pane=\"tile\" onclick=\"showSettingsPane('" + tab_id + "','tile')\">";
+  appendHtmlEscaped(html, tr.panel_tab_tile);
+  if (head_panel.length()) {
+    html += "</button><button type=\"button\" data-pane=\"head\" onclick=\"showSettingsPane('" + tab_id + "','head')\">";
+    appendHtmlEscaped(html, tr.head_bar_heading);
+  }
+  html += "</button><button type=\"button\" data-pane=\"global\" onclick=\"showSettingsPane('" + tab_id + "','global')\">";
+  appendHtmlEscaped(html, screensaver_mode ? tr.admin_slideshow : tr.panel_tab_global);
   if (screensaver_mode) {
+    html += "</button><button type=\"button\" data-pane=\"options\" onclick=\"showSettingsPane('" + tab_id + "','options')\">";
+    appendHtmlEscaped(html, tr.panel_tab_global);
+  }
+  html += "</button></div><p class=\"hint panel-tile-hint\">";
+  html += tr.admin_tile_hint;
+  html += "</p>";
+  if (head_panel.length()) {
+    html += "<div class=\"panel-head\">";
+    html += head_panel;
+    html += "</div>";
+  }
+  if (!screensaver_mode) {
+    html += "<div class=\"panel-global\">";
+    html += global_panel;
+    html += "</div>";
+  }
+  if (screensaver_mode) {
+    const ScreensaverConfigData& saver = screensaverConfig.get();
+    html += "<div class=\"panel-options\"><section class=\"global-settings-panel\"><h3>";
+    appendHtmlEscaped(html, tr.panel_tab_global);
+    html += "</h3><div class=\"global-settings-grid\"><label class=\"inline-checkbox\">"
+            "<input id=\"screensaverTileBorder\" type=\"checkbox\"> ";
+    appendHtmlEscaped(html, tr.screensaver_tile_border);
+    html += "</label><label class=\"inline-checkbox\"><input id=\"screensaverTileShadow\" type=\"checkbox\"> ";
+    appendHtmlEscaped(html, tr.screensaver_tile_shadow);
+    html += "</label><div class=\"global-settings-field screensaver-opacity-field\"><label for=\"screensaverTileOpacity\">";
+    appendHtmlEscaped(html, tr.screensaver_background_opacity);
+    html += "</label><span class=\"screensaver-opacity-control\"><input id=\"screensaverTileOpacity\" type=\"range\" "
+            "min=\"0\" max=\"255\" step=\"1\" value=\"";
+    html += String(saver.tile_opacity);
+    html += "\"><output id=\"screensaverTileOpacityValue\" class=\"global-tile-opacity-value\">";
+    html += String((saver.tile_opacity * 100 + 127) / 255);
+    html += " %</output></span></div><div class=\"global-settings-field\"><label>";
+    appendHtmlEscaped(html, tr.theme_label);
+    html += "</label><div class=\"icon-color-segmented choice-row screensaver-theme\" id=\"screensaverTheme\" "
+            "role=\"group\">";
+    // Dark, Light, Automatic (the panel's design), like the panel's field.
+    for (uint8_t theme = 0; theme < 3; ++theme) {
+      html += "<button type=\"button\" data-theme=\"" + String(theme) + "\"";
+      if (saver.theme == theme) html += " class=\"active\"";
+      html += ">";
+      appendHtmlEscaped(html, theme == 2 ? tr.theme_auto : theme ? tr.theme_light : tr.theme_dark);
+      html += "</button>";
+    }
+    html += "</div></div></div></section></div>\n";
+    // Every pane's heading is its tab's name (user 2026-10-13).
     html += R"html(            <div id="screensaverBackgroundSettings" class="screensaver-background-settings">
-              <div class="tile-settings-head"><h3 style="margin-top:0;">)html";
-    html += tr.admin_slideshow;
+<div class="tile-settings-head"><h3 style="margin-top:0;">)html";
+    appendHtmlEscaped(html, tr.admin_slideshow);
     html += R"html(</h3></div>
-              <div class="tile-settings-body">
-                <div class="screensaver-fixed-type"><label>)html";
+<div class="tile-settings-body">
+<div class="screensaver-fixed-type"><label for="screensaverPictureSource">)html";
     html += tr.admin_type;
-    html += R"html(</label><input value=")html";
-    html += tr.admin_slideshow;
-    html += R"html(" disabled></div>
-                <label class="inline-checkbox"><input id="screensaverUseWallpapers" type="checkbox"> )html";
+    html += R"html(</label><select id="screensaverPictureSource"><option value="sd">)html";
+    appendHtmlEscaped(html, tr.screensaver_source_sd);
+    html += R"html(</option><option value="ha">)html";
+    appendHtmlEscaped(html, tr.screensaver_source_ha);
+    html += R"html(</option></select></div>
+<label class="inline-checkbox"><input id="screensaverUseWallpapers" type="checkbox"> )html";
     html += tr.screensaver_use_wallpapers;
     html += R"html(</label>
-                <label class="inline-checkbox"><input id="screensaverShuffle" type="checkbox"> )html";
+<div id="screensaverHaPicture" class="hidden">
+<div class="screensaver-fixed-type">)html";
+    // A Home Assistant image or camera; the Bridge sends its picture.
+    appendEntityPickerField(html, "screensaver", "picture_entity", tr.screensaver_picture_entity, "images");
+    html += R"html(</div>
+<div class="screensaver-fixed-type"><label for="screensaverPictureFit">)html";
+    appendHtmlEscaped(html, tr.screensaver_picture_fit);
+    html += R"html(</label><select id="screensaverPictureFit"><option value="fill">)html";
+    appendHtmlEscaped(html, tr.screensaver_fit_fill);
+    html += R"html(</option><option value="fit">)html";
+    appendHtmlEscaped(html, tr.screensaver_fit_contain);
+    html += R"html(</option><option value="original">)html";
+    appendHtmlEscaped(html, tr.screensaver_fit_original);
+    html += R"html(</option></select></div>
+<div id="screensaverPictureEveryRow" class="screensaver-fixed-type hidden"><label for="screensaverPictureEvery">)html";
+    // A camera's interval; image entities send each new picture at once.
+    appendHtmlEscaped(html, tr.screensaver_picture_every);
+    html += R"html(</label><input id="screensaverPictureEvery" type="number" min="3" max="60" step="1" value="10"></div>
+<p class="hint">)html";
+    appendHtmlEscaped(html, tr.screensaver_picture_hint);
+    html += R"html(</p>
+</div>
+<div id="screensaverSdPicture">
+<label class="inline-checkbox"><input id="screensaverShuffle" type="checkbox"> )html";
     html += tr.screensaver_shuffle;
     html += R"html(</label>
-                <div class="screensaver-wallpaper-heading">)html";
+<div class="screensaver-wallpaper-heading">)html";
     html += tr.screensaver_wallpapers_heading;
     html += R"html(</div>
-                <div class="screensaver-storage-hint">)html";
+<div class="screensaver-storage-hint">)html";
     html += tr.screensaver_storage_hint;
     html += R"html(</div>
-                <div id="screensaverWallpaperList" class="screensaver-wallpaper-list"></div>
-                <div id="screensaverWallpaperControls" class="screensaver-wallpaper-controls">
-                  <label>)html";
+<div id="screensaverWallpaperList" class="screensaver-wallpaper-list"></div>
+<div id="screensaverWallpaperControls" class="screensaver-wallpaper-controls">
+<label>)html";
     html += tr.screensaver_duration_seconds;
     html += R"html(</label><input id="screensaverWallpaperDuration" type="number" min="3" max="3600" value="15">
-                  <label>)html";
+<label>)html";
     html += tr.screensaver_zoom;
     html += R"html(</label><input id="screensaverWallpaperZoom" type="range" min="1000" max="3000" step="25" value="1000">
-                  <div class="screensaver-focus-grid">
-                    <label>)html";
+<div class="screensaver-focus-grid">
+<label>)html";
     html += tr.screensaver_focus_x;
     html += R"html(<input id="screensaverFocusX" type="range" min="0" max="1000" value="500"></label>
-                    <label>)html";
+<label>)html";
     html += tr.screensaver_focus_y;
     html += R"html(<input id="screensaverFocusY" type="range" min="0" max="1000" value="500"></label>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div id="screensaverClockSettings" class="screensaver-background-settings screensaver-clock-settings hidden">
-              <div class="tile-settings-head"><h3 style="margin-top:0;">)html";
+</div>
+</div>
+</div>
+</div>
+</div>
+<div id="screensaverClockSettings" class="screensaver-background-settings screensaver-clock-settings hidden">
+<div class="tile-settings-head"><h3 style="margin-top:0;">)html";
     html += tr.screensaver_clock_heading;
     html += R"html(</h3></div>
-              <div class="tile-settings-body">
-                <div class="screensaver-fixed-type"><label>)html";
+<div class="tile-settings-body">
+<div class="screensaver-fixed-type"><label>)html";
     html += tr.admin_type;
     html += R"html(</label><input value=")html";
     html += tr.tile_type_clock;
     html += R"html(" disabled></div>
-                  <div class="clock-toggle-row">
-                    <label class="inline-checkbox"><input id="screensaverShowTime" type="checkbox"> )html";
+<div class="clock-toggle-row">
+<label class="inline-checkbox"><input id="screensaverShowTime" type="checkbox"> )html";
     html += tr.show_time;
     html += R"html(</label>
-                    <label class="inline-checkbox"><input id="screensaverShowDate" type="checkbox"> )html";
+<label class="inline-checkbox"><input id="screensaverShowDate" type="checkbox"> )html";
     html += tr.show_date;
     html += R"html(</label>
-                    <label class="inline-checkbox"><input id="screensaverShowWeekday" type="checkbox"> )html";
+<label class="inline-checkbox"><input id="screensaverShowWeekday" type="checkbox"> )html";
     html += tr.screensaver_show_weekday;
     html += R"html(</label>
-                    <label class="inline-checkbox"><input id="screensaverClockShadow" type="checkbox"> )html";
+<label class="inline-checkbox"><input id="screensaverClockShadow" type="checkbox"> )html";
     html += tr.screensaver_clock_shadow;
     html += R"html(</label>
-                  </div>
-                  <div class="screensaver-two-fields">
-                    <label>)html";
+</div>
+<div class="screensaver-two-fields">
+<label>)html";
     html += tr.time_font_size;
     html += R"html(<select id="screensaverTimeFont"><option>20</option><option>24</option><option>28</option><option>32</option><option>40</option><option selected>48</option><option>56</option><option>64</option><option>72</option><option>80</option><option>96</option></select></label>
-                    <label>)html";
+<label>)html";
     html += tr.date_font_size;
     html += R"html(<select id="screensaverDateFont"><option>20</option><option>24</option><option selected>28</option><option>32</option><option>40</option><option>48</option><option>56</option><option>64</option><option>72</option></select></label>
-                    <label>)html";
+<label>)html";
     html += tr.screensaver_time_alignment;
     html += R"html(<select id="screensaverTimeAlignment"><option value="0">)html";
     html += tr.alignment_left;
@@ -1091,7 +1428,7 @@ static void appendTileTabHTML(
     html += R"html(</option><option value="2">)html";
     html += tr.alignment_right;
     html += R"html(</option></select></label>
-                    <label>)html";
+<label>)html";
     html += tr.screensaver_date_alignment;
     html += R"html(<select id="screensaverDateAlignment"><option value="0">)html";
     html += tr.alignment_left;
@@ -1100,38 +1437,37 @@ static void appendTileTabHTML(
     html += R"html(</option><option value="2">)html";
     html += tr.alignment_right;
     html += R"html(</option></select></label>
-                    <label>)html";
+<label>)html";
     html += tr.time_format_label;
     html += R"html(<select id="screensaverTimeFormat"><option value="0">)html";
     html += tr.format_auto_localization;
     html += R"html(</option><option value="1">24 h</option><option value="2">12 h</option></select></label>
-                    <label>)html";
+<label>)html";
     html += tr.date_format_label;
-    html += R"html(<select id="screensaverDateFormat"><option value="0">)html";
-    html += tr.format_auto_localization;
-    html += R"html(</option><option value="1">DD.MM.YYYY</option><option value="2">MM/DD/YYYY</option><option value="3">YYYY/MM/DD</option></select></label>
-                  </div>
-              </div>
-            </div>
+    html += R"html(<select id="screensaverDateFormat">)html";
+    // The clock tile's formats (21/08/2026, 21.08., 21 August, ...).
+    append_clock_date_format_options(html, configManager.getConfig().language);
+    html += R"html(</select></label>
+</div>
+</div>
+</div>
 )html";
   }
   html += R"html(
-            <!-- Tile Settings (Visible only when tile selected) -->
-            <div class="tile-specific-settings hidden">
-            <div class="tile-settings-head">
-              <h3 style="margin-top:0;">)html";
-  html += tr.admin_tile_settings;
+<!-- Tile Settings (Visible only when tile selected) -->
+<div class="tile-specific-settings hidden">
+<div class="tile-settings-head">
+<div class="tile-head-top"><h3>)html";
+  appendHtmlEscaped(html, tr.panel_tab_tile);
   html += R"html(</h3>
-
-            <label>)html";
-  html += tr.admin_type;
-  html += R"html(</label>
-            <select id=")html";
+<select id=")html";
   html += tab_id;
-  html += R"html(_tile_type" onchange="updateTileType(')html";
+  html += R"html(_tile_type" aria-label=")html";
+  appendHtmlEscaped(html, tr.admin_type);
+  html += R"html(" onchange="updateTileType(')html";
   html += tab_id;
   html += R"html(')">
-            )html";
+)html";
   if (screensaver_mode) {
     html += "<option value=\"0\">";
     html += tr.tile_type_empty;
@@ -1159,86 +1495,96 @@ static void appendTileTabHTML(
     append_tile_type_select_options(html);
   }
   html += R"html(
-            </select>
-            <p class="hint hidden" id=")html";
+</select></div>)html";
+  // The entity of the shown type right under Type (placeTileEntityField in
+  // tiles/entity-picker.js), then title and icon side by side. The head
+  // stays while the body scrolls. The icon picker (tiles/tile-head.js) keeps
+  // the icon name in the hidden input: empty = the entity's icon, "none" =
+  // no icon.
+  html += R"html(
+<div class="tile-entity-slot" id=")html";
   html += tab_id;
-  html += R"html(_tile_type_hint">)html";
-  html += tr.admin_folder_type_locked;
-  html += R"html(</p>
-            </div>
-            <div class="tile-settings-body">
-
-            <label>)html";
-  html += tr.admin_title;
-  html += R"html(</label>
-            <textarea rows="2" class="tile-title-input" id=")html";
+  html += R"html(_tile_entity_slot"></div>
+<div class="tile-head-row"><div><div class="tile-title-label"><label for=")html";
+  html += tab_id;
+  html += R"html(_tile_title">)html";
+  appendHtmlEscaped(html, tr.admin_title);
+  // Auto: the title is the entity's name from Home Assistant (tile-head.js).
+  html += R"html(</label><button type="button" class="tile-title-auto" id=")html";
+  html += tab_id;
+  html += R"html(_tile_title_auto" aria-pressed="false" title=")html";
+  appendHtmlEscaped(html, tr.tile_title_auto_hint);
+  html += R"html(">)html";
+  appendHtmlEscaped(html, tr.tile_title_auto);
+  html += R"html(</button></div><textarea rows="1" class="tile-title-input" spellcheck="false" id=")html";
   html += tab_id;
   html += R"html(_tile_title" placeholder=")html";
-  html += tr.admin_tile_title_placeholder;
-  html += R"html("></textarea>
-
-            <div class="tile-settings-group">)html";
-  appendHtmlEscaped(html, tr.tile_group_icon);
-  html += R"html(</div>
-            <label>)html";
-  html += tr.admin_icon_label;
-  html += R"html(</label>
-            <input type="text" id=")html";
+  appendHtmlEscaped(html, tr.admin_tile_title_placeholder);
+  html += R"html("></textarea></div><div><label for=")html";
   html += tab_id;
-  html += R"html(_tile_icon" placeholder=")html";
-  html += tr.admin_icon_placeholder;
-  html += R"html(">
-            <div style="font-size:11px;color:#8a8a8a;margin-top:4px;">
-              Material Design Icons: <a href="https://pictogrammers.com/library/mdi/" target="_blank" style="color:#4db6ac;">)html";
-  html += tr.admin_icon_list;
-  html += R"html(</a>
-            </div>
+  html += R"html(_tile_icon_picker">)html";
+  appendHtmlEscaped(html, tr.tile_group_icon);
+  html += R"html(</label><input type="hidden" id=")html";
+  html += tab_id;
+  html += R"html(_tile_icon" data-tile-icon><button type="button" class="tile-icon-picker" id=")html";
+  html += tab_id;
+  html += R"html(_tile_icon_picker" aria-haspopup="listbox"></button></div></div>
+)html";
+  // Places for type options that belong elsewhere (data-tile-place,
+  // type-selection.js placeTileTypeParts): under Title and Icon, at the top
+  // of the settings and in Color.
+  html += R"html(<div class="tile-place-slot" id=")html";
+  html += tab_id;
+  html += R"html(_tile_head_slot"></div>
+</div>
+<div class="tile-settings-body">
+<div class="tile-place-slot" id=")html";
+  html += tab_id;
+  html += R"html(_tile_top_slot"></div>
+
+<div class="tile-settings-group">)html";
+  // Two sections (user 2026-10-11): Color (icon color, tile color, Fill),
+  // then Advanced (the type's options); "Icon" and "Tile" apart did not fit.
+  appendHtmlEscaped(html, tr.tile_group_color);
+  html += R"html(</div>
+<div class="tile-place-slot" id=")html";
+  html += tab_id;
+  html += R"html(_tile_color_slot"></div>
 )html";
   append_tile_icon_color_fixed_html(html, tab_id);
   html += R"html(            <div class="tile-icon-disc-fields" id=")html";
   html += tab_id;
   html += R"html(_tile_icon_disc_fields">
-              <label class="inline-checkbox" id=")html";
-  html += tab_id;
-  html += R"html(_tile_icon_disc_row"><input type="checkbox" id=")html";
-  html += tab_id;
-  html += R"html(_tile_icon_disc" checked> )html";
-  appendHtmlEscaped(html, tr.icon_disc_label);
-  html += R"html(</label>
-              <label class="inline-checkbox" id=")html";
-  html += tab_id;
-  html += R"html(_tile_icon_glow_row"><input type="checkbox" id=")html";
-  html += tab_id;
-  html += R"html(_tile_icon_glow" checked> )html";
-  appendHtmlEscaped(html, tr.icon_glow);
-  html += R"html(</label>
-            </div>
-
-            <div class="tile-settings-group">)html";
-  appendHtmlEscaped(html, tr.tile_group_tile);
-  html += R"html(</div>
-            <div class="tile-color-label-row no-reset)html";
-  if (screensaver_mode) html += " has-opacity";
-  html += R"html("><span>)html";
-  html += tr.admin_color;
-  html += R"html(</span>)html";
-  if (screensaver_mode) {
-    html += R"html(<span>)html";
-    html += tr.screensaver_background_opacity;
-    html += R"html(</span>)html";
+)html";
+  // Weather only: filled, colored weather icons or the white outlines.
+  if (!screensaver_mode) {
+    html += R"html(              <label class="inline-checkbox hidden" id=")html";
+    html += tab_id;
+    html += R"html(_weather_colored_icons_row"><input type="checkbox" id=")html";
+    html += tab_id;
+    html += R"html(_weather_colored_icons" checked> )html";
+    appendHtmlEscaped(html, tr.weather_colored_icons);
+    html += R"html(</label>
+)html";
   }
-  html += R"html(</div>
-            <div class="icon-color-segmented tile-color-modes" role="group" id=")html";
+  html += R"html(            </div>
+
+<div class="tile-color-label-row no-reset"><span>)html";
+  html += tr.admin_color;
+  html += R"html(</span></div>
+<div class="icon-color-segmented choice-row tile-color-modes" role="group" id=")html";
   html += tab_id;
   html += R"html(_tile_color_modes">)html";
-  // Tile color is one choice: the global tile color, an own color, or a tint
-  // that follows the icon color (only for tiles with icon colors).
+  // Tiles without an icon (Clock, Text, Pixel animation) choose the theme's
+  // card or an own color; a tile with an icon takes its color from the icon
+  // and only offers "Fill" (user 2026-10-11, tile_icon_colors_html.cpp).
+  // Clock and Text also offer Transparent (tileTransparent, user 2026-10-12).
   const struct {
     const char* mode;
     const char* label;
   } tile_color_modes[] = {{"global", tr.tile_color_mode_global},
-                          {"custom", tr.tile_color_mode_custom},
-                          {"icon", tr.tile_color_mode_from_icon}};
+                          {"transparent", tr.tile_color_mode_transparent},
+                          {"custom", tr.tile_color_mode_custom}};
   for (const auto& entry : tile_color_modes) {
     html += R"html(<button type="button" id=")html";
     html += tab_id;
@@ -1255,112 +1601,81 @@ static void appendTileTabHTML(
     html += "</button>";
   }
   html += R"html(</div>
-            <div class="tile-color-row no-reset)html";
-  if (screensaver_mode) html += " has-opacity";
-  html += R"html(" id=")html";
+<div class="tile-color-row no-reset" id=")html";
   html += tab_id;
   html += R"html(_tile_color_row">
-            <input type="color" id=")html";
+<input type="color" id=")html";
   html += tab_id;
   html += R"html(_tile_color" value="#2A2A2A">
 )html";
-  if (screensaver_mode) {
-    html += R"html(              <input type="range" id="screensaver_tile_opacity" min="0" max="255" step="1" value="0">
-)html";
-  }
+  // Screensaver tiles share one opacity (screensaver footer, tile_opacity).
   html += R"html(            </div>
 )html";
   append_tile_color_from_icon_html(html, tab_id);
+  // Position and size: dragging and resizing in the grid edit them; the
+  // values stay in hidden inputs for drafts, undo, copy and saving.
   html += R"html(
-
-            <div class="tile-layout">
-              <div class="layout-field">
-                <label>)html";
-  html += tr.admin_column;
-  html += R"html(</label>
-                <input type="number" id=")html";
+<input type="hidden" id=")html";
   html += tab_id;
   html += R"html(_tile_col" min="1" max=")html";
   html += String(GRID_COLS);
   html += R"html(" step="0.5" value="1">
-              </div>
-              <div class="layout-field">
-                <label>)html";
-  html += tr.admin_row;
-  html += R"html(</label>
-                <input type="number" id=")html";
+<input type="hidden" id=")html";
   html += tab_id;
   html += R"html(_tile_row" min=")html";
   html += String(screensaver_mode && GRID_ROWS > 1 ? GRID_ROWS - 1 : 1);
   html += R"html(" max=")html";
   html += String(GRID_ROWS);
   html += R"html(" step="0.5" value="1">
-              </div>
-              <div class="layout-field">
-                <label>)html";
-  html += tr.admin_width_cells;
-  html += R"html(</label>
-                <input type="number" id=")html";
+<input type="hidden" id=")html";
   html += tab_id;
   html += R"html(_tile_span_w" min="1" max=")html";
   html += String(GRID_COLS);
   html += R"html(" step="0.5" value="1">
-              </div>
-              <div class="layout-field">
-                <label>)html";
-  html += tr.admin_height_cells;
-  html += R"html(</label>
-                <input type="number" id=")html";
+<input type="hidden" id=")html";
   html += tab_id;
   html += R"html(_tile_span_h" min="1" max=")html";
   html += String(GRID_ROWS);
   html += R"html(" step="0.5" value="1">
-              </div>
-            </div>
 
 )html";
 
+  // The type's options; hidden when the type shows none (type-selection.js
+  // syncTileAdvancedCaption).
+  html += "<div class=\"tile-settings-group\" id=\"" + tab_id + "_tile_group_advanced\">";
+  appendHtmlEscaped(html, tr.tile_group_advanced);
+  html += "</div>";
   html += "<p class=\"settings-note\" hidden id=\"" + tab_id + "_tile_size_note\">";
   appendHtmlEscaped(html, tr.tile_fractional_type_hint);
   html += "</p>";
             TileTypeWebContext type_ctx;
             type_ctx.tab_id = &tab_id;
-            type_ctx.sensor_options = &sensorOptions;
-            type_ctx.binary_sensor_options = &binarySensorOptions;
-            type_ctx.energy_options = &energyOptions;
-            type_ctx.weather_options = &weatherOptions;
-            type_ctx.scene_options = &sceneOptions;
-            type_ctx.switch_options = &switchOptions;
-            type_ctx.media_options = &mediaOptions;
-            type_ctx.climate_options = &climateOptions;
-            type_ctx.cover_options = &coverOptions;
-            type_ctx.camera_options = &cameraOptions;
             type_ctx.navigate_options_html = &navigateOptionsHtml;
             append_tile_type_fields_html(html, type_ctx);
 
   html += R"html(
-            </div><!-- /tile-settings-body -->
-            <div class="tile-actions">
-                <button type="button" class="btn" onclick="copyTile(')html";
+</div><!-- /tile-settings-body -->
+<div class="tile-actions">
+<button type="button" class="btn" onclick="copyTile(')html";
   html += tab_id;
   html += R"html(')">)html";
   html += tr.admin_copy;
   html += R"html(</button>
-                <button type="button" class="btn" onclick="pasteTile(')html";
+<button type="button" class="btn" onclick="pasteTile(')html";
   html += tab_id;
   html += R"html(')">)html";
   html += tr.admin_paste;
   html += R"html(</button>
-                <button type="button" class="btn btn-danger" onclick="resetTile(')html";
+<button type="button" class="btn btn-danger" onclick="resetTile(')html";
   html += tab_id;
   html += R"html(')">)html";
   html += tr.admin_delete;
   html += R"html(</button>
-            </div>
-            </div><!-- /tile-specific-settings -->
-          </div>
-        </div>
-      </div>
+</div>
+</div><!-- /tile-specific-settings -->
+</div>
+</div>
+</div>
 )html";
 }
 
@@ -1380,7 +1695,7 @@ static String buildFolderTabButtonHtml(const FolderEntry& entry) {
 
   String html;
   html += R"html(
-        <button class="tab-btn folder-tab-btn" data-folder-id=")html";
+<button class="tab-btn folder-tab-btn" data-folder-id=")html";
   html += String(entry.id);
   html += R"html(" data-folder-parent=")html";
   html += String(entry.parent_id);
@@ -1392,20 +1707,17 @@ static String buildFolderTabButtonHtml(const FolderEntry& entry) {
   html += tab_id;
   html += R"html(" data-tab-target="tab-tiles-)html";
   html += tab_id;
-  html += R"html(" type="button" onclick="switchTab('tab-tiles-)html";
+  html += R"html(" type="button")html";
+  html += R"html( onclick="switchTab('tab-tiles-)html";
   html += tab_id;
-  html += R"html(')">)html";
-  if (icon.length()) {
-    html += R"html(
-          <i class="mdi mdi-)html";
-    html += icon;
-    html += R"html(" style="font-size:24px;"></i>)html";
-  }
-  html += R"html(
-          <span style="font-size:14px;font-weight:600;">)html";
+  html += R"html(')">
+<span class="tab-disc"><i class="mdi mdi-)html";
+  html += icon.length() ? icon : String(entry.id == 0 ? "home" : "folder");
+  html += R"html("></i></span>
+<span class="tab-label">)html";
   appendHtmlEscaped(html, name);
   html += R"html(</span>
-        </button>
+</button>
 )html";
   return html;
 }
@@ -1413,35 +1725,6 @@ static String buildFolderTabButtonHtml(const FolderEntry& entry) {
 bool buildAdminFolderTabFragments(uint16_t folder_id, String& button_html, String& tab_html, String& tab_id) {
   const FolderEntry* folder = tileConfig.getFolder(folder_id);
   if (!folder) return false;
-
-  const HaBridgeConfigData& ha = haBridgeConfig.get();
-  const auto sensorOptions = parseSensorList(ha.sensors_text);
-  const auto binarySensorOptions = parseSensorList(ha.binary_sensors_text);
-  auto energyOptions = parseSensorList(ha.energy_text);
-  energy_append_cached_entity_ids(energyOptions);
-  const auto weatherOptions = parseSensorList(ha.weathers_text);
-  const auto sceneOptions = parseSceneList(ha.scene_alias_text);
-  const auto lightOptions = parseSensorList(ha.lights_text);
-  const auto switchOptionsRaw = parseSensorList(ha.switches_text);
-  const auto mediaOptions = parseSensorList(ha.media_players_text);
-  const auto climateOptions = parseSensorList(ha.climates_text);
-  const auto coverOptions = parseSensorList(ha.covers_text);
-  const auto cameraOptions = parseSensorList(ha.cameras_text);
-  std::vector<String> switchOptions;
-  switchOptions.reserve(lightOptions.size() + switchOptionsRaw.size());
-  auto addSwitchOption = [&](const String& entry) {
-    if (!entry.length()) return;
-    for (const auto& existing : switchOptions) {
-      if (existing.equalsIgnoreCase(entry)) return;
-    }
-    switchOptions.push_back(entry);
-  };
-  for (const auto& opt : lightOptions) addSwitchOption(opt);
-  for (const auto& opt : switchOptionsRaw) addSwitchOption(opt);
-  addSwitchOption(kEntityDisplayBrightness);
-  addSwitchOption(kEntityScreensaverBrightness);
-  addSwitchOption(kEntityDisplayRotate);
-  addSwitchOption(kEntityDisplaySleep);
 
   auto formatSensorValue = [](const String& raw, uint8_t decimals) -> String {
     String v = raw;
@@ -1480,17 +1763,784 @@ bool buildAdminFolderTabFragments(uint16_t folder_id, String& button_html, Strin
     navigateOptionsHtml += "</option>\n";
   }
 
-  TileGridConfig grid{};
+  // On the heap: a whole folder no longer fits on the task stack.
+  TileGridScratch scratch = makeTileGridScratch();
+  if (!scratch) return false;
+  TileGridConfig& grid = *scratch;
   tileConfig.loadFolderGrid(folder_id, grid);
   tab_id = "folder" + String(folder_id);
   button_html = buildFolderTabButtonHtml(*folder);
   tab_html = "";
-  appendTileTabHTML(tab_html, folder_id, *folder, grid, sensorOptions,
-                    binarySensorOptions, energyOptions, weatherOptions,
-                    sceneOptions, switchOptions, mediaOptions, climateOptions,
-                    coverOptions, cameraOptions,
-                    formatSensorValue, navigateOptionsHtml);
+  appendTileTabHTML(tab_html, folder_id, *folder, grid, formatSensorValue,
+                    navigateOptionsHtml);
   return true;
+}
+
+// One entry of the Settings list: a colored icon disc, the title and an
+// optional line under it, like the category tiles of the panel's Settings.
+static void appendSettingsNavItem(String& html, const char* page, const char* color,
+                                  const char* icon, const String& title, const String& sub) {
+  html += R"html(
+<button class="settings-nav-item" type="button" data-settings-page=")html";
+  html += page;
+  html += R"html(" style="--settings-color:)html";
+  html += color;
+  html += R"html("><span class="settings-nav-disc"><i class="mdi mdi-)html";
+  html += icon;
+  html += R"html("></i></span><span class="settings-nav-text"><span class="settings-nav-title">)html";
+  appendHtmlEscaped(html, title);
+  html += "</span>";
+  if (sub.length()) {
+    html += R"html(<span class="settings-nav-sub">)html";
+    appendHtmlEscaped(html, sub);
+    html += "</span>";
+  }
+  html += "</span></button>";
+}
+
+// A status row: icon, title, an optional line under it, and a value on the
+// right ("Connected", "Paired"), as on the panel's System page.
+static void appendSettingsStateRow(String& html, const char* icon, const String& title,
+                                   const String& sub, const String& value, const char* value_icon) {
+  html += R"html(
+<div class="settings-state-row"><i class="mdi mdi-)html";
+  html += icon;
+  html += R"html( settings-state-icon"></i><div class="settings-state-text"><div class="settings-state-title">)html";
+  appendHtmlEscaped(html, title);
+  html += "</div>";
+  if (sub.length()) {
+    html += R"html(<div class="settings-state-sub">)html";
+    appendHtmlEscaped(html, sub);
+    html += "</div>";
+  }
+  html += "</div>";
+  if (value.length()) {
+    html += value_icon ? R"html(<div class="settings-state-value is-good">)html"
+                       : R"html(<div class="settings-state-value">)html";
+    appendHtmlEscaped(html, value);
+    if (value_icon) {
+      html += R"html(<i class="mdi mdi-)html";
+      html += value_icon;
+      html += R"html("></i>)html";
+    }
+    html += "</div>";
+  }
+  html += "</div>";
+}
+
+// The Settings tab, ordered like the panel's Settings (WLAN, Lokalisierung,
+// System), then the pages only the Web Admin has: I/O, the built-in camera,
+// files and diagnostics. The list on the left picks one page; the footer
+// under both carries that page's buttons (settings/pages.js). WLAN,
+// Lokalisierung and the MQTT fields share the /mqtt form, so every Save
+// stores them together as before.
+static void appendSettingsTabHtml(String& html, const DeviceConfig& cfg,
+                                  const i18n::Strings& tr, bool supports_ethernet,
+                                  bool use_static) {
+  const bool connected = networkTransport.isConnected();
+  const bool on_wifi = networkTransport.activeKind() == NetworkTransportKind::Wifi;
+  const bool camera = local_camera::supported() && Device::kCapabilities.has_builtin_camera;
+  const bool link = networkManager.linkConfigured();
+  const bool paired = command_channel::state() == command_channel::PairingState::Active;
+  const String network_title = supports_ethernet ? tr.settings_network : tr.wifi_label;
+  String network_name;
+  if (connected) network_name = on_wifi ? WiFi.SSID() : String(networkTransport.activeName());
+
+  html += R"html(
+<div id="tab-network" class="tab-content">
+<div class="settings-layout">
+<nav class="settings-nav" aria-label=")html";
+  appendHtmlEscaped(html, tr.tile_type_settings);
+  html += R"html(">)html";
+  appendSettingsNavItem(html, "network", "#42A5F5",
+                        !connected ? "wifi-off" : on_wifi ? "wifi" : "ethernet", network_title,
+                        connected ? network_name : String(tr.settings_not_connected));
+  appendSettingsNavItem(html, "locale", "#AB47BC", "translate", tr.admin_settings_language,
+                        String(i18n::locale(cfg.language).native_name) + " \xC2\xB7 " + cfg.timezone);
+  appendSettingsNavItem(html, "system", "#26A69A", "chip", "System", FW_VERSION);
+  html += R"html(
+<div class="settings-nav-sep" aria-hidden="true"></div>)html";
+  appendSettingsNavItem(html, "io", "#FF8A65", "electric-switch", tr.admin_io,
+                        String(tr.tile_type_switch) + " \xC2\xB7 " + tr.admin_io_temperature);
+  if (camera) {
+    appendSettingsNavItem(html, "camera", "#FFB300", "camera", tr.local_camera_section,
+                          localCameraStateText(local_camera::stateName(), tr));
+  }
+  appendSettingsNavItem(html, "files", "#78909C", "folder-open", tr.file_manager_title,
+                        String(tr.admin_export) + " \xC2\xB7 " + tr.admin_import + " \xC2\xB7 microSD");
+  appendSettingsNavItem(html, "diagnostics", "#9E9E9E", "stethoscope", tr.admin_settings_screenshot, "");
+  html += R"html(
+</nav>
+<div class="settings-pages">
+<form id="admin_settings_form" class="settings-form" action="mqtt" method="POST" autocomplete="on">
+<section class="settings-page" data-settings-page="network">
+<div class="settings-section">
+<div class="section-title-row">
+<div class="section-title">)html";
+  appendHtmlEscaped(html, network_title);
+  html += R"html(</div>
+<div class="wifi-inline-status"><span class="wifi-inline-dot)html";
+  if (!connected) html += " off";
+  html += R"html("></span>)html";
+  html += connected ? tr.wifi_connected : tr.wifi_disconnected;
+  if (connected) {
+    html += " \xC2\xB7 ";
+    appendHtmlEscaped(html, network_name);
+    html += " \xC2\xB7 ";
+    html += networkTransport.localIP().toString();
+  }
+  html += R"html(</div>
+</div>
+<div class="settings-grid">)html";
+  if (supports_ethernet) {
+    html += R"html(
+<div class="settings-full">
+<label for="network_mode">)html";
+    html += tr.admin_connection_type;
+    html += R"html(:</label>
+<select id="network_mode" name="network_mode" onchange="toggleNetworkSettings()">
+<option value="wifi")html";
+    if (!cfg.ethernet_enabled) html += " selected";
+    html += R"html(>WiFi</option>
+<option value="ethernet")html";
+    if (cfg.ethernet_enabled) html += " selected";
+    html += R"html(>Ethernet</option>
+</select>
+<div class="settings-note">)html";
+    html += tr.admin_connection_type_note;
+    html += R"html(</div>
+</div>)html";
+  }
+  html += R"html(
+<div id="wifi_network_settings" class="network-settings-group settings-full )html";
+  if (supports_ethernet && cfg.ethernet_enabled) html += "is-hidden";
+  html += R"html(">)html";
+  if (supports_ethernet) {
+    html += R"html(
+<div class="network-settings-heading">WiFi</div>)html";
+  }
+  html += R"html(
+<div class="settings-subgrid">
+<div>
+<label for="wifi_ssid">)html";
+  html += tr.ssid_label;
+  html += R"html(:</label>
+<input type="text" id="wifi_ssid" name="wifi_ssid" value=")html";
+  appendHtmlEscaped(html, cfg.wifi_ssid);
+  html += R"html(">
+</div>
+<div>
+<label for="wifi_pass">)html";
+  html += tr.wifi_password_label;
+  html += R"html(:</label>
+<div class="password-field">
+<input type="password" id="wifi_pass" name="wifi_pass"
+autocomplete="new-password" value=")html";
+  appendStoredSecretValue(html, cfg.wifi_pass, tr);
+  html += R"html(">
+<button type="button" class="password-toggle" data-label-show=")html";
+  html += tr.password_show;
+  html += R"html(" data-label-hide=")html";
+  html += tr.password_hide;
+  html += R"html(" onclick="togglePasswordVisibility('wifi_pass', this)">)html";
+  html += tr.password_show;
+  html += R"html(</button>
+</div>
+</div>
+</div>
+</div>
+
+<div id="network_ip_settings" class="network-settings-group settings-full">
+<div class="network-settings-heading">)html";
+  html += tr.admin_ip_configuration;
+  html += R"html(</div>
+<label class="settings-checkbox">
+<input type="checkbox" id="network_use_static" name="network_use_static" onchange="toggleStaticNetworkFields()")html";
+  if (use_static) html += " checked";
+  html += R"html(>
+<span>)html";
+  html += tr.admin_ip_use_static;
+  html += R"html(</span>
+</label>
+<div id="network_ip_mode_note" class="settings-note"
+data-dhcp-note=")html";
+  html += tr.admin_ip_dhcp_note;
+  html += R"html(" data-static-note=")html";
+  html += tr.admin_ip_static_note;
+  html += R"html(">)html";
+  html += use_static ? tr.admin_ip_static_note : tr.admin_ip_dhcp_note;
+  html += R"html(</div>
+<div id="network_static_fields" class="settings-subgrid )html";
+  if (!use_static) html += "is-hidden";
+  html += R"html(">
+<div>
+<label for="network_static_ip">)html";
+  html += tr.wifi_static_ip_label;
+  html += R"html(:</label>
+<input type="text" id="network_static_ip" name="network_static_ip" inputmode="decimal" autocomplete="on" value=")html";
+  appendHtmlEscaped(html, cfg.wifi_static_ip);
+  html += R"html(">
+</div>
+<div>
+<label for="network_gateway">)html";
+  html += tr.wifi_gateway_label;
+  html += R"html(:</label>
+<input type="text" id="network_gateway" name="network_gateway" inputmode="decimal" autocomplete="on" value=")html";
+  appendHtmlEscaped(html, cfg.wifi_gateway);
+  html += R"html(">
+</div>
+<div>
+<label for="network_subnet">)html";
+  html += tr.wifi_subnet_label;
+  html += R"html(:</label>
+<input type="text" id="network_subnet" name="network_subnet" inputmode="decimal" autocomplete="on" value=")html";
+  appendHtmlEscaped(html, cfg.wifi_subnet);
+  html += R"html(">
+</div>
+<div>
+<label for="network_dns">)html";
+  html += tr.wifi_dns_label;
+  html += R"html(:</label>
+<input type="text" id="network_dns" name="network_dns" inputmode="decimal" autocomplete="on" value=")html";
+  appendHtmlEscaped(html, cfg.wifi_dns);
+  html += R"html(">
+</div>
+</div>
+</div>
+</div>
+</div>
+</section>
+
+<section class="settings-page" data-settings-page="locale">
+<div class="settings-section">
+<div class="section-title">)html";
+  html += tr.admin_settings_language;
+  html += R"html(</div>
+<div class="settings-grid">
+<div>
+<label for="language">)html";
+  html += tr.language_label;
+  html += R"html(</label>
+<select id="language" name="language">)html";
+  html += i18n::build_language_options_html(cfg.language);
+  html += R"html(</select>
+</div>
+<div>
+<label for="timezone">)html";
+  html += tr.timezone_label;
+  html += R"html(</label>
+<select id="timezone" name="timezone">)html";
+  html += buildTimezoneOptionsHtml(cfg.timezone, i18n::locale(cfg.language));
+  html += R"html(</select>
+</div>
+<div>
+<label for="locale_time_format">)html";
+  html += tr.time_format_label;
+  html += R"html(</label>
+<select id="locale_time_format" name="locale_time_format">)html";
+  html += buildGlobalTimeFormatOptionsHtml(cfg.global_time_format, tr);
+  html += R"html(</select>
+</div>
+<div>
+<label for="locale_date_format">)html";
+  html += tr.date_format_label;
+  html += R"html(</label>
+<select id="locale_date_format" name="locale_date_format">)html";
+  html += buildGlobalDateFormatOptionsHtml(cfg.global_date_format, tr);
+  html += R"html(</select>
+</div>
+<div>
+<label for="locale_week_start">)html";
+  appendHtmlEscaped(html, tr.week_start_label);
+  html += R"html(</label>
+<select id="locale_week_start" name="locale_week_start">)html";
+  html += buildWeekStartOptionsHtml(cfg.week_start, cfg.language);
+  html += R"html(</select>
+</div>
+</div>
+</div>
+</section>
+
+<section class="settings-page" data-settings-page="system">
+<div class="settings-section">
+<div class="settings-state-row settings-version-row">
+<svg width="40" height="40" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+<rect x="4" y="4" width="17" height="17" rx="4" fill="#ffffff"/>
+<rect x="27" y="4" width="17" height="17" rx="4" fill="#ffffff"/>
+<rect x="4" y="27" width="17" height="17" rx="4" fill="#ffffff"/>
+<path d="M33 26h5v6.5h6.5v5H38V44h-5v-6.5h-6.5v-5H33z" fill="#26a69a"/>
+</svg>
+<div class="settings-state-text">
+<div class="settings-state-title settings-version">HomeTiles <span>)html";
+  html += FW_VERSION;
+  html += R"html(</span></div>
+<div class="settings-state-sub">)html";
+  appendHtmlEscaped(html, Device::displayName());
+  html += R"html(</div>
+</div>
+<button class="btn btn-go settings-row-btn" type="button" id="ota_github_btn" onclick="checkOrInstallGithubFirmware()"><i class="mdi mdi-magnify"></i> )html";
+  html += tr.system_check_updates_btn;
+  html += R"html(</button>
+</div>
+<div id="ota_github_status" class="settings-note ota-status"></div>
+<div id="ota_github_progress" class="ota-progress is-hidden" aria-hidden="true">
+<div id="ota_github_progress_bar" class="ota-progress-bar"></div>
+</div>
+<div class="settings-fw-file">
+<span class="settings-note">)html";
+  html += tr.ota_firmware_file;
+  html += R"html(:</span>
+<input type="file" id="ota_file" accept=".bin,application/octet-stream" style="display:none" onchange="updateOtaFileName(this)">
+<button class="btn btn-secondary btn-inline" type="button" id="ota_choose_btn" onclick="document.getElementById('ota_file').click()">)html";
+  html += tr.ota_choose_file;
+  html += R"html(</button>
+<button class="btn btn-go btn-inline" type="button" id="ota_upload_btn" onclick="uploadOtaFirmware()">)html";
+  html += tr.ota_upload_install;
+  html += R"html(</button>
+<span id="ota_file_name" class="file-picker-name">)html";
+  html += tr.ota_no_file_selected;
+  html += R"html(</span>
+</div>
+<div id="ota_status" class="settings-note ota-status"></div>
+<div id="ota_progress" class="ota-progress is-hidden" aria-hidden="true">
+<div id="ota_progress_bar" class="ota-progress-bar"></div>
+</div>
+<div class="settings-note">)html";
+  html += tr.ota_update_note;
+  html += R"html(</div>
+</div>
+)html";
+  // The Icons card (src/web/admin/firmware/icon-file.js): the icon file is
+  // there (all icons) or missing (the built-in ones, its download link and
+  // "Update" for the panel to fetch it now); below it the file by hand.
+  {
+    const bool icons_ready = mdi_icon_store::state() == mdi_icon_store::State::Ready;
+    const String icon_total(mdi_icon_store::icon_count());
+    html += R"html(
+<div class="settings-section" id="icon_file_section">
+<div class="section-title">)html";
+    html += tr.icons_section;
+    html += R"html(</div>
+<div class="settings-state-row"><i class="mdi mdi-shape-outline settings-state-icon"></i><div class="settings-state-text"><div class="settings-state-title">)html";
+    html += tr.icon_file_label;
+    html += R"html(</div><div class="settings-state-sub">)html";
+    if (icons_ready) {
+      html += mdi_icon_store::release_file_name();
+    } else {
+      html += R"html(<a class="settings-state-link" href=")html";
+      appendHtmlEscaped(html, mdi_icon_store::release_file_url());
+      html += R"html(" rel="noopener"><i class="mdi mdi-download"></i> )html";
+      html += mdi_icon_store::release_file_name();
+      html += "</a>";
+      // Why the last download or install failed (the firmware's own words).
+      const String reason = mdi_icon_store::last_failure();
+      if (reason.length()) {
+        html += R"html(</div><div class="settings-state-error">)html";
+        appendHtmlEscaped(html, reason);
+      }
+    }
+    html += "</div></div>";
+    if (icons_ready) {
+      html += R"html(<div class="settings-state-value is-good">)html";
+      html += icon_total;
+      html += R"html(<i class="mdi mdi-check"></i></div>)html";
+    } else {
+      html += R"html(<div class="settings-state-value is-bad">)html";
+      html += String(mdi_icon_store::builtin_count()) + " / " + icon_total;
+      html += R"html(<i class="mdi mdi-alert-outline"></i></div>
+<button class="btn btn-go settings-row-btn" type="button" id="icon_download_btn" onclick="downloadIconFile()"><i class="mdi mdi-download"></i> )html";
+      html += tr.ota_upload_install;
+      html += "</button>";
+    }
+    html += R"html(</div>
+<div class="settings-fw-file">
+<span class="settings-note">)html";
+    html += tr.icon_file_label;
+    html += R"html(:</span>
+<input type="file" id="icon_file" accept=".bin,application/octet-stream" style="display:none" onchange="updateIconFileName(this)">
+<button class="btn btn-secondary btn-inline" type="button" id="icon_choose_btn" onclick="document.getElementById('icon_file').click()">)html";
+    html += tr.ota_choose_file;
+    html += R"html(</button>
+<button class="btn btn-go btn-inline" type="button" id="icon_upload_btn" onclick="uploadIconFile()">)html";
+    html += tr.ota_upload_install;
+    html += R"html(</button>
+<span id="icon_file_name" class="file-picker-name">)html";
+    html += tr.ota_no_file_selected;
+    html += R"html(</span>
+</div>
+<div id="icon_status" class="settings-note ota-status"></div>
+<div id="icon_progress" class="ota-progress is-hidden" aria-hidden="true">
+<div id="icon_progress_bar" class="ota-progress-bar"></div>
+</div>
+</div>
+)html";
+  }
+  html += R"html(
+<div class="settings-section">
+<div class="section-title">)html";
+  html += tr.settings_connection;
+  html += R"html(</div>)html";
+  char route[96];
+  const bool has_route = settings_model::bridge_route(route, sizeof(route));
+  const bool ha_connected = networkManager.isMqttConnected();
+  appendSettingsStateRow(html, "lan-connect", "Home Assistant", has_route ? String(route) : String(),
+                         ha_connected ? tr.security_value_connected : tr.settings_not_connected,
+                         ha_connected ? "check" : nullptr);
+  // MQTT stays reachable, folded into one row; on the direct link its fields
+  // are kept but not used.
+  String mqtt_line;
+  if (link) {
+    mqtt_line = tr.settings_mqtt_unused;
+  } else if (cfg.mqtt_host[0]) {
+    mqtt_line = String(cfg.mqtt_host) + ":" + String(cfg.mqtt_port ? cfg.mqtt_port : 1883);
+  } else {
+    mqtt_line = tr.mqtt_not_configured;
+  }
+  html += R"html(
+<details class="settings-fold" id="mqtt_settings">
+<summary><i class="mdi mdi-access-point-network settings-state-icon"></i><span class="settings-state-text"><span class="settings-state-title">MQTT</span><span class="settings-state-sub">)html";
+  appendHtmlEscaped(html, mqtt_line);
+  html += R"html(</span></span><i class="mdi mdi-chevron-right settings-fold-chev"></i></summary>
+<div class="settings-fold-body">)html";
+  if (link) {
+    html += R"html(
+<div class="settings-note settings-fold-note">)html";
+    appendHtmlEscaped(html, tr.settings_mqtt_unused_note);
+    html += "</div>";
+  }
+  html += R"html(
+<div class="settings-grid">
+<div>
+<label for="mqtt_host">)html";
+  html += tr.mqtt_host;
+  html += R"html(:</label>
+<input type="text" id="mqtt_host" name="mqtt_host" value=")html";
+  appendHtmlEscaped(html, cfg.mqtt_host);
+  html += R"html(">
+</div>
+<div>
+<label for="mqtt_port">)html";
+  html += tr.mqtt_port;
+  html += R"html(:</label>
+<input type="number" id="mqtt_port" name="mqtt_port" value=")html";
+  html += String(cfg.mqtt_port ? cfg.mqtt_port : 1883);
+  html += R"html(">
+</div>
+<div>
+<label for="mqtt_user">)html";
+  html += tr.mqtt_username;
+  html += R"html(:</label>
+<input type="text" id="mqtt_user" name="mqtt_user" value=")html";
+  appendHtmlEscaped(html, cfg.mqtt_user);
+  html += R"html(">
+</div>
+<div>
+<label for="mqtt_pass">)html";
+  html += tr.mqtt_password;
+  html += R"html(:</label>
+<div class="password-field">
+<input type="password" id="mqtt_pass" name="mqtt_pass"
+autocomplete="new-password" value=")html";
+  appendStoredSecretValue(html, cfg.mqtt_pass, tr);
+  html += R"html(">
+<button type="button" class="password-toggle" data-label-show=")html";
+  html += tr.password_show;
+  html += R"html(" data-label-hide=")html";
+  html += tr.password_hide;
+  html += R"html(" onclick="togglePasswordVisibility('mqtt_pass', this)">)html";
+  html += tr.password_show;
+  html += R"html(</button>
+</div>
+</div>
+<div class="settings-full">
+<label for="mqtt_client_id">)html";
+  html += tr.mqtt_client_id;
+  html += R"html(:</label>
+<input type="text" id="mqtt_client_id" name="mqtt_client_id" placeholder=")html";
+  html += tr.mqtt_client_id_placeholder;
+  html += R"html(" value=")html";
+  appendHtmlEscaped(html, cfg.mqtt_client_id);
+  html += R"html(">
+<div class="settings-note">)html";
+  html += tr.mqtt_client_id_hint;
+  html += R"html(</div>
+</div>
+<div>
+<label for="mqtt_base">)html";
+  html += tr.mqtt_base_topic;
+  html += R"html(:</label>
+<input type="text" id="mqtt_base" name="mqtt_base" value=")html";
+  appendHtmlEscaped(html, cfg.mqtt_base_topic);
+  html += R"html(">
+</div>
+<div>
+<label for="ha_prefix">)html";
+  html += tr.ha_prefix;
+  html += R"html(:</label>
+<input type="text" id="ha_prefix" name="ha_prefix" value=")html";
+  appendHtmlEscaped(html, cfg.ha_prefix);
+  html += R"html(">
+</div>
+</div>
+<div class="settings-fold-actions">
+<button class="btn btn-go" type="submit" form="admin_settings_form">)html";
+  html += tr.save;
+  html += R"html(</button>
+</div>
+</div>
+</details>)html";
+  appendCloudSettingsHtml(html, cfg, tr);
+  html += R"html(
+</div>
+
+<div class="settings-section">
+<div class="section-title">)html";
+  html += tr.security_btn;
+  html += R"html(</div>)html";
+  appendSettingsStateRow(html, paired ? "link-variant" : "link-variant-off", tr.settings_pairing,
+                         !paired ? tr.settings_not_paired
+                         : link  ? tr.settings_states_encrypted
+                                 : tr.settings_commands_encrypted,
+                         paired ? tr.settings_paired : "", paired ? "shield-check" : nullptr);
+  // The Web Admin password row folds out its fields (web_admin_security_html.cpp).
+  appendWebAdminPasswordSettingsHtml(html, tr);
+  html += R"html(
+</div>
+</section>
+</form>
+
+<!-- Local GPIO / relay / temperature assignments -->
+<section class="settings-page settings-page-io" data-settings-page="io">
+<div class="hardware-io-content">
+<div class="settings-actions hardware-io-toolbar">
+<button id="hardwareIoAddSwitch" class="btn btn-secondary hardware-io-add-button" type="button">+ )html";
+  html += tr.tile_type_switch;
+  html += R"html(</button>
+<button id="hardwareIoAddTemperature" class="btn btn-secondary hardware-io-add-button" type="button">+ )html";
+  html += tr.admin_io_temperature;
+  html += R"html(</button>
+</div>
+<div id="hardwareIoList" class="hardware-io-list">
+<div class="hardware-io-loading">)html";
+  html += tr.loading;
+  html += R"html(</div>
+</div>
+</div>
+</section>
+)html";
+
+  if (camera) {
+    html += R"html(
+<section class="settings-page" data-settings-page="camera">)html";
+    appendLocalCameraSettingsHtml(html, tr);
+    html += R"html(
+</section>
+)html";
+  }
+
+  html += R"html(
+<section class="settings-page" data-settings-page="files">
+<div class="settings-section">
+<div class="section-title">)html";
+  html += tr.admin_import_export;
+  html += R"html(</div>
+<div class="settings-grid">
+<div class="settings-full">
+<div class="settings-actions">
+<button type="button" class="btn" id="tile_export_btn" onclick="exportTilesConfig()">)html";
+  html += tr.admin_export;
+  html += R"html(</button>
+<input type="file" id="settings_tile_import" accept="application/json" style="display:none" onchange="importTilesConfig('settings', this.files)">
+<button type="button" class="btn" id="tile_import_btn" onclick="triggerTilesImport('settings')">)html";
+  html += tr.admin_import;
+  html += R"html(</button>
+</div>
+<div id="tile_import_status" class="settings-note ota-status"></div>
+<div id="tile_import_progress" class="ota-progress is-hidden" aria-hidden="true">
+<div id="tile_import_progress_bar" class="ota-progress-bar"></div>
+</div>
+<div class="settings-note">)html";
+  html += tr.admin_import_overwrite;
+  html += R"html(</div>
+</div>
+</div>
+</div>
+
+<div class="settings-section">
+<div class="section-title">)html";
+  html += tr.file_manager_title;
+  html += R"html(</div>
+<div class="settings-grid file-manager">
+<div class="settings-full">
+<div class="file-manager-topbar">
+)html";
+#if defined(HOMETILES_BETA_BUILD)
+  // Test builds: microSD or the panel's own storage (src/web/admin/files);
+  // technical names only, no translated texts for a test tool.
+  html += R"html(<div class="icon-color-segmented file-manager-storage-switch" role="group">
+<button type="button" class="active" data-fs="sd" onclick="selectFileManagerStorage('sd')">microSD</button>
+<button type="button" data-fs="internal" onclick="selectFileManagerStorage('internal')">LittleFS</button>
+</div>
+)html";
+#endif
+  html += R"html(<span id="file_manager_sd_state" class="file-manager-storage-state">)html";
+  html += tr.file_manager_checking;
+  html += R"html(</span>
+<div class="file-manager-toolbar-group">
+<button class="btn btn-secondary file-manager-toolbar-btn" type="button" onclick="loadFileManager()">)html";
+  html += tr.file_manager_refresh;
+  html += R"html(</button>
+<button class="btn btn-secondary file-manager-toolbar-btn file-manager-requires-sd" type="button" onclick="createFileManagerFolder()" disabled>)html";
+  html += tr.file_manager_new_folder;
+  html += R"html(</button>
+</div>
+</div>
+<div class="file-manager-upload-row">
+<button class="btn btn-secondary file-manager-toolbar-btn file-manager-requires-sd" type="button" onclick="document.getElementById('file_manager_upload').click()" disabled>)html";
+  html += tr.file_manager_choose_files;
+  html += R"html(</button>
+<button class="btn btn-secondary file-manager-toolbar-btn file-manager-requires-sd" type="button" onclick="uploadFileManagerFile()" disabled>)html";
+  html += tr.file_manager_upload;
+  html += R"html(</button>
+<span id="file_manager_upload_name" class="file-picker-name">)html";
+  html += tr.ota_no_file_selected;
+  html += R"html(</span>
+</div>
+<input type="file" id="file_manager_upload" multiple style="display:none" onchange="updateFileManagerUploadName(this)">
+<div class="file-manager-selection-bar">
+<div id="file_manager_selection" class="file-manager-selection-info">)html";
+  html += tr.file_manager_no_selection;
+  html += R"html(</div>
+<div class="file-manager-selection-actions">
+<button class="btn btn-secondary file-manager-selection-btn" id="file_manager_primary_btn" type="button" onclick="openSelectedFileManagerEntry()" disabled>)html";
+  html += tr.file_manager_open;
+  html += R"html(</button>
+<button class="btn btn-secondary file-manager-selection-btn" id="file_manager_rename_btn" type="button" onclick="renameSelectedFileManagerEntry()" disabled>)html";
+  html += tr.file_manager_rename;
+  html += R"html(</button>
+<button class="btn btn-danger file-manager-selection-btn" id="file_manager_delete_btn" type="button" onclick="deleteSelectedFileManagerEntry()" disabled>)html";
+  html += tr.admin_delete;
+  html += R"html(</button>
+</div>
+</div>
+</div>
+<div class="settings-full">
+<div id="file_manager_breadcrumb" class="file-manager-breadcrumb"></div>
+<div class="file-manager-table-wrap">
+<table class="file-manager-table">
+<thead>
+<tr>
+<th>)html";
+  html += tr.file_manager_name;
+  html += R"html(</th>
+<th>)html";
+  html += tr.file_manager_modified;
+  html += R"html(</th>
+<th>)html";
+  html += tr.file_manager_size;
+  html += R"html(</th>
+</tr>
+</thead>
+<tbody id="file_manager_entries">
+<tr><td colspan="3">)html";
+  html += tr.file_manager_not_loaded;
+  html += R"html(</td></tr>
+</tbody>
+</table>
+</div>
+<div id="file_manager_status" class="settings-note file-manager-status"></div>
+</div>
+</div>
+</div>
+</section>
+
+<section class="settings-page" data-settings-page="diagnostics">
+<div class="settings-section">
+<div class="section-title">)html";
+  html += tr.admin_settings_screenshot;
+  html += R"html(</div>
+<div class="settings-grid">
+<div class="settings-full">
+<div class="settings-actions">
+<button class="btn" type="button" onclick="createScreenshotAndDownload()">)html";
+  html += tr.screenshot_create_download;
+  html += R"html(</button>
+<button class="btn btn-secondary" type="button" onclick="downloadCrashLog()">)html";
+  html += tr.crash_log_download;
+  html += R"html(</button>
+<button class="btn btn-secondary" type="button" onclick="window.open('api/sd-diagnostics?ts=' + Date.now(), '_blank')">)html";
+  html += tr.sd_diagnostics_open;
+  html += R"html(</button>
+</div>
+<div class="settings-note">)html";
+  html += tr.screenshot_saved_note;
+  html += R"html(</div>)html";
+
+  // Offer the core dump only when its partition contains one. The panic
+  // handler writes it automatically; see src/core/diagnostics/crash_log.h.
+  // The separate crashlog.txt download above reads LittleFS, whereas the file
+  // manager exposes only the microSD card.
+  if (CrashLog::hasCoreDump()) {
+    const String summary = CrashLog::coreDumpSummaryLine();
+    html += R"html(
+<div class="settings-note"><strong>)html";
+    html += tr.coredump_stored;
+    html += R"html(:</strong></div>)html";
+    if (summary.length()) {
+      html += R"html(
+<div class="settings-note ota-version-value">)html";
+      html += summary;
+      html += R"html(</div>)html";
+    }
+    html += R"html(
+<div class="settings-actions" id="coredump_actions">
+<button class="btn btn-secondary" type="button" onclick="window.location.href='api/coredump'">)html";
+    html += tr.coredump_download;
+    html += R"html(</button>
+<button class="btn btn-secondary" type="button" onclick="eraseCoreDump()">)html";
+    html += tr.coredump_delete;
+    html += R"html(</button>
+</div>
+<div class="settings-note">)html";
+    html += tr.coredump_decode_note;
+    html += R"html(</div>)html";
+  }
+
+  html += R"html(
+</div>
+</div>
+</div>
+</section>
+</div>
+</div>
+
+<form id="admin_restart_form" action="restart" method="POST" class="admin-hidden-form" data-confirm=")html";
+  appendHtmlEscaped(html, tr.restart_confirm);
+  html += R"html(" onsubmit="return confirm(this.dataset.confirm);"></form>
+<!-- One footer under the list and the page, across the full width; its
+buttons follow the chosen page. Pages that act at once have none. -->
+<div class="admin-footer-actions settings-foot" id="settingsFoot">
+<div class="settings-foot-set" data-settings-foot="network"><button class="btn btn-go admin-footer-btn" type="submit" form="admin_settings_form">)html";
+  html += tr.save;
+  html += R"html(</button></div>
+<div class="settings-foot-set" data-settings-foot="locale"><button class="btn btn-go admin-footer-btn" type="submit" form="admin_settings_form">)html";
+  html += tr.save;
+  html += R"html(</button></div>
+<div class="settings-foot-set" data-settings-foot="system"><button class="btn btn-secondary admin-footer-btn" type="submit" form="admin_restart_form">)html";
+  html += tr.restart_button;
+  html += R"html(</button></div>
+<div class="settings-foot-set" data-settings-foot="io">
+<div id="hardwareIoSaveState" class="hardware-io-save-state"></div>
+<button id="hardwareIoSave" class="btn btn-go admin-footer-btn" type="button">)html";
+  html += tr.save;
+  html += R"html(</button>
+<button id="hardwareIoRestart" class="btn btn-secondary admin-footer-btn" type="button">)html";
+  html += tr.restart_button;
+  html += R"html(</button>
+</div>
+</div>
+</div>
+)html";
 }
 
 String WebAdminServer::getAdminPage() {
@@ -1504,42 +2554,6 @@ String WebAdminServer::getAdminPage() {
   const String admin_heading_title = String("HomeTiles ") + tr.admin_panel_word;
   const String admin_heading_subtitle =
       String(FW_VERSION) + "  \xC2\xB7  " + Device::displayName();
-  const String current_firmware_name =
-      String("hometiles_") + FW_VERSION + "_" + Device::profile().key;
-  const HaBridgeConfigData& ha = haBridgeConfig.get();
-  const auto sensorOptions = parseSensorList(ha.sensors_text);
-  const auto binarySensorOptions = parseSensorList(ha.binary_sensors_text);
-  auto energyOptions = parseSensorList(ha.energy_text);
-  energy_append_cached_entity_ids(energyOptions);
-  const auto weatherOptions = parseSensorList(ha.weathers_text);
-  const auto sceneOptions = parseSceneList(ha.scene_alias_text);
-  const auto lightOptions = parseSensorList(ha.lights_text);
-  const auto switchOptionsRaw = parseSensorList(ha.switches_text);
-  const auto mediaOptions = parseSensorList(ha.media_players_text);
-  const auto climateOptions = parseSensorList(ha.climates_text);
-  const auto coverOptions = parseSensorList(ha.covers_text);
-  const auto cameraOptions = parseSensorList(ha.cameras_text);
-  std::vector<String> switchOptions;
-  switchOptions.reserve(lightOptions.size() + switchOptionsRaw.size());
-  auto addSwitchOption = [&](const String& entry) {
-    if (!entry.length()) return;
-    for (const auto& existing : switchOptions) {
-      if (existing.equalsIgnoreCase(entry)) {
-        return;
-      }
-    }
-    switchOptions.push_back(entry);
-  };
-  for (const auto& opt : lightOptions) {
-    addSwitchOption(opt);
-  }
-  for (const auto& opt : switchOptionsRaw) {
-    addSwitchOption(opt);
-  }
-  addSwitchOption(kEntityDisplayBrightness);
-  addSwitchOption(kEntityScreensaverBrightness);
-  addSwitchOption(kEntityDisplayRotate);
-  addSwitchOption(kEntityDisplaySleep);
   auto formatSensorValue = [](const String& raw, uint8_t decimals) -> String {
     String v = raw;
     v.trim();
@@ -1585,88 +2599,133 @@ String WebAdminServer::getAdminPage() {
   html.reserve(192 * 1024);
   html += "<!DOCTYPE html>\n<html lang=\"";
   html += tr.html_lang;
-  // The global icon disc option is a root class, so every preview grid,
-  // including lazily inserted folders, follows it without re-rendering.
-  if (!configManager.getConfig().icon_discs) html += "\" class=\"icon-discs-off";
+  // The panel's theme (ui_theme.h): the preview paints with its roles
+  // (appendPanelThemeVars); the theme field switches it.
+  html += ui_theme::theme_light() ? "\" data-panel-theme=\"light" : "\" data-panel-theme=\"dark";
+
   html += R"html(">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>)html";
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>)html";
   html += admin_panel_title;
   html += R"html(</title>
 )html";
 
+  appendWebAdminCsrfMeta(html, server);
   appendAdminStyles(html);
   appendAdminScripts(html);
 
   html += R"html(
 </head>
 <body>
-  <div class="wrapper">
-    <div class="card">
-      <div class="brand">
-        <svg width="44" height="44" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-          <rect x="4" y="4" width="17" height="17" rx="4" fill="#ffffff"/>
-          <rect x="27" y="4" width="17" height="17" rx="4" fill="#ffffff"/>
-          <rect x="4" y="27" width="17" height="17" rx="4" fill="#ffffff"/>
-          <path d="M33 26h5v6.5h6.5v5H38V44h-5v-6.5h-6.5v-5H33z" fill="#26a69a"/>
-        </svg>
-        <div>
-          <h1>)html";
+<div class="wrapper)html";
+  // Square and upright previews keep their size on the wide page; the
+  // Settings slot moves beside them (admin.css .compact-grid; user
+  // 2026-10-11: an upright layout "like the square ones").
+  if (previewSlotsBeside()) html += " compact-grid";
+  // Home's page fields beside or under the preview (admin.css).
+  if (grid_layout::head_bar()) html += " with-page-fields";
+  html += R"html(">
+<div class="card">
+<div class="brand">
+<svg width="44" height="44" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+<rect x="4" y="4" width="17" height="17" rx="4" fill="#ffffff"/>
+<rect x="27" y="4" width="17" height="17" rx="4" fill="#ffffff"/>
+<rect x="4" y="27" width="17" height="17" rx="4" fill="#ffffff"/>
+<path d="M33 26h5v6.5h6.5v5H38V44h-5v-6.5h-6.5v-5H33z" fill="#26a69a"/>
+</svg>
+<div>
+<h1>)html";
   html += admin_heading_title;
   html += R"html(</h1>
-          <div class="device">)html";
+<div class="device">)html";
   html += admin_heading_subtitle;
   html += R"html(</div>
-        </div>
-        <div class="brand-links">
-          <a class="brand-link" href="https://galusperes.github.io/HomeTiles/" target="_blank" rel="noopener"><i class="mdi mdi-book-open-variant"></i>Docs</a>
-          <a class="brand-link" href="https://github.com/GalusPeres/HomeTiles" target="_blank" rel="noopener"><i class="mdi mdi-github"></i>GitHub</a>
-        </div>
-      </div>
-      
-      <!-- Tab Navigation -->
-      <div class="tab-nav">
+</div>
+<div class="brand-side">
+<div class="brand-links">)html";
+  appendWebAdminPasswordBadgeHtml(html, tr);
+  html += R"html(
+<a class="brand-link" href="https://galusperes.github.io/HomeTiles/" target="_blank" rel="noopener"><i class="mdi mdi-book-open-variant"></i>Docs</a>
+<a class="brand-link" href="https://github.com/GalusPeres/HomeTiles" target="_blank" rel="noopener"><i class="mdi mdi-github"></i>GitHub</a>
+</div>)html";
+  // Small support line: a GitHub star (GitHub has no direct star URL, the
+  // repository page has the button) or a coffee.
+  html += R"html(
+<div class="brand-support">)html";
+  appendHtmlEscaped(html, String(tr.web_support_prefix));
+  html += R"html( <a class="brand-star" href="https://github.com/GalusPeres/HomeTiles" target="_blank" rel="noopener"><i class="mdi mdi-star"></i>)html";
+  appendHtmlEscaped(html, String(tr.web_support_stars));
+  html += R"html(</a> )html";
+  appendHtmlEscaped(html, String(tr.web_support_or));
+  html += R"html( <a class="brand-coffee" href="https://buymeacoffee.com/galusperes" target="_blank" rel="noopener"><i class="mdi mdi-coffee"></i>Buy Me a Coffee</a></div>
+</div>
+</div>
+
+<!-- Tab Navigation -->
+<div class="tab-nav">
 )html";
 
+  // Home stands alone on the left. A divider separates it from the folders,
+  // which follow in tree order, all as wide as Home, and wrap into more rows.
+  // A second divider separates Screensaver, I/O and Settings on the right. The
+  // folder buttons keep their classes and data, so switching, renaming and
+  // lazily added folders work as before (folders/navigation.js).
   for (const auto& entry : folders) {
-    html += buildFolderTabButtonHtml(entry);
+    if (entry.id == 0) html += buildFolderTabButtonHtml(entry);
   }
-
   html += R"html(
-        <button class="tab-btn" type="button" data-tab-target="tab-tiles-screensaver"
-                onclick="switchTab('tab-tiles-screensaver')">
-          <i class="mdi mdi-monitor" style="font-size:24px;"></i>
-          <span style="font-size:14px;font-weight:600;">Screensaver</span>
-        </button>
-        <button class="tab-btn" type="button" data-tab-target="tab-hardware"
-                onclick="switchTab('tab-hardware')">
-          <i class="mdi mdi-electric-switch" style="font-size:24px;"></i>
-          <span style="font-size:14px;font-weight:600;">)html";
-  html += tr.admin_io;
+<span class="tab-sep" aria-hidden="true"></span>
+<div class="tab-folders" id="folderTabs" role="group" aria-label=")html";
+  appendHtmlEscaped(html, String(tr.admin_folders));
+  html += R"html(">)html";
+  auto append_children = [&](auto&& self, uint16_t parent, int depth) -> void {
+    if (depth > 8) return;
+    for (const auto& entry : folders) {
+      if (entry.id == 0 || entry.parent_id != parent) continue;
+      html += buildFolderTabButtonHtml(entry);
+      self(self, entry.id, depth + 1);
+    }
+  };
+  append_children(append_children, 0, 0);
+  // A folder whose parent no longer exists still gets its button.
+  for (const auto& entry : folders) {
+    if (entry.id != 0 && entry.parent_id != 0 && !tileConfig.getFolder(entry.parent_id)) {
+      html += buildFolderTabButtonHtml(entry);
+    }
+  }
+  html += R"html(</div>
+<span class="tab-sep" aria-hidden="true"></span>
+<div class="tab-system">
+<button class="tab-btn" type="button" data-tab-target="tab-tiles-screensaver"
+onclick="switchTab('tab-tiles-screensaver')">
+<span class="tab-disc"><i class="mdi mdi-monitor"></i></span>
+<span class="tab-label">)html";
+  appendHtmlEscaped(html, tr.panel_tab_screensaver);
   html += R"html(</span>
-        </button>
-        <button class="tab-btn" type="button" data-tab-target="tab-network"
-                onclick="switchTab('tab-network')">
-          <i class="mdi mdi-cog" style="font-size:24px;"></i>
-          <span style="font-size:14px;font-weight:600;">)html";
+</button>
+<button class="tab-btn" type="button" data-tab-target="tab-network"
+onclick="switchTab('tab-network')">
+<span class="tab-disc"><i class="mdi mdi-cog"></i></span>
+<span class="tab-label">)html";
   html += tr.tile_type_settings;
   html += R"html(</span>
-        </button>
-      </div>
+</button>
+</div>
+</div>
 )html";
 
   // Only Home is part of the initial page. Other folder editors are generated
   // on first use via /api/folders/tab, avoiding synchronous all-folder reads.
   for (const auto& entry : folders) {
     if (entry.id != 0) continue;
-    TileGridConfig grid{};
+    // On the heap: a whole folder no longer fits on the task stack.
+    TileGridScratch scratch = makeTileGridScratch();
+    if (!scratch) continue;
+    TileGridConfig& grid = *scratch;
     tileConfig.loadFolderGrid(entry.id, grid);
-    appendTileTabHTML(html, entry.id, entry, grid, sensorOptions,
-                      binarySensorOptions, energyOptions,
-                      weatherOptions, sceneOptions, switchOptions, mediaOptions,
-                      climateOptions, coverOptions, cameraOptions, formatSensorValue,
+    appendTileTabHTML(html, entry.id, entry, grid, formatSensorValue,
                       navigateOptionsHtml);
   }
 
@@ -1674,551 +2733,23 @@ String WebAdminServer::getAdminPage() {
   screensaver_folder.id = TileConfig::kScreensaverGridStorageId;
   screensaver_folder.parent_id = 0;
   snprintf(screensaver_folder.name, sizeof(screensaver_folder.name), "%s",
-           "Screensaver");
+           tr.panel_tab_screensaver);
   snprintf(screensaver_folder.icon_name, sizeof(screensaver_folder.icon_name),
            "%s", "monitor");
   appendTileTabHTML(html, TileConfig::kScreensaverGridStorageId,
                     screensaver_folder, screensaverConfig.tileGrid(),
-                    sensorOptions, binarySensorOptions, energyOptions,
-                    weatherOptions, sceneOptions,
-                    switchOptions, mediaOptions, climateOptions, coverOptions, cameraOptions,
                     formatSensorValue, navigateOptionsHtml, true);
 
+  appendSettingsTabHtml(html, cfg, tr, supports_ethernet, use_static);
   html += R"html(
-      <!-- Local GPIO / relay / temperature assignments -->
-      <div id="tab-hardware" class="tab-content">
-        <div class="hardware-io-content">
-          <div class="settings-actions hardware-io-toolbar">
-            <button id="hardwareIoAddSwitch" class="btn btn-secondary hardware-io-add-button" type="button">+ )html";
-  html += tr.tile_type_switch;
-  html += R"html(</button>
-            <button id="hardwareIoAddTemperature" class="btn btn-secondary hardware-io-add-button" type="button">+ )html";
-  html += tr.admin_io_temperature;
-  html += R"html(</button>
-          </div>
-          <div id="hardwareIoList" class="hardware-io-list">
-            <div class="hardware-io-loading">)html";
-  html += tr.loading;
-  html += R"html(</div>
-          </div>
-          <div class="admin-footer-actions hardware-io-footer">
-            <div id="hardwareIoSaveState" class="hardware-io-save-state"></div>
-            <button id="hardwareIoSave" class="btn btn-go admin-footer-btn" type="button">)html";
-  html += tr.save;
-  html += R"html(</button>
-            <button id="hardwareIoRestart" class="btn btn-secondary admin-footer-btn" type="button">)html";
-  html += tr.restart_button;
-  html += R"html(</button>
-          </div>
-        </div>
-      </div>
+</div>
+</div>
 
-      <!-- Tab 3: Settings (Network/MQTT Configuration) -->
-      <div id="tab-network" class="tab-content">
-        <form id="admin_settings_form" action="mqtt" method="POST" autocomplete="on">
-          <div class="settings-section">
-            <div class="section-title-row">
-              <div class="section-title">)html";
-  html += supports_ethernet
-              ? tr.admin_network_section
-              : tr.admin_settings_wifi;
-  html += R"html(</div>
-              <div class="wifi-inline-status"><span class="wifi-inline-dot)html";
-  if (!networkTransport.isConnected()) {
-    html += " off";
-  }
-  html += R"html("></span>)html";
-  html += networkTransport.isConnected() ? tr.wifi_connected : tr.wifi_disconnected;
-  if (networkTransport.isConnected()) {
-    html += " \xC2\xB7 ";
-    if (networkTransport.activeKind() == NetworkTransportKind::Wifi) {
-      appendHtmlEscaped(html, WiFi.SSID());
-    } else {
-      appendHtmlEscaped(html, networkTransport.activeName());
-    }
-    html += " \xC2\xB7 ";
-    html += networkTransport.localIP().toString();
-  }
-  html += R"html(</div>
-            </div>
-            <div class="settings-grid">)html";
-  if (supports_ethernet) {
-    html += R"html(
-              <div class="settings-full">
-                <label for="network_mode">)html";
-    html += tr.admin_connection_type;
-    html += R"html(:</label>
-                <select id="network_mode" name="network_mode" onchange="toggleNetworkSettings()">
-                  <option value="wifi")html";
-    if (!cfg.ethernet_enabled) {
-      html += " selected";
-    }
-    html += R"html(>WiFi</option>
-                  <option value="ethernet")html";
-    if (cfg.ethernet_enabled) {
-      html += " selected";
-    }
-    html += R"html(>Ethernet</option>
-                </select>
-                <div class="settings-note">)html";
-    html += tr.admin_connection_type_note;
-    html += R"html(</div>
-              </div>)html";
-  }
-  html += R"html(
-              <div id="wifi_network_settings" class="network-settings-group settings-full )html";
-  if (supports_ethernet && cfg.ethernet_enabled) {
-    html += "is-hidden";
-  }
-  html += R"html(">)html";
-  if (supports_ethernet) {
-    html += R"html(
-                <div class="network-settings-heading">WiFi</div>)html";
-  }
-  html += R"html(
-                <div class="settings-subgrid">
-                  <div>
-                <label for="wifi_ssid">)html";
-  html += tr.ssid_label;
-  html += R"html(:</label>
-                <input type="text" id="wifi_ssid" name="wifi_ssid" value=")html";
-  appendHtmlEscaped(html, cfg.wifi_ssid);
-  html += R"html(">
-                  </div>
-                  <div>
-                <label for="wifi_pass">)html";
-  html += tr.wifi_password_label;
-  html += R"html(:</label>
-                <div class="password-field">
-                  <input type="password" id="wifi_pass" name="wifi_pass"
-                         autocomplete="new-password" value=")html";
-  appendHtmlEscaped(html, cfg.wifi_pass);
-  html += R"html(">
-                  <button type="button" class="password-toggle" data-label-show=")html";
-  html += tr.password_show;
-  html += R"html(" data-label-hide=")html";
-  html += tr.password_hide;
-  html += R"html(" onclick="togglePasswordVisibility('wifi_pass', this)">)html";
-  html += tr.password_show;
-  html += R"html(</button>
-                </div>
-                  </div>
-                </div>
-              </div>
-
-              <div id="network_ip_settings" class="network-settings-group settings-full">
-                <div class="network-settings-heading">)html";
-  html += tr.admin_ip_configuration;
-  html += R"html(</div>
-                <label class="settings-checkbox">
-                  <input type="checkbox" id="network_use_static" name="network_use_static" onchange="toggleStaticNetworkFields()")html";
-  if (use_static) html += " checked";
-  html += R"html(>
-                  <span>)html";
-  html += tr.admin_ip_use_static;
-  html += R"html(</span>
-                </label>
-                <div id="network_ip_mode_note" class="settings-note"
-                     data-dhcp-note=")html";
-  html += tr.admin_ip_dhcp_note;
-  html += R"html(" data-static-note=")html";
-  html += tr.admin_ip_static_note;
-  html += R"html(">)html";
-  html += use_static ? tr.admin_ip_static_note : tr.admin_ip_dhcp_note;
-  html += R"html(</div>
-                <div id="network_static_fields" class="settings-subgrid )html";
-  if (!use_static) {
-    html += "is-hidden";
-  }
-  html += R"html(">
-                <div>
-                <label for="network_static_ip">)html";
-  html += tr.wifi_static_ip_label;
-  html += R"html(:</label>
-                <input type="text" id="network_static_ip" name="network_static_ip" inputmode="decimal" autocomplete="on" value=")html";
-  appendHtmlEscaped(html, cfg.wifi_static_ip);
-  html += R"html(">
-                </div>
-                <div>
-                <label for="network_gateway">)html";
-  html += tr.wifi_gateway_label;
-  html += R"html(:</label>
-                <input type="text" id="network_gateway" name="network_gateway" inputmode="decimal" autocomplete="on" value=")html";
-  appendHtmlEscaped(html, cfg.wifi_gateway);
-  html += R"html(">
-                </div>
-                <div>
-                <label for="network_subnet">)html";
-  html += tr.wifi_subnet_label;
-  html += R"html(:</label>
-                <input type="text" id="network_subnet" name="network_subnet" inputmode="decimal" autocomplete="on" value=")html";
-  appendHtmlEscaped(html, cfg.wifi_subnet);
-  html += R"html(">
-                </div>
-                <div>
-                <label for="network_dns">)html";
-  html += tr.wifi_dns_label;
-  html += R"html(:</label>
-                <input type="text" id="network_dns" name="network_dns" inputmode="decimal" autocomplete="on" value=")html";
-  appendHtmlEscaped(html, cfg.wifi_dns);
-  html += R"html(">
-                </div>
-                </div>
-              </div>)html";
-  html += R"html(
-            </div>
-          </div>
-
-          <div class="settings-section">
-            <div class="section-title">)html";
-  html += tr.admin_settings_mqtt;
-  html += R"html(</div>
-            <div class="settings-grid">
-              <div>
-                <label for="mqtt_host">)html";
-  html += tr.mqtt_host;
-  html += R"html(:</label>
-                <input type="text" id="mqtt_host" name="mqtt_host" value=")html";
-  appendHtmlEscaped(html, cfg.mqtt_host);
-  html += R"html(">
-              </div>
-              <div>
-                <label for="mqtt_port">)html";
-  html += tr.mqtt_port;
-  html += R"html(:</label>
-                <input type="number" id="mqtt_port" name="mqtt_port" value=")html";
-  html += String(cfg.mqtt_port ? cfg.mqtt_port : 1883);
-  html += R"html(">
-              </div>
-              <div>
-                <label for="mqtt_user">)html";
-  html += tr.mqtt_username;
-  html += R"html(:</label>
-                <input type="text" id="mqtt_user" name="mqtt_user" value=")html";
-  appendHtmlEscaped(html, cfg.mqtt_user);
-  html += R"html(">
-              </div>
-              <div>
-                <label for="mqtt_pass">)html";
-  html += tr.mqtt_password;
-  html += R"html(:</label>
-                <div class="password-field">
-                  <input type="password" id="mqtt_pass" name="mqtt_pass"
-                         autocomplete="new-password" value=")html";
-  appendHtmlEscaped(html, cfg.mqtt_pass);
-  html += R"html(">
-                  <button type="button" class="password-toggle" data-label-show=")html";
-  html += tr.password_show;
-  html += R"html(" data-label-hide=")html";
-  html += tr.password_hide;
-  html += R"html(" onclick="togglePasswordVisibility('mqtt_pass', this)">)html";
-  html += tr.password_show;
-  html += R"html(</button>
-                </div>
-              </div>
-              <div class="settings-full">
-                <label for="mqtt_client_id">)html";
-  html += tr.mqtt_client_id;
-  html += R"html(:</label>
-                <input type="text" id="mqtt_client_id" name="mqtt_client_id" placeholder=")html";
-  html += tr.mqtt_client_id_placeholder;
-  html += R"html(" value=")html";
-  appendHtmlEscaped(html, cfg.mqtt_client_id);
-  html += R"html(">
-                <div class="settings-note">)html";
-  html += tr.mqtt_client_id_hint;
-  html += R"html(</div>
-              </div>
-              <div>
-                <label for="mqtt_base">)html";
-  html += tr.mqtt_base_topic;
-  html += R"html(:</label>
-                <input type="text" id="mqtt_base" name="mqtt_base" value=")html";
-  appendHtmlEscaped(html, cfg.mqtt_base_topic);
-  html += R"html(">
-              </div>
-              <div>
-                <label for="ha_prefix">)html";
-  html += tr.ha_prefix;
-  html += R"html(:</label>
-                <input type="text" id="ha_prefix" name="ha_prefix" value=")html";
-  appendHtmlEscaped(html, cfg.ha_prefix);
-  html += R"html(">
-              </div>
-            </div>
-          </div>
-)html";
-  appendCloudSettingsHtml(html, cfg, tr);
-  html += R"html(
-
-          <div class="settings-section">
-            <div class="section-title">)html";
-  html += tr.admin_settings_language;
-  html += R"html(</div>
-            <div class="settings-grid">
-              <div>
-                <label for="language">)html";
-  html += tr.language_label;
-  html += R"html(</label>
-                <select id="language" name="language">)html";
-  html += i18n::build_language_options_html(cfg.language);
-  html += R"html(</select>
-              </div>
-              <div>
-                <label for="timezone">)html";
-  html += tr.timezone_label;
-  html += R"html(</label>
-                <select id="timezone" name="timezone">)html";
-  html += buildTimezoneOptionsHtml(cfg.timezone, i18n::locale(cfg.language));
-  html += R"html(</select>
-              </div>
-              <div>
-                <label for="locale_time_format">)html";
-  html += tr.time_format_label;
-  html += R"html(</label>
-                <select id="locale_time_format" name="locale_time_format">)html";
-  html += buildGlobalTimeFormatOptionsHtml(cfg.global_time_format, tr);
-  html += R"html(</select>
-              </div>
-              <div>
-                <label for="locale_date_format">)html";
-  html += tr.date_format_label;
-  html += R"html(</label>
-                <select id="locale_date_format" name="locale_date_format">)html";
-  html += buildGlobalDateFormatOptionsHtml(cfg.global_date_format, tr);
-  html += R"html(</select>
-              </div>
-            </div>
-          </div>
-
-)html";
-  appendLocalCameraSettingsHtml(html, tr);
-  html += R"html(
-          <div class="settings-section">
-            <div class="section-title">)html";
-  html += tr.admin_settings_screenshot;
-  html += R"html(</div>
-            <div class="settings-grid">
-              <div class="settings-full">
-                <div class="settings-actions">
-                  <button class="btn" type="button" onclick="createScreenshotAndDownload()">)html";
-  html += tr.screenshot_create_download;
-  html += R"html(</button>
-                  <button class="btn btn-secondary" type="button" onclick="downloadCrashLog()">)html";
-  html += tr.crash_log_download;
-  html += R"html(</button>
-)html";
-  html += R"html(                  <button class="btn btn-secondary" type="button" onclick="window.open('api/sd-diagnostics?ts=' + Date.now(), '_blank')">)html";
-  html += tr.sd_diagnostics_open;
-  html += R"html(</button>
-)html";
-  html += R"html(
-                </div>
-                <div class="settings-note">)html";
-  html += tr.screenshot_saved_note;
-  html += R"html(</div>)html";
-
-  // Offer the core dump only when its partition contains one. The panic
-  // handler writes it automatically; see src/core/diagnostics/crash_log.h.
-  // The separate crashlog.txt download above reads LittleFS, whereas the file
-  // manager exposes only the microSD card.
-  if (CrashLog::hasCoreDump()) {
-    const String summary = CrashLog::coreDumpSummaryLine();
-    html += R"html(
-                <div class="settings-note"><strong>)html";
-    html += tr.coredump_stored;
-    html += R"html(:</strong></div>)html";
-    if (summary.length()) {
-      html += R"html(
-                <div class="settings-note ota-version-value">)html";
-      html += summary;
-      html += R"html(</div>)html";
-    }
-    html += R"html(
-                <div class="settings-actions" id="coredump_actions">
-                  <button class="btn btn-secondary" type="button" onclick="window.location.href='api/coredump'">)html";
-    html += tr.coredump_download;
-    html += R"html(</button>
-                  <button class="btn btn-secondary" type="button" onclick="eraseCoreDump()">)html";
-    html += tr.coredump_delete;
-    html += R"html(</button>
-                </div>
-                <div class="settings-note">)html";
-    html += tr.coredump_decode_note;
-    html += R"html(</div>)html";
-  }
-
-  html += R"html(
-              </div>
-            </div>
-          </div>
-
-          <div class="settings-section">
-            <div class="section-title">)html";
-  html += tr.file_manager_title;
-  html += R"html(</div>
-            <div class="settings-grid file-manager">
-              <div class="settings-full">
-                <div class="file-manager-topbar">
-                  <span id="file_manager_sd_state" class="file-manager-storage-state">)html";
-  html += tr.file_manager_checking;
-  html += R"html(</span>
-                  <div class="file-manager-toolbar-group">
-                    <button class="btn btn-secondary file-manager-toolbar-btn" type="button" onclick="loadFileManager()">)html";
-  html += tr.file_manager_refresh;
-  html += R"html(</button>
-                    <button class="btn btn-secondary file-manager-toolbar-btn file-manager-requires-sd" type="button" onclick="createFileManagerFolder()" disabled>)html";
-  html += tr.file_manager_new_folder;
-  html += R"html(</button>
-                  </div>
-                </div>
-                <div class="file-manager-upload-row">
-                  <button class="btn btn-secondary file-manager-toolbar-btn file-manager-requires-sd" type="button" onclick="document.getElementById('file_manager_upload').click()" disabled>)html";
-  html += tr.file_manager_choose_files;
-  html += R"html(</button>
-                  <button class="btn btn-secondary file-manager-toolbar-btn file-manager-requires-sd" type="button" onclick="uploadFileManagerFile()" disabled>)html";
-  html += tr.file_manager_upload;
-  html += R"html(</button>
-                  <span id="file_manager_upload_name" class="file-picker-name">)html";
-  html += tr.ota_no_file_selected;
-  html += R"html(</span>
-                </div>
-                <input type="file" id="file_manager_upload" multiple style="display:none" onchange="updateFileManagerUploadName(this)">
-                <div class="file-manager-selection-bar">
-                  <div id="file_manager_selection" class="file-manager-selection-info">)html";
-  html += tr.file_manager_no_selection;
-  html += R"html(</div>
-                  <div class="file-manager-selection-actions">
-                    <button class="btn btn-secondary file-manager-selection-btn" id="file_manager_primary_btn" type="button" onclick="openSelectedFileManagerEntry()" disabled>)html";
-  html += tr.file_manager_open;
-  html += R"html(</button>
-                    <button class="btn btn-secondary file-manager-selection-btn" id="file_manager_rename_btn" type="button" onclick="renameSelectedFileManagerEntry()" disabled>)html";
-  html += tr.file_manager_rename;
-  html += R"html(</button>
-                    <button class="btn btn-danger file-manager-selection-btn" id="file_manager_delete_btn" type="button" onclick="deleteSelectedFileManagerEntry()" disabled>)html";
-  html += tr.admin_delete;
-  html += R"html(</button>
-                  </div>
-                </div>
-              </div>
-              <div class="settings-full">
-                <div id="file_manager_breadcrumb" class="file-manager-breadcrumb"></div>
-                <div class="file-manager-table-wrap">
-                  <table class="file-manager-table">
-                    <thead>
-                      <tr>
-                        <th>)html";
-  html += tr.file_manager_name;
-  html += R"html(</th>
-                        <th>)html";
-  html += tr.file_manager_modified;
-  html += R"html(</th>
-                        <th>)html";
-  html += tr.file_manager_size;
-  html += R"html(</th>
-                      </tr>
-                    </thead>
-                    <tbody id="file_manager_entries">
-                      <tr><td colspan="3">)html";
-  html += tr.file_manager_not_loaded;
-  html += R"html(</td></tr>
-                    </tbody>
-                  </table>
-                </div>
-                <div id="file_manager_status" class="settings-note file-manager-status"></div>
-              </div>
-            </div>
-          </div>
-
-          <div class="settings-section">
-            <div class="section-title">)html";
-  html += tr.admin_import_export;
-  html += R"html(</div>
-            <div class="settings-grid">
-              <div class="settings-full">
-                <div class="settings-actions">
-                  <button type="button" class="btn" onclick="exportTilesConfig()">)html";
-  html += tr.admin_export;
-  html += R"html(</button>
-                  <input type="file" id="settings_tile_import" accept="application/json" style="display:none" onchange="importTilesConfig('settings', this.files)">
-                  <button type="button" class="btn" onclick="triggerTilesImport('settings')">)html";
-  html += tr.admin_import;
-  html += R"html(</button>
-                </div>
-                <div class="settings-note">)html";
-  html += tr.admin_import_overwrite;
-  html += R"html(</div>
-              </div>
-            </div>
-          </div>
-
-          <div class="settings-section">
-            <div class="section-title">)html";
-  html += tr.admin_settings_ota;
-  html += R"html(</div>
-            <div class="settings-grid">
-              <div class="settings-full">
-                <div class="settings-note"><strong>)html";
-  html += tr.ota_current_version;
-  html += R"html(:</strong></div>
-                <div class="settings-note ota-version-value">)html";
-  html += current_firmware_name;
-  html += R"html(</div>
-                <div class="settings-note"><strong>GitHub OTA:</strong></div>
-                <div class="settings-actions ota-github-actions">
-                  <button class="btn btn-go" type="button" id="ota_github_btn" onclick="checkOrInstallGithubFirmware()">)html";
-  html += tr.system_check_updates_btn;
-  html += R"html(</button>
-                </div>
-                <div id="ota_github_status" class="settings-note ota-status"></div>
-                <div id="ota_github_progress" class="ota-progress is-hidden" aria-hidden="true">
-                  <div id="ota_github_progress_bar" class="ota-progress-bar"></div>
-                </div>
-                <div class="settings-note"><strong>)html";
-  html += tr.ota_firmware_file;
-  html += R"html(:</strong></div>
-                <input type="file" id="ota_file" accept=".bin,application/octet-stream" style="display:none" onchange="updateOtaFileName(this)">
-                <div class="file-picker">
-                  <button class="btn btn-secondary btn-inline" type="button" id="ota_choose_btn" onclick="document.getElementById('ota_file').click()">)html";
-  html += tr.ota_choose_file;
-  html += R"html(</button>
-                  <button class="btn btn-go btn-inline" type="button" id="ota_upload_btn" onclick="uploadOtaFirmware()">)html";
-  html += tr.ota_upload_install;
-  html += R"html(</button>
-                  <span id="ota_file_name" class="file-picker-name">)html";
-  html += tr.ota_no_file_selected;
-  html += R"html(</span>
-                </div>
-                <div id="ota_status" class="settings-note ota-status"></div>
-                <div id="ota_progress" class="ota-progress is-hidden" aria-hidden="true">
-                  <div id="ota_progress_bar" class="ota-progress-bar"></div>
-                </div>
-                <div class="settings-note">)html";
-  html += tr.ota_update_note;
-  html += R"html(</div>
-              </div>
-            </div>
-          </div>
-        </form>
-
-        <form id="admin_restart_form" action="restart" method="POST" onsubmit="return confirm('Gerät wirklich neu starten?');" class="admin-hidden-form"></form>
-        <div class="admin-footer-actions">
-          <button class="btn btn-go admin-footer-btn" type="submit" form="admin_settings_form">Speichern</button>
-          <button class="btn btn-secondary admin-footer-btn" type="submit" form="admin_restart_form">Gerät neu starten</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Notification Toast -->
-  <div id="notification" class="notification" role="status" aria-live="polite"></div>
+<!-- Notification Toast -->
+<div id="notification" class="notification" role="status" aria-live="polite"></div>
 </body>
 </html>
 )html";
-
-  html.replace(">Speichern</button>", String(">") + tr.save + "</button>");
-  html.replace("return confirm('Gerät wirklich neu starten?');", String("return confirm('") + tr.restart_confirm + "');");
-  html.replace(">Gerät neu starten</button>", String(">") + tr.restart_button + "</button>");
 
   return html;
 }
@@ -2229,30 +2760,30 @@ String WebAdminServer::getSuccessPage() {
   html += tr.html_lang;
   html += R"html(">
 <head>
-  <meta charset="utf-8">
-  <title>)html";
+<meta charset="utf-8">
+<title>)html";
   html += tr.save;
   html += R"html(</title>
 )html";
   appendWebFontFaceStyles(html);
   html += R"html(
-  <style>
-    body { font-family:'HomeTiles Inter', sans-serif; background:#0a0a0a; height:100vh; margin:0; display:flex; align-items:center; justify-content:center; }
-    .box { background:#1c1c1c; border:1px solid #2a2a2a; padding:32px; border-radius:22px; box-shadow:0 20px 60px rgba(0,0,0,.5); text-align:center; }
-    h1 { margin:0 0 10px; color:#ffffff; font-size:22px; }
-    p { margin:0; color:#8a8a8a; }
-  </style>
-  <script>setTimeout(function(){window.location.href='./'},1500);</script>
+<style>
+body { font-family:'HomeTiles Inter', sans-serif; background:#0a0a0a; height:100vh; margin:0; display:flex; align-items:center; justify-content:center; }
+.box { background:#1c1c1c; border:1px solid #2a2a2a; padding:32px; border-radius:22px; box-shadow:0 20px 60px rgba(0,0,0,.5); text-align:center; }
+h1 { margin:0 0 10px; color:#ffffff; font-size:22px; }
+p { margin:0; color:#8a8a8a; }
+</style>
+<script>setTimeout(function(){window.location.href='./'},1500);</script>
 </head>
 <body>
-  <div class="box">
-    <h1>)html";
+<div class="box">
+<h1>)html";
   html += tr.mqtt_saved_title;
   html += R"html(</h1>
-    <p>)html";
+<p>)html";
   html += tr.mqtt_saved_message;
   html += R"html(</p>
-  </div>
+</div>
 </body>
 </html>)html";
   return html;
@@ -2264,30 +2795,30 @@ String WebAdminServer::getBridgeSuccessPage() {
   html += tr.html_lang;
   html += R"html(">
 <head>
-  <meta charset="utf-8">
-  <title>)html";
+<meta charset="utf-8">
+<title>)html";
   html += tr.bridge_saved_title;
   html += R"html(</title>
 )html";
   appendWebFontFaceStyles(html);
   html += R"html(
-  <style>
-    body { font-family:'HomeTiles Inter', sans-serif; background:#0a0a0a; height:100vh; margin:0; display:flex; align-items:center; justify-content:center; }
-    .box { background:#1c1c1c; border:1px solid #2a2a2a; padding:32px; border-radius:22px; box-shadow:0 20px 60px rgba(0,0,0,.5); text-align:center; }
-    h1 { margin:0 0 10px; color:#ffffff; font-size:22px; }
-    p { margin:0; color:#8a8a8a; }
-  </style>
-  <script>setTimeout(function(){window.location.href='./'},1500);</script>
+<style>
+body { font-family:'HomeTiles Inter', sans-serif; background:#0a0a0a; height:100vh; margin:0; display:flex; align-items:center; justify-content:center; }
+.box { background:#1c1c1c; border:1px solid #2a2a2a; padding:32px; border-radius:22px; box-shadow:0 20px 60px rgba(0,0,0,.5); text-align:center; }
+h1 { margin:0 0 10px; color:#ffffff; font-size:22px; }
+p { margin:0; color:#8a8a8a; }
+</style>
+<script>setTimeout(function(){window.location.href='./'},1500);</script>
 </head>
 <body>
-  <div class="box">
-    <h1>)html";
+<div class="box">
+<h1>)html";
   html += tr.bridge_saved_title;
   html += R"html(</h1>
-    <p>)html";
+<p>)html";
   html += tr.bridge_saved_message;
   html += R"html(</p>
-  </div>
+</div>
 </body>
 </html>)html";
   return html;
@@ -2348,7 +2879,7 @@ String WebAdminServer::getStatusJSON() {
       "token_revoked", "plan_required", "forbidden"};
   const size_t cloud_status = static_cast<size_t>(networkManager.cloudStatus());
   json += ",\"transport\":\"";
-  json += cfg.transport == kTransportCloud ? "cloud" : "mqtt";
+  json += cfg.transport == kTransportCloud ? kTransportCloudName : "mqtt";
   // cloud_url passed cloud_config::parseUrl (RFC 3986 characters only).
   json += "\",\"cloud_url\":\"";
   json += cfg.cloud_url;

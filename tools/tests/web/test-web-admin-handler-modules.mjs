@@ -16,12 +16,13 @@ const read = (name) => {
   return fs.readFileSync(new URL(matches[0], directory), 'utf8');
 };
 const owners = {
-  'web_admin_handlers.cpp': ['SaveMQTT', 'SaveBridge', 'BridgeRefresh', 'Status',
-    'Restart', 'SaveTileBorders', 'SaveIconDiscs', 'SaveIconGlow', 'SaveDefaultTileColor', 'TileRadius'],
+  'web_admin_handlers.cpp': ['SaveMQTT', 'SaveBridge', 'BridgeRefresh', 'Status', 'Language',
+    'Restart', 'LinkSetup', 'LinkInfo', 'SaveTileBorders', 'SaveHeadGear', 'SaveHeadSwitch', 'SaveHomeHead', 'SaveTheme', 'Gestures'],
   'web_admin_tiles.cpp': ['GetTiles', 'SaveTiles', 'ReorderTiles', 'GetSensorValues',
-    'GetEntityOptions', 'GetFolders', 'GetFolderTab', 'SaveFolderAccess', 'DeleteFolder'],
+    'GetEntityOptions', 'GetMdiIcons', 'StartEntitySearch', 'GetEntitySearch', 'GetFolders', 'GetFolderTab', 'SaveFolderAccess', 'DeleteFolder',
+    'GetLayouts', 'SaveLayouts', 'SwitchLayout', 'SavePages'],
   'web_admin_screensaver.cpp': ['GetScreensaver', 'SaveScreensaver', 'GetScreensaverWallpaper'],
-  'web_admin_files.cpp': ['GetSdImages', 'GetSdIcons', 'UploadIcon', 'UploadIconDone',
+  'web_admin_files.cpp': ['GetSdImages',
     'FileManagerList', 'FileManagerDownload', 'FileManagerDelete', 'FileManagerRename',
     'FileManagerMkdir', 'FileManagerUpload', 'FileManagerUploadDone'],
   'web_admin_ota.cpp': ['PrepareOtaUpload', 'OtaUpdate', 'OtaRawUpdate', 'OtaUploadDone',
@@ -32,6 +33,8 @@ const owners = {
   'web_admin.cpp': ['Root'],
   'web_admin_hardware_io.cpp': ['GetHardwareIo', 'SaveHardwareIo'],
   'web_admin_local_camera.cpp': ['LocalCamera'],
+  'web_admin_icon_file.cpp': ['IconFileDownload', 'IconFileUpload', 'IconFileUploadDone'],
+  'web_admin_auth_handlers.cpp': ['AuthChallenge', 'AuthLogin', 'AuthLogout', 'AuthPassword'],
 };
 const sources = new Map(serverFiles.filter(name => name.endsWith('.cpp'))
   .map(file => [file.split('/').at(-1), read(file.split('/').at(-1))]));

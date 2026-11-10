@@ -1,0 +1,830 @@
+  // Shared entity picker of every tile field that names a Home Assistant
+  // entity, like Home Assistant's own picker: icon, name, area and device, and
+  // type, with a search. The server renders `<input type="hidden"
+  // data-entity-picker="<list>">` (appendEntityPickerField); the value stays
+  // in that input, so loading, saving, drafts, copy and import keep using the
+  // field id as before. The choices are the Bridge's released entities from
+  // /api/entity_options (fetchEntityOptions); a panel paired with a Bridge
+  // that searches asks it as well (/api/entity_search, entity_search.h): with
+  // a Web Admin password every Home Assistant entity of the list, otherwise
+  // the released ones with their area and device.
+
+  // Home Assistant domains in the order of ENTITY_KIND_LABELS
+  // (LocaleProfile::entity_kind_labels).
+  const ENTITY_KIND_DOMAINS = [
+    ['sensor'], ['binary_sensor'], ['light'], ['switch', 'input_boolean'], ['fan'], ['cover'],
+    ['climate'], ['media_player'], ['weather'], ['camera'], ['lock'], ['alarm_control_panel'],
+    ['number', 'input_number'], ['select', 'input_select'],
+    ['datetime', 'date', 'time', 'input_datetime'], ['scene'], ['script'], ['button', 'input_button'],
+    ['automation'], ['humidifier'], ['siren'], ['remote'], ['calendar'], ['vacuum']
+  ];
+  // Lists the Bridge searches (entity_search.py LIST_DOMAINS).
+  const ENTITY_REMOTE_LISTS = new Set(['sensors', 'binary_sensors', 'numbers', 'selects', 'datetimes',
+    'weathers', 'switches', 'media', 'climates', 'covers', 'cameras', 'images', 'locks', 'alarm_panels', 'fans',
+    'energy', 'scenes', 'calendars', 'vacuums']);
+  const ENTITY_REMOTE_DELAY_MS = 250;
+  const ENTITY_REMOTE_POLL_MS = 120;
+  const ENTITY_REMOTE_TIMEOUT_MS = 5000;
+  const ENTITY_PICKER_FALLBACK_ICON = 'shape-outline';
+  const entityPickerNativeValue = typeof HTMLInputElement === 'function'
+    ? Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value') : null;
+  // What the Bridge told about entities (name, icon, area ▸ device), by id.
+  const entityRemoteInfo = new Map();
+  const entityRemoteAsked = new Set();
+  // The Bridge's first page of each list, so a list opens with it at once.
+  const entityRemoteFirstPages = new Map();
+  const entityRemoteFetching = new Set();
+  let entityRemoteQueue = Promise.resolve();
+  let entityRemoteSupported = true;  // false once the panel has no Bridge search
+  let entityRemoteGeneration = 0;
+  let entityRemoteTimer = 0;
+  let entityPickerPopover = null;
+  // {input, local, entries, query, active, state, remote, full, more}
+  let entityPickerOpen = null;
+  // Entities chosen in this browser, per list: {entity: [times, last ms]}.
+  // Recent shows the most used and newest of them (#79).
+  const ENTITY_RECENT_KEY = 'hometiles.entityPickerRecent';
+  const ENTITY_RECENT_KEEP = 40;
+  const ENTITY_RECENT_SHOWN = 10;
+  const ENTITY_RECENT_HALF_LIFE_MS = 14 * 24 * 3600 * 1000;
+  // The switch under the search, like Automatic / No icon of the icon picker:
+  // [tab, icon, label key].
+  const ENTITY_PICKER_TABS = [
+    ['recent', 'history', 'entityPickerRecent'],
+    ['favorites', 'star-outline', 'entityPickerFavorites'],
+    ['all', 'format-list-bulleted', 'entityPickerAll']
+  ];
+
+  function entityKindLabel(entityId) {
+    const domain = String(entityId || '').split('.')[0];
+    const index = ENTITY_KIND_DOMAINS.findIndex(domains => domains.includes(domain));
+    return index >= 0 && typeof ENTITY_KIND_LABELS !== 'undefined' ? ENTITY_KIND_LABELS[index] || '' : '';
+  }
+
+  function entityPickerContext(area, device) {
+    return area && device ? area + ' ▸ ' + device : String(area || device || '');
+  }
+
+  // The entries of one list key, as {value, name, icon, entity}.
+  function entityPickerEntries(data, list) {
+    const raw = list === 'icon_sources' && typeof iconColorSourceEntries === 'function'
+      ? iconColorSourceEntries(data) : (data && data[list]);
+    const seen = new Set();
+    const entries = [];
+    for (const entry of Array.isArray(raw) ? raw : []) {
+      const value = String(entry?.v ?? '');
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      entries.push({
+        value,
+        name: String(entry.t || '') || titleFromEntity(value) || value,
+        icon: normalizeMdiIconName(entry.i || ''),
+        entity: String(entry.e || value)
+      });
+    }
+    return entries.sort((a, b) =>
+      a.name.localeCompare(b.name, APP_LOCALE, { sensitivity: 'base' }) || a.value.localeCompare(b.value));
+  }
+
+  // Like Home Assistant, the list leaves out the device name in front of an
+  // entity's name; the device stands in the line below. The tile title keeps
+  // the whole name.
+  function entityPickerShortName(name, device) {
+    const prefix = String(device || '').trim() + ' ';
+    if (prefix.length < 2 || name.length <= prefix.length ||
+        name.slice(0, prefix.length).toLowerCase() !== prefix.toLowerCase()) {
+      return name;
+    }
+    return name.slice(prefix.length).trim() || name;
+  }
+
+  function entityPickerFromRemote(item) {
+    const value = String(item?.v || '');
+    const name = String(item.t || '') || titleFromEntity(value) || value;
+    const entry = {
+      value,
+      name,
+      label: entityPickerShortName(name, item.d),
+      icon: normalizeMdiIconName(item.i || ''),
+      entity: value,
+      context: entityPickerContext(item.a, item.d),
+      remote: true
+    };
+    if (value) entityRemoteInfo.set(value, entry);
+    return entry;
+  }
+
+  // What the field shows for its value, also when the value is no longer in
+  // the released list (it is kept, never cleared).
+  function entityPickerEntryFor(input, value) {
+    if (!value) return null;
+    const list = input?.dataset?.entityPicker || '';
+    if (ENTITY_REMOTE_LISTS.has(list) && entityRemoteInfo.has(value)) return entityRemoteInfo.get(value);
+    const known = entityOptionsCache ? entityPickerEntries(entityOptionsCache, list).find(entry => entry.value === value) : null;
+    if (known) return known;
+    const entity = list === 'scenes' ? (sceneEntityOf(value) || value) : value;
+    return {
+      value,
+      name: sensorMetaCache.names?.[entity] || titleFromEntity(value) || value,
+      icon: normalizeMdiIconName(sensorMetaCache.icons?.[entity] || ''),
+      entity
+    };
+  }
+
+  // The chosen entity's name for an automatic tile title ('' without one).
+  function entityPickerName(input) {
+    const entry = entityPickerEntryFor(input, input?.value || '');
+    return entry ? entry.name : '';
+  }
+
+  function entityPickerRowHtml(entry, query) {
+    const mark = text => {
+      const plain = String(text || '');
+      const words = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
+      const lower = plain.toLowerCase();
+      const word = words.find(candidate => lower.includes(candidate));
+      if (!word) return escapeHtml(plain);
+      const at = lower.indexOf(word);
+      return escapeHtml(plain.slice(0, at)) + '<mark>' + escapeHtml(plain.slice(at, at + word.length)) + '</mark>' +
+        escapeHtml(plain.slice(at + word.length));
+    };
+    return '<span class="entity-picker-icon"><i class="mdi mdi-' +
+      escapeHtml(entry.icon || ENTITY_PICKER_FALLBACK_ICON) + '"></i></span>' +
+      '<span class="entity-picker-text"><span class="entity-picker-name">' + mark(entry.label || entry.name) + '</span>' +
+      '<span class="entity-picker-context">' + mark(entry.context || entry.entity) + '</span></span>';
+  }
+
+  function entityPickerControl(input) {
+    const next = input?.nextElementSibling;
+    return next && next.classList.contains('entity-picker') ? next : null;
+  }
+
+  // Draws the closed field of one input from its current value. An optional
+  // entity names what an empty field means (data-entity-empty, e.g. the
+  // Weather tile's own value without a sensor).
+  function renderEntityPicker(input) {
+    const control = entityPickerControl(input);
+    if (!control) return;
+    const field = control.querySelector('.entity-picker-field');
+    const clear = control.querySelector('.entity-picker-clear');
+    const entry = entityPickerEntryFor(input, input.value);
+    if (field) {
+      field.innerHTML = (entry ? entityPickerRowHtml(entry, '')
+        : '<span class="entity-picker-placeholder">' +
+          escapeHtml(input.dataset.entityEmpty || t('entityPickerChoose')) + '</span>') +
+        '<i class="mdi mdi-chevron-down entity-picker-chevron"></i>';
+    }
+    if (clear) clear.hidden = !entry;
+    if (entry && !entry.remote && input.closest?.('.tile-entity-slot')) entityPickerLookup(input);
+  }
+
+  // Adds the visible field after a hidden entity input (once per element) and
+  // keeps it in step with every later `input.value = ...`.
+  function attachEntityPicker(input) {
+    if (!input || !input.id) return;
+    let control = entityPickerControl(input);
+    if (!control) {
+      control = document.createElement('div');
+      control.className = 'entity-picker';
+      input.insertAdjacentElement('afterend', control);
+    }
+    // Clicks are delegated, so markup restored from the session cache or
+    // moved under Type keeps working and is only redrawn.
+    if (!control.querySelector('.entity-picker-field')) {
+      control.innerHTML = '<button type="button" class="entity-picker-field" id="' + escapeHtml(input.id) +
+        '_picker" aria-haspopup="listbox" aria-expanded="false"></button>' +
+        '<button type="button" class="entity-picker-clear" aria-label="' + escapeHtml(t('entityPickerClear')) +
+        '" title="' + escapeHtml(t('entityPickerClear')) + '" hidden><i class="mdi mdi-close"></i></button>';
+    }
+    if (entityPickerNativeValue && !Object.prototype.hasOwnProperty.call(input, 'value')) {
+      Object.defineProperty(input, 'value', {
+        configurable: true,
+        get() { return entityPickerNativeValue.get.call(this); },
+        set(value) {
+          entityPickerNativeValue.set.call(this, value);
+          renderEntityPicker(this);
+        }
+      });
+    }
+    renderEntityPicker(input);
+  }
+
+  function setupEntityPickers(root) {
+    (root || document).querySelectorAll?.('input[data-entity-picker]').forEach(attachEntityPicker);
+  }
+
+  // Redraws the fields of one tile tab (or all) once fresh names arrived.
+  function refreshEntityPickers(tab) {
+    const selector = tab ? 'input[data-entity-picker][id^="' + tab + '_"]' : 'input[data-entity-picker]';
+    document.querySelectorAll(selector).forEach(renderEntityPicker);
+    if (typeof refreshTileIconButtons === 'function') refreshTileIconButtons(tab);
+    if (entityPickerOpen && entityPickerOpen.state !== 'ready') loadEntityPickerEntries();
+  }
+
+  // ---- Bridge search ----
+
+  // One search through the panel, from match `offset` on; null without a
+  // Bridge that searches or when a newer search replaced it (the panel keeps
+  // the newest only).
+  async function entityRemoteSearch(list, query, generation, offset) {
+    const params = new URLSearchParams({ q: query, list });
+    if (offset) params.set('o', String(offset));
+    const begin = await fetch('api/entity_search', { method: 'POST', body: params });
+    if (!begin.ok) throw new Error('Entity search HTTP ' + begin.status);
+    const started = await begin.json();
+    if (!started.bridge) {
+      entityRemoteSupported = false;
+      return null;
+    }
+    // A list this Bridge does not search yet (energy below search level 3):
+    // the panel's own list stays, the other lists keep searching.
+    if (started.list === false) return null;
+    const deadline = Date.now() + ENTITY_REMOTE_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, ENTITY_REMOTE_POLL_MS));
+      if (generation !== entityRemoteGeneration) return null;
+      const poll = await fetch('api/entity_search?id=' + encodeURIComponent(started.id));
+      if (!poll.ok) throw new Error('Entity search HTTP ' + poll.status);
+      const answer = await poll.json();
+      if (answer.ready) return answer;
+    }
+    throw new Error('Entity search timeout');
+  }
+
+  // Merges one page of the Bridge's answer into the open list.
+  function entityPickerApplyRemote(open, answer, append) {
+    const entries = append ? open.entries : [];
+    const seen = new Set(entries.map(entry => entry.value));
+    const page = (Array.isArray(answer.r) ? answer.r : []).map(entityPickerFromRemote);
+    const fresh = page.filter(entry => entry.value && !seen.has(entry.value) && seen.add(entry.value));
+    open.offset = (append ? open.offset : 0) + page.length;
+    open.full = !!answer.full;
+    // A Bridge without pages repeats its first one, which ends the list.
+    open.more = !!answer.more && fresh.length > 0;
+    // Panel entities the Bridge does not search (display, local relays)
+    // follow the last page.
+    const own = open.more ? [] :
+      open.local.filter(entry => !seen.has(entry.value) && entityPickerMatchesQuery(entry, open.query));
+    open.entries = entries.concat(fresh, own);
+    open.remote = 'ready';
+  }
+
+  function entityPickerRemoteSearch(open) {
+    const list = open.input.dataset.entityPicker;
+    if (!entityRemoteSupported || !ENTITY_REMOTE_LISTS.has(list)) return;
+    const generation = ++entityRemoteGeneration;
+    // A list opened from the remembered first page keeps its place when the
+    // fresh one arrives.
+    const shown = open.remote === 'ready';
+    open.remote = 'loading';
+    open.paging = false;
+    entityRemoteSearch(list, open.query, generation, 0)
+      .then(answer => {
+        if (entityPickerOpen !== open || generation !== entityRemoteGeneration) return;
+        if (!answer) {
+          open.remote = null;
+        } else {
+          if (!open.query) entityRemoteFirstPages.set(list, answer);
+          entityPickerApplyRemote(open, answer, false);
+          if (!open.query && !shown) {
+            open.active = entityPickerRowOf(open.input.value);
+          }
+          renderEntityPicker(open.input);
+        }
+        renderEntityPickerList(shown);
+      })
+      .catch(() => {
+        if (entityPickerOpen !== open || generation !== entityRemoteGeneration) return;
+        // A remembered page stays; without one the panel's own list shows.
+        open.remote = open.entries.length ? 'ready' : null;
+        renderEntityPickerList(shown);
+      });
+  }
+
+  // The next page of the Bridge's matches once the list nears its end.
+  function entityPickerRemoteMore(open) {
+    if (!open || open.remote !== 'ready' || !open.more || open.paging) return;
+    open.paging = true;
+    const generation = entityRemoteGeneration;
+    entityRemoteSearch(open.input.dataset.entityPicker, open.query, generation, open.offset)
+      .then(answer => {
+        if (entityPickerOpen !== open || generation !== entityRemoteGeneration) return;
+        open.paging = false;
+        if (answer) entityPickerApplyRemote(open, answer, true);
+        else open.more = false;
+        renderEntityPickerList(true);
+      })
+      .catch(() => {
+        if (entityPickerOpen !== open || generation !== entityRemoteGeneration) return;
+        open.paging = false;
+        open.more = false;
+        renderEntityPickerList(true);
+      });
+  }
+
+  function entityPickerNearEnd(list) {
+    if (list.scrollHeight - list.scrollTop - list.clientHeight < 120) entityPickerRemoteMore(entityPickerOpen);
+  }
+
+  // Requests ahead of an opening run one after another, since the panel
+  // keeps only its newest search; an open list's own search cancels them.
+  function entityRemoteInBackground(job) {
+    entityRemoteQueue = entityRemoteQueue.then(job).catch(() => {});
+  }
+
+  // Closed fields of these Bridge entities show their area and device.
+  function entityPickerShowRemote(items) {
+    const values = new Set(items.map(item => entityPickerFromRemote(item).value));
+    document.querySelectorAll('input[data-entity-picker]').forEach(input => {
+      if (values.has(input.value)) renderEntityPicker(input);
+    });
+    if (typeof refreshTileIconButtons === 'function') refreshTileIconButtons();
+  }
+
+  // The shown tile's entity field: the first page of its list arrives ahead
+  // of the opening, then area and device of its own entity.
+  function entityPickerWarm(input) {
+    const list = input?.dataset?.entityPicker || '';
+    if (!entityRemoteSupported || !ENTITY_REMOTE_LISTS.has(list)) return;
+    if (!entityRemoteFirstPages.has(list) && !entityRemoteFetching.has(list)) {
+      entityRemoteFetching.add(list);
+      entityRemoteInBackground(async () => {
+        try {
+          if (entityPickerOpen) return;
+          const answer = await entityRemoteSearch(list, '', ++entityRemoteGeneration, 0);
+          if (!answer) return;
+          entityRemoteFirstPages.set(list, answer);
+          entityPickerShowRemote(Array.isArray(answer.r) ? answer.r : []);
+        } finally {
+          entityRemoteFetching.delete(list);
+        }
+      });
+    }
+    entityPickerLookup(input);
+  }
+
+  // A closed field learns area and device of its entity from the Bridge,
+  // once per entity; the first page often has it already.
+  function entityPickerLookup(input) {
+    const list = input?.dataset?.entityPicker || '';
+    const value = input?.value || '';
+    if (!value || !entityRemoteSupported || !ENTITY_REMOTE_LISTS.has(list) || entityRemoteAsked.has(value)) {
+      return;
+    }
+    entityRemoteAsked.add(value);
+    entityRemoteInBackground(async () => {
+      if (entityRemoteInfo.has(value)) return;
+      if (entityPickerOpen) {
+        entityRemoteAsked.delete(value);
+        return;
+      }
+      const answer = await entityRemoteSearch(list, value, ++entityRemoteGeneration, 0);
+      const item = answer && (answer.r || []).find(entry => entry.v === value);
+      if (item) entityPickerShowRemote([item]);
+    });
+  }
+
+  // ---- Tile adoption and placement ----
+
+  // The tile tab of a tile's own entity field (it sits in the entity slot
+  // under Type); '' for other entity fields such as the icon color source.
+  function entityPickerTileTab(input) {
+    const slot = input?.closest?.('.tile-entity-slot');
+    return slot ? slot.id.replace(/_tile_entity_slot$/, '') : '';
+  }
+
+  // A tile takes the name, icon and icon color of every entity chosen for it
+  // from the list, also the one it already has; they stay editable until an
+  // entity is chosen again.
+  function adoptEntityPickerEntry(tab, entry) {
+    const title = document.getElementById(tab + '_tile_title');
+    if (title) title.value = normalizeTileTitle(entry.name);
+    // An empty icon is the entity's own icon, also its state icons.
+    const icon = document.getElementById(tab + '_tile_icon');
+    if (icon) icon.value = '';
+    if (typeof setIconColorInput === 'function') setIconColorInput(tab, '');
+  }
+
+  function chooseEntityPickerValue(input, value, entry) {
+    if (!input) return;
+    const tab = entry ? entityPickerTileTab(input) : '';
+    if (input.value === value && !tab) return;
+    input.value = value;
+    if (tab) adoptEntityPickerEntry(tab, entry);
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  // The entity of the shown tile type sits right under Type, outside the
+  // scrolling settings body, so it never needs scrolling to; it returns to
+  // the start of its own type fields when another type is shown.
+  function placeTileEntityField(tab) {
+    const slot = document.getElementById(tab + '_tile_entity_slot');
+    if (!slot) return;
+    const parts = input => [
+      document.querySelector('label[for="' + input.id + '_picker"]'), input, entityPickerControl(input)
+    ].filter(Boolean);
+    for (const input of slot.querySelectorAll('input[data-entity-picker]')) {
+      document.getElementById(input.dataset.entityHome || '')?.prepend(...parts(input));
+    }
+    const fields = document.querySelector('#' + tab + 'Settings .type-fields.show');
+    const input = fields?.querySelector(':scope > input[data-entity-picker]');
+    if (!input) return;
+    input.dataset.entityHome = fields.id;
+    slot.append(...parts(input));
+    entityPickerWarm(input);
+  }
+
+  // ---- Recently chosen ----
+
+  function entityRecentRead() {
+    try {
+      const data = JSON.parse(window.localStorage.getItem(ENTITY_RECENT_KEY) || '{}');
+      return data && typeof data === 'object' ? data : {};
+    } catch (error) {
+      return {};
+    }
+  }
+
+  function entityRecentNote(list, value) {
+    if (!list || !value) return;
+    const data = entityRecentRead();
+    const items = data[list] && typeof data[list] === 'object' ? data[list] : {};
+    const previous = Array.isArray(items[value]) ? items[value] : [0, 0];
+    items[value] = [Number(previous[0]) + 1 || 1, Date.now()];
+    data[list] = Object.fromEntries(Object.entries(items)
+      .filter(([, item]) => Array.isArray(item))
+      .sort((a, b) => Number(b[1][1]) - Number(a[1][1]))
+      .slice(0, ENTITY_RECENT_KEEP));
+    try {
+      window.localStorage.setItem(ENTITY_RECENT_KEY, JSON.stringify(data));
+    } catch (error) {
+      // Without storage the list simply shows no recent group.
+    }
+  }
+
+  // The list's chosen entities: chosen often and lately first.
+  function entityRecentValues(list) {
+    const items = entityRecentRead()[list];
+    if (!items || typeof items !== 'object') return [];
+    const now = Date.now();
+    const score = item => (Number(item[0]) || 0) *
+      Math.pow(0.5, Math.max(0, now - (Number(item[1]) || 0)) / ENTITY_RECENT_HALF_LIFE_MS);
+    return Object.entries(items)
+      .filter(([, item]) => Array.isArray(item))
+      .sort((a, b) => score(b[1]) - score(a[1]) || Number(b[1][1]) - Number(a[1][1]))
+      .map(([value]) => value);
+  }
+
+  // ---- Open list ----
+
+  function entityPickerMatchesQuery(entry, query) {
+    const words = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
+    const text = (entry.name + ' ' + entry.value + ' ' + entry.entity + ' ' + (entry.context || '')).toLowerCase();
+    return words.every(word => text.includes(word));
+  }
+
+  // The Bridge's answer is already filtered; while a new one is on its way
+  // the previous one filters here, and the panel's own list without a Bridge.
+  function entityPickerMatches() {
+    const open = entityPickerOpen;
+    if (open.remote === 'ready') return open.entries;
+    if (open.remote === 'loading' && open.entries.length) {
+      return open.entries.filter(entry => entityPickerMatchesQuery(entry, open.query));
+    }
+    return open.local.filter(entry => entityPickerMatchesQuery(entry, open.query));
+  }
+
+  // The open list sorted by the switch (#79): Recent (the entities chosen in
+  // this browser often and lately) or Favorites (the panel's own entities,
+  // released for it in the Bridge, and the ones its tiles use) on top, then
+  // a line and every other entity the Bridge finds; All without a group on
+  // top. A search filters both parts. rows.split: the rows above the line.
+  function entityPickerView() {
+    const open = entityPickerOpen;
+    const matches = entityPickerMatches();
+    if (open.tab === 'all') return Object.assign(matches.slice(), { split: 0 });
+    // The Bridge's row has area and device; the panel's own row only the name.
+    const richer = entry => entityRemoteInfo.get(entry.value) || entry;
+    const own = new Map(open.local.map(entry => [entry.value, entry]));
+    const group = open.tab === 'recent'
+      ? entityRecentValues(open.input.dataset.entityPicker)
+        .map(value => entityRemoteInfo.get(value) || open.entries.find(entry => entry.value === value) ||
+          (own.has(value) ? richer(own.get(value)) : null))
+        .filter(Boolean).slice(0, ENTITY_RECENT_SHOWN)
+      : open.local.map(richer);
+    const top = group.filter(entry => entityPickerMatchesQuery(entry, open.query));
+    const above = new Set(top.map(entry => entry.value));
+    // Below the line the Bridge's list follows once it is there.
+    const rest = entityPickerBelowWaits() ? [] : matches.filter(entry => !above.has(entry.value));
+    return Object.assign(top.concat(rest), { split: top.length });
+  }
+
+  // The Bridge's list is on its way and nothing of it is there yet.
+  function entityPickerBelowWaits() {
+    const open = entityPickerOpen;
+    return open.remote === 'loading' && !open.entries.length;
+  }
+
+  // The row of `value` in the open list, 0 without it.
+  function entityPickerRowOf(value) {
+    return Math.max(0, entityPickerView().findIndex(entry => entry.value === value));
+  }
+
+  function renderEntityPickerTabs() {
+    const tabs = entityPickerPopover?.querySelector('.entity-picker-tabs');
+    const open = entityPickerOpen;
+    if (!tabs || !open) return;
+    tabs.innerHTML = ENTITY_PICKER_TABS.map(([tab, icon, label]) =>
+      '<button type="button" class="icon-picker-choice entity-picker-tab' + (open.tab === tab ? ' selected' : '') +
+      '" role="tab" aria-selected="' + (open.tab === tab ? 'true' : 'false') + '" data-tab="' + tab + '">' +
+      '<span class="entity-picker-icon"><i class="mdi mdi-' + icon + '"></i></span>' +
+      '<span class="entity-picker-text"><span class="entity-picker-name">' + escapeHtml(t(label)) +
+      '</span></span></button>').join('');
+  }
+
+  function renderEntityPickerList(keepScroll) {
+    const open = entityPickerOpen;
+    const list = entityPickerPopover?.querySelector('.entity-picker-list');
+    const foot = entityPickerPopover?.querySelector('.entity-picker-foot');
+    if (!open || !list) return;
+    renderEntityPickerTabs();
+    // All waits for the Bridge; Recent and Favorites show their rows at once.
+    const all = open.tab === 'all';
+    // Without a Web Admin password the Bridge finds only released entities.
+    if (foot) foot.hidden = !(open.remote === 'ready' && !open.full);
+    // Nothing of the Bridge's list is there yet: the list waits at full size
+    // instead of showing the panel's short list first and then growing.
+    const waiting = all && entityPickerBelowWaits();
+    entityPickerPopover.classList.toggle('waiting', waiting);
+    if (waiting || (open.state === 'loading' && (!all || open.remote !== 'ready'))) {
+      list.innerHTML = '<div class="entity-picker-loading">' + '<div></div>'.repeat(6) + '</div>';
+      return;
+    }
+    if (open.state === 'failed' && (!all || open.remote !== 'ready')) {
+      list.innerHTML = '<div class="entity-picker-state"><i class="mdi mdi-lan-disconnect"></i>' +
+        escapeHtml(t('entityPickerLoadFailed')) +
+        '<button type="button" class="btn entity-picker-retry">' + escapeHtml(t('entityPickerRetry')) + '</button></div>';
+      return;
+    }
+    const rows = entityPickerView();
+    open.active = Math.max(0, Math.min(open.active, rows.length - 1));
+    const loadingBelow = entityPickerBelowWaits();
+    if (!rows.length && loadingBelow) {
+      list.innerHTML = '<div class="entity-picker-loading">' + '<div></div>'.repeat(6) + '</div>';
+      return;
+    }
+    if (!rows.length) {
+      list.innerHTML = '<div class="entity-picker-state">' + escapeHtml(open.query
+        ? tf('entityPickerNoMatch', { query: open.query }) : t('entityPickerNone')) + '</div>';
+      return;
+    }
+    const current = open.input.value;
+    const line = '<div class="entity-picker-divider" role="separator"></div>';
+    list.innerHTML = rows.map((entry, index) => {
+      const kind = entityKindLabel(entry.entity);
+      return (index && index === rows.split ? line : '') +
+        '<div class="entity-picker-item' + (index === open.active ? ' active' : '') +
+        (entry.value === current ? ' selected' : '') + '" role="option" aria-selected="' +
+        (entry.value === current ? 'true' : 'false') + '" data-index="' + index + '">' +
+        entityPickerRowHtml(entry, open.query) +
+        (kind ? '<span class="entity-picker-kind">' + escapeHtml(kind) + '</span>' : '') + '</div>';
+    }).join('') + (loadingBelow ? line + '<div class="entity-picker-loading"><div></div><div></div></div>' : '') +
+      (open.remote === 'ready' && open.more
+        ? '<div class="entity-picker-loading entity-picker-more"><div></div></div>' : '');
+    if (!keepScroll) list.querySelector('.entity-picker-item.active')?.scrollIntoView({ block: 'nearest' });
+    // A short first page loads the next one right away.
+    if (open.remote === 'ready' && open.more) entityPickerNearEnd(list);
+  }
+
+  function loadEntityPickerEntries(force) {
+    const open = entityPickerOpen;
+    if (!open) return;
+    const apply = data => {
+      open.local = entityPickerEntries(data, open.input.dataset.entityPicker);
+      open.state = 'ready';
+      // Without own entities the list opens on All.
+      if (!open.local.length && !open.tabChosen) open.tab = 'all';
+      // Without a search the list starts at the chosen entity.
+      if (!open.query && open.remote !== 'ready') {
+        open.active = entityPickerRowOf(open.input.value);
+      }
+      renderEntityPickerList();
+    };
+    if (entityOptionsCache && !force) {
+      apply(entityOptionsCache);
+    } else {
+      open.state = 'loading';
+      renderEntityPickerList();
+    }
+    fetchEntityOptions(!!force)
+      .then(data => {
+        if (entityPickerOpen !== open) return;
+        apply(data);
+        renderEntityPicker(open.input);
+      })
+      .catch(() => {
+        if (entityPickerOpen !== open || open.state === 'ready') return;
+        open.state = 'failed';
+        renderEntityPickerList();
+      });
+  }
+
+  function placeEntityPickerPopover() {
+    const open = entityPickerOpen;
+    const field = open && entityPickerControl(open.input)?.querySelector('.entity-picker-field');
+    if (!field || !entityPickerPopover) return;
+    const pop = entityPickerPopover;
+    const viewportW = window.innerWidth;
+    const viewportH = window.innerHeight;
+    if (viewportW <= 560) {
+      // Phones: a sheet at the bottom edge.
+      pop.classList.add('sheet');
+      pop.style.left = pop.style.top = pop.style.width = pop.style.maxHeight = '';
+      return;
+    }
+    pop.classList.remove('sheet');
+    const rect = field.getBoundingClientRect();
+    const width = Math.min(Math.max(rect.width, 340), viewportW - 16);
+    const below = viewportH - rect.bottom - 12;
+    const above = rect.top - 12;
+    const up = below < 280 && above > below;
+    const height = Math.min(440, Math.max(160, up ? above : below));
+    // Wider than its field: open from the field's right edge when the list
+    // would leave the settings card on the right (user 2026-10-09).
+    const card = field.closest('.tile-settings')?.getBoundingClientRect();
+    let left = rect.left;
+    if (card && left + width > card.right) left = Math.max(card.left, rect.right - width);
+    pop.style.width = width + 'px';
+    pop.style.left = Math.max(8, Math.min(left, viewportW - width - 8)) + 'px';
+    pop.style.maxHeight = height + 'px';
+    pop.style.top = (up ? Math.max(8, rect.top - 6 - Math.min(height, pop.offsetHeight || height))
+      : rect.bottom + 6) + 'px';
+  }
+
+  function openEntityPicker(input) {
+    if (!input) return;
+    closeEntityPicker(false);
+    if (typeof closeIconPicker === 'function') closeIconPicker(false);
+    if (!entityPickerPopover) {
+      entityPickerPopover = document.createElement('div');
+      entityPickerPopover.className = 'entity-picker-popover';
+      entityPickerPopover.innerHTML = '<div class="entity-picker-search"><i class="mdi mdi-magnify"></i>' +
+        '<input type="search" autocomplete="off" spellcheck="false"></div>' +
+        '<div class="entity-picker-tabs" role="tablist"></div>' +
+        '<div class="entity-picker-list" role="listbox"></div>' +
+        '<div class="entity-picker-foot" hidden><i class="mdi mdi-lock-outline"></i><span></span>' +
+        '<button type="button" class="entity-picker-password"></button></div>';
+      document.body.appendChild(entityPickerPopover);
+    }
+    const search = entityPickerPopover.querySelector('input');
+    search.value = '';
+    search.placeholder = t('entityPickerSearch');
+    entityPickerPopover.querySelector('.entity-picker-foot span').textContent = t('entityPickerReleased');
+    entityPickerPopover.querySelector('.entity-picker-password').textContent = t('webAuthSet');
+    entityPickerOpen = { input, local: [], entries: [], query: '', active: 0, state: 'loading',
+      remote: null, full: false, more: false, offset: 0, paging: false, tab: 'favorites', tabChosen: false };
+    const field = entityPickerControl(input)?.querySelector('.entity-picker-field');
+    field?.classList.add('open');
+    field?.setAttribute('aria-expanded', 'true');
+    entityPickerPopover.classList.add('open');
+    loadEntityPickerEntries(false);
+    // The remembered first page shows at once; the Bridge's fresh one follows.
+    const remembered = entityRemoteSupported && entityRemoteFirstPages.get(input.dataset.entityPicker);
+    if (remembered) {
+      entityPickerApplyRemote(entityPickerOpen, remembered, false);
+      entityPickerOpen.active = entityPickerRowOf(input.value);
+    }
+    entityPickerRemoteSearch(entityPickerOpen);
+    // Drawn once the Bridge search is under way, so the panel's short list
+    // never shows first.
+    renderEntityPickerList();
+    placeEntityPickerPopover();
+    search.focus();
+  }
+
+  function closeEntityPicker(focusField) {
+    const open = entityPickerOpen;
+    if (!open) return;
+    entityPickerOpen = null;
+    window.clearTimeout(entityRemoteTimer);
+    entityPickerPopover?.classList.remove('open');
+    const field = entityPickerControl(open.input)?.querySelector('.entity-picker-field');
+    field?.classList.remove('open');
+    field?.setAttribute('aria-expanded', 'false');
+    if (focusField) field?.focus();
+  }
+
+  function pickEntityPickerIndex(index) {
+    const open = entityPickerOpen;
+    const entry = open ? entityPickerView()[index] : null;
+    if (!entry) return;
+    closeEntityPicker(true);
+    entityRecentNote(open.input.dataset.entityPicker, entry.value);
+    chooseEntityPickerValue(open.input, entry.value, entry);
+  }
+
+  document.addEventListener('click', event => {
+    const target = event.target;
+    const control = target?.closest?.('.entity-picker');
+    if (control) {
+      const input = control.previousElementSibling;
+      if (target.closest('.entity-picker-clear')) {
+        closeEntityPicker(false);
+        chooseEntityPickerValue(input, '');
+        control.querySelector('.entity-picker-field')?.focus();
+      } else if (target.closest('.entity-picker-field')) {
+        if (entityPickerOpen?.input === input) closeEntityPicker(true);
+        else openEntityPicker(input);
+      }
+      return;
+    }
+    if (!entityPickerOpen) return;
+    if (!target?.closest?.('.entity-picker-popover')) {
+      closeEntityPicker(false);
+      return;
+    }
+    const tab = target.closest('.entity-picker-tab');
+    if (tab) {
+      // Another switch: its list from its start, or at the chosen entity.
+      entityPickerOpen.tab = tab.dataset.tab;
+      entityPickerOpen.tabChosen = true;
+      entityPickerOpen.active = entityPickerRowOf(entityPickerOpen.input.value);
+      renderEntityPickerList();
+      const list = entityPickerPopover.querySelector('.entity-picker-list');
+      if (list && !list.querySelector('.entity-picker-item.active.selected')) list.scrollTop = 0;
+      entityPickerPopover.querySelector('.entity-picker-search input')?.focus();
+      return;
+    }
+    const item = target.closest('.entity-picker-item');
+    if (item) {
+      pickEntityPickerIndex(Number(item.dataset.index));
+    } else if (target.closest('.entity-picker-retry')) {
+      loadEntityPickerEntries(true);
+    } else if (target.closest('.entity-picker-password')) {
+      // The Web Admin password row (Settings > System).
+      closeEntityPicker(false);
+      if (typeof openSettingsPage === 'function') openSettingsPage('system', 'web_auth_section');
+    }
+  });
+
+  document.addEventListener('input', event => {
+    const open = entityPickerOpen;
+    if (!open || !event.target?.closest?.('.entity-picker-search')) return;
+    open.query = event.target.value;
+    open.active = 0;
+    if (open.remote) {
+      // The own list right away, the Bridge's answer after a short pause; a
+      // page of the previous search in flight is dropped.
+      open.remote = 'loading';
+      entityRemoteGeneration++;
+      window.clearTimeout(entityRemoteTimer);
+      entityRemoteTimer = window.setTimeout(() => entityPickerRemoteSearch(open), ENTITY_REMOTE_DELAY_MS);
+    }
+    renderEntityPickerList();
+  });
+
+  document.addEventListener('keydown', event => {
+    if (!entityPickerOpen || !event.target?.closest?.('.entity-picker-search')) return;
+    const count = entityPickerView().length;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (!count) return;
+      const step = event.key === 'ArrowDown' ? 1 : -1;
+      entityPickerOpen.active = (entityPickerOpen.active + step + count) % count;
+      renderEntityPickerList();
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      pickEntityPickerIndex(entityPickerOpen.active);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      closeEntityPicker(true);
+    } else if (event.key === 'Tab') {
+      closeEntityPicker(false);
+    }
+  });
+
+  // The open list follows its field once per frame while the page scrolls or
+  // the window is resized; scrolling the list itself moves nothing.
+  const placeEntityPickerSoon = perFrame(placeEntityPickerPopover);
+  window.addEventListener('resize', perFrame(placeEntityPickerPopover));
+  document.addEventListener('scroll', event => {
+    if (!entityPickerOpen) return;
+    if (event.target?.classList?.contains('entity-picker-list')) entityPickerNearEnd(event.target);
+    else if (!event.target?.closest?.('.entity-picker-popover')) placeEntityPickerSoon();
+  }, true);
+
+  // Tile tabs arrive later (folder fragments, session cache): attach the
+  // fields of every inserted entity input.
+  document.addEventListener('DOMContentLoaded', () => {
+    setupEntityPickers(document);
+    if (typeof MutationObserver !== 'function') return;
+    new MutationObserver(records => {
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          if (node.nodeType !== 1) continue;
+          if (node.matches?.('input[data-entity-picker]')) attachEntityPicker(node);
+          else if (node.querySelector?.('input[data-entity-picker]')) setupEntityPickers(node);
+        }
+      }
+    }).observe(document.body, { childList: true, subtree: true });
+  });

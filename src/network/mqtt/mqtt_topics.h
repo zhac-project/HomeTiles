@@ -39,6 +39,24 @@ enum class TopicKey : uint8_t {
   // Built-in camera snapshots (exact camera profiles only subscribe).
   LOCAL_CAMERA_CMND,
   LOCAL_CAMERA_STAT,
+  // The Bridge's answers to Lock and Alarm commands.
+  LOCK_STAT,
+  ALARM_STAT,
+  // Speaker playback (exact speaker profiles only subscribe).
+  AUDIO_CMND,
+  AUDIO_STAT,
+  // Assist microphone capture (exact speaker profiles with a mic only).
+  ASSIST_CMND,
+  ASSIST_STAT,
+  ASSIST_AUDIO_STAT,
+  // On-panel wake word detections (wake word profiles only publish).
+  ASSIST_WAKE_STAT,
+  // Home Assistant's theme and rotation selects (capabilities
+  // display_theme, display_rotation).
+  DISPLAY_THEME_CMND,
+  DISPLAY_THEME_STAT,
+  DISPLAY_ROTATION_CMND,
+  DISPLAY_ROTATION_STAT,
   COUNT
 };
 

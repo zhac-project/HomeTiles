@@ -7467,6 +7467,12 @@ static const IconMapping iconMap[] PROGMEM = {
 
 static const size_t ICON_COUNT = sizeof(iconMap) / sizeof(iconMap[0]);
 
+size_t mdiIconCount() { return ICON_COUNT; }
+
+const char* mdiIconName(size_t index) {
+  return index < ICON_COUNT ? static_cast<const char*>(pgm_read_ptr(&iconMap[index].name)) : "";
+}
+
 // Binary search over iconMap, sorted by name.
 static int32_t findIconIndex(const char* name) {
   if (!name || !*name) return -1;
@@ -7544,9 +7550,13 @@ uint32_t getMdiCodepoint(const String& iconName) {
     return codepoint;
   }
 
-  // Fall back to the question-mark icon.
   // Serial.printf("[MDI] Icon '%s' not found, using fallback\n", searchName.c_str());
-  return 0xF02D8;
+  return mdiUnknownIconCodepoint();
+}
+
+uint32_t mdiUnknownIconCodepoint() {
+  static const int32_t index = findIconIndex("hexagon");
+  return index >= 0 ? pgm_read_dword(&iconMap[index].codepoint) : 0;
 }
 
 // Return the UTF-8 icon text for lv_label_set_text.

@@ -88,7 +88,9 @@ for (const text of [
     throw new Error(`Central Climate state translation is missing: ${text}`);
   }
 }
-if (!tileRenderer.includes('if (!state.available) return 0x9E9E9E;')) {
+// Unavailable stays neutral: the dark theme's inactive grey, the light theme's
+// fainter unavailable grey (user 2026-10-10).
+if (!tileRenderer.includes('if (!state.available) return ui_theme::light() ? ui_theme::icon_unavailable() : ui_theme::icon_inactive();')) {
   throw new Error('Unavailable Climate tile color is no longer neutral');
 }
 

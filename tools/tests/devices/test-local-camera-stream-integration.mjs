@@ -78,7 +78,7 @@ assert.match(up('setEndpoint'), /strcmp\(g_endpoint\.session, endpoint\.session\
 assert.match(up('runConnection'), /if \(g_generation\.load\(\) != generation\) \{\s*end = ConnectionEnd::Reconnect;/);
 // A snapshot while the stream owns the pipeline (or storage work holds the
 // camera off) is answered as busy.
-assert.match(svc('handleMqttMessage'), /g_capture_busy\.load\(\) \|\|\s*g_stream_running\.load\(\) \|\| g_stream_wanted\.load\(\) \|\|\s*storageHoldActive\(\)\) \{[\s\S]*?code = ErrorCode::Busy;/);
+assert.match(svc('handleCommandPayload'), /g_capture_busy\.load\(\) \|\|\s*g_stream_running\.load\(\) \|\| g_stream_wanted\.load\(\) \|\|\s*storageHoldActive\(\)\) \{[\s\S]*?code = ErrorCode::Busy;/);
 assert.match(svc('streamWait'), /publishErrorReply\(g_pending\.id, ErrorCode::Busy\);/);
 
 // --- Mode changes reconnect within the same session -----------------------------------
@@ -103,7 +103,7 @@ assert.match(up('ensureSlots'), /heap_caps_malloc\(kSlotBytes, MALLOC_CAP_SPIRAM
 assert.match(upload, /constexpr uint32_t kSlotBytes = kMaxFrameBytes;/);
 assert.match(contract, /constexpr uint32_t kMaxFrameBytes = local_camera_contract::kPanelMaxJpegBytes;/);
 // No scale buffer: the stream encodes the CSI frame, so only the full image works.
-assert.match(svc('applyStreamSettings'), /if \(settings\.width != kImageWidth \|\| settings\.height != kImageHeight\) return false;/);
+assert.match(svc('applyStreamSettings'), /if \(settings\.width != imageWidthSent\(\) \|\| settings\.height != imageHeightSent\(\)\) return false;/);
 assert.doesNotMatch(service, /freeStreamScale|run\.scale/, 'No stream scale buffer remains');
 // Stop order: sender, then sensor/CSI, then buffers.
 const run = svc('runStream');
@@ -131,16 +131,29 @@ assert.doesNotMatch(captureFrame, /downscale2x2Rgb565|compactCenterCrop|std::rev
 assert.doesNotMatch(service, /ppa_do_scale_rotate_mirror|turnFrame|g_pipe\.turned/, 'No PPA turn on the panel');
 assert.match(service, /static_assert\(kMode\.frame_width == kMode\.image_width &&\s*kMode\.frame_height == kMode\.image_height,/);
 // Quarter turn: 4:2:0 so the Bridge's lossless turn keeps a common format.
-assert.match(service, /constexpr jpeg_down_sampling_type_t kJpegSubsampling =\s*kQuarterTurn \? JPEG_DOWN_SAMPLING_YUV420 : JPEG_DOWN_SAMPLING_YUV422;/);
-assert.equal((service.match(/config\.sub_sample = kJpegSubsampling;/g) || []).length, 2, 'Snapshot and stream');
+// 4:2:0 whenever the Bridge turns (the mounting or the upright layout).
+assert.match(service, /return statusRotate\(\) != 0 \? JPEG_DOWN_SAMPLING_YUV420 : JPEG_DOWN_SAMPLING_YUV422;/);
+assert.equal((service.match(/config\.sub_sample = jpegSubsampling\(\);/g) || []).length, 2, 'Snapshot and stream');
+// The window follows the Bridge's turn (user 2026-10-08, drawn): the
+// upright strip while the Bridge turns, the whole image otherwise, relative to
+// the board's default window; applied at a capture or stream start; a
+// rotation change ends a stream with the other window (the keepalive starts
+// it again).
+assert.match(service, /constexpr bool kDefaultIsStrip = kMode\.frame_height > kMode\.frame_width;/);
+assert.match(service, /bool windowWanted\(\) \{ return \(statusRotate\(\) != 0\) != kDefaultIsStrip; \}/);
+assert.match(service, /return sensor\.loadDefaultMode\(kMode\.mirror, turned\);/);
+assert.match(service, /const bool turned = windowWanted\(\);\s*err = loadSensorMode\(g_sensor, turned\);/);
+assert.match(svc('runStream'), /if \(!ensureSensor\(true\) \|\| !ensureSensorWindow\(\)\) \{/);
+assert.match(service, /if \(!ensureSensorWindow\(\)\) \{\s*\*detail = Detail::SensorInitFailed;/);
+assert.match(service, /if \(g_stream_running\.load\(\) && windowWanted\(\) != windowTurned\(\)\) g_stream_wanted\.store\(false\);/);
 assert.doesNotMatch(service, /config\.sub_sample = JPEG_DOWN_SAMPLING/);
 // The announced turn follows the mounting and the user rotation at runtime
 // (tools/tests/web/test-local-camera-rotation.mjs covers the combinations).
-assert.match(svc('statusRotate'), /statusRotateDegrees\(\s*imageTurn\(false, local_camera_board::kMode\.quarter_turn, g_rotation\.load\(\)\)\)/);
+assert.match(svc('statusRotate'), /statusRotateDegrees\(imageTurn\(false, local_camera_board::kMode\.quarter_turn,\s*static_cast<uint8_t>\(userTurns\(\) \+ displayQuarterTurns\(\)\)\)\)/);
 assert.match(svc('currentStatusFields'), /fields\.rotate = statusRotate\(\);/);
 // ISP statistics run on the frame as delivered.
-assert.match(svc('createAutoExposure'), /config\.window\.btm_right\.x = kStatsLeft \+ kStatsWidth;/);
-assert.match(service, /constexpr uint32_t kStatsWidth = kMode\.frame_width \/ 5 \* 5;/);
+assert.match(svc('createAutoExposure'), /config\.window\.btm_right\.x = statsLeft\(\) \+ statsWidth\(\);/);
+assert.match(service, /uint32_t statsWidth\(\) \{ return frameWidth\(\) \/ 5 \* 5; \}/);
 // No frames (b28 on the 8-inch: after a quick stop/start every retry saw no
 // frame until the 30 s idle release): the run ends and the whole camera path
 // is rebuilt, the snapshot path likewise.
@@ -159,7 +172,7 @@ assert.match(run, /applyOrientation\(false\)[\s\S]*?esp_cam_ctlr_start\([\s\S]*?
 assert.match(run, /applyImageSettingsIfChanged\(\);\s*\/\/[^\n]*\n\s*if \(!applyOrientation\(true\)\) \{\s*reason = StopReason::Error;/,
   'A rotation or mirror change during the stream turns the sensor readout');
 const orientation = svc('applyOrientation');
-assert.match(orientation, /const ImageTurn turn = imageTurn\(imageRotated180\(\), kQuarterTurn, g_rotation\.load\(\)\);\s*const SensorOrientation wanted =\s*desiredOrientation\(turn\.rotated_180, g_mirror\.load\(\), turn\.quarter_turn\);/);
+assert.match(orientation, /const ImageTurn turn = imageTurn\(imageRotated180\(\), kQuarterTurn,\s*static_cast<uint8_t>\(userTurns\(\) \+ displayQuarterTurns\(\)\)\);\s*const SensorOrientation wanted =\s*desiredOrientation\(turn\.rotated_180, g_mirror\.load\(\), turn\.quarter_turn\);/);
 assert.match(orientation, /if \(code == g_applied_orientation\) return true;/, 'No SCCB write per frame');
 assert.match(orientation, /xQueueReset\(g_isr\.frames\);[\s\S]*?kOrientationSettleFrames/,
   'Frames in flight during a live change are dropped');
@@ -191,7 +204,7 @@ assert.match(svc('applyGainLimit'), /if \(g_exposure\.gain_x16 > limits\.sensor_
 assert.match(svc('captureJpeg'), /stages\.max_total_gain_x16 = kMode\.max_total_gain_x16;\s*applyGainLimit\(stages\);/);
 assert.match(svc('applyStreamSettings'), /run\.stages\.max_total_gain_x16 = kMode\.max_total_gain_x16;\s*applyGainLimit\(run\.stages\);/);
 assert.match(svc('streamAutoTune'), /run\.last_tune_ms = now_ms;\s*\/\/[^\n]*\n\s*applyGainLimit\(run\.stages\);/);
-assert.match(svc('stepDigitalGain'), /sensor_at_brighter_limit, g_max_digital_step\);/);
+assert.match(svc('stepDigitalGain'), /sensor_at_brighter_limit, g_max_digital_step, max_jump\);/);
 assert.match(service, /if \(g_digital_step > currentGainLimits\(\)\.max_digital_step\) \{\s*g_digital_step = currentGainLimits\(\)\.max_digital_step;\s*\}\s*err = loadGammaCurve\(image\.contrast, g_digital_step\);/,
   'A new pipeline starts inside the limit');
 assert.match(run, /if \(run\.pacer\.consume\(now_us\)\) \+\+run\.window\.late;/);

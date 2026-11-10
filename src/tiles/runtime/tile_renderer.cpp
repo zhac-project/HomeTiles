@@ -1,28 +1,45 @@
+#include "src/types/camera/picture.h"
 #include "src/types/media/artwork_scale.h"
 #include "src/types/media/artwork_payload.h"
 #include "src/types/media/content_layout.h"
 #include "src/types/media/update_schedule.h"
 #include "src/types/media/update_service.h"
+#include "src/types/media/media_position.h"
+#include "src/types/media/renderer.h"
+#include "src/types/media/state_icon.h"
 #include "src/tiles/runtime/tile_renderer.h"
 #include "src/core/json_scan.h"
 #include "src/network/bridge/ha_bridge_config.h"
+#include "src/network/bridge/bridge_images.h"
+#include "src/network/network_manager.h"
 #include "src/network/mqtt/mqtt_handlers.h"
 #include "src/tiles/config/tile_config.h"
 #include "src/tiles/icons/mdi_icons.h"
 #include "src/types/climate/visuals.h"
+#include "src/types/weather/weather_icons.h"
+#include "src/ui/shared/theme_schedule.h"
+#include "src/ui/shared/value_unit.h"
+#include "src/types/weather/tile_layout.h"
+#include "src/types/weather/weather_sensors.h"
 #include "src/types/climate/renderer.h"
 #include "src/types/binary_sensor/renderer.h"
+#include "src/types/switch/renderer.h"
 #include "src/ui/ui_manager.h"
 #include "src/ui/popups/light/light_popup.h"
 #include "src/ui/popups/sensor/sensor_popup.h"
+#include "src/types/sensor/look_view.h"
 #include "src/ui/popups/media/media_popup.h"
 #include "src/ui/popups/climate/climate_popup.h"
 #include "src/types/types_registry.h"
 #include "src/tiles/runtime/tile_renderer_fonts.h"
 #include "src/tiles/runtime/tile_renderer_shared.h"
+#include "src/core/diagnostics/tile_frame_probe.h"
+#include "src/core/memory/psram_static.h"
 #include "src/tiles/runtime/tile_icon_disc.h"
 #include "src/tiles/runtime/tile_icon_color_rules.h"
 #include "src/tiles/runtime/tile_icon_source.h"
+#include "src/tiles/config/tile_icon_colors.h"
+#include "src/types/media/cover_color.h"
 #include "src/core/config/config_manager.h"
 #include "src/core/display/dma2d_arbiter.h"
 #include "src/core/i18n/i18n.h"
@@ -30,6 +47,7 @@
 #include "src/web/server/web_admin.h"
 #include "src/ui/screensaver/screensaver_config.h"
 #include "src/ui/shared/ui_surface_style.h"
+#include "src/ui/shared/rounded_corners.h"
 #include <Arduino.h>
 #include <HTTPClient.h>
 #include <Network.h>
@@ -50,12 +68,14 @@
 #include <math.h>
 #include <new>
 #include <stdlib.h>
+#include <sys/time.h>
 #include <time.h>
 #include <vector>
 
 // LVGL 9.5 no longer exports lv_image_cache_drop() through lvgl.h;
 // its declaration is only in the instance header.
 #include <misc/cache/instance/lv_image_cache.h>
+#include "src/ui/shared/ui_theme.h"
 
 /* === Layout constants === */
 
@@ -349,6 +369,8 @@ static void clear_sensor_widgets(GridType grid_type) {
     target[i].gauge_max = 100;
     target[i].chart = nullptr;
     target[i].series = nullptr;
+    target[i].look = nullptr;
+    target[i].editable_hash = 0;
   }
 }
 
@@ -382,7 +404,7 @@ static void clear_switch_widgets(GridType grid_type) {
   for (size_t i = 0; i < TILES_PER_GRID; ++i) {
     target[i].icon_label = nullptr;
     target[i].title_label = nullptr;
-    target[i].switch_obj = nullptr;
+    target[i].view = nullptr;
     state_target[i] = {};
   }
 }
@@ -463,19 +485,6 @@ void reset_weather_widgets(GridType grid_type) {
   clear_weather_widgets(grid_type);
 }
 
-// Drop only the cached payload hashes, keeping the widget pointers intact.
-// Used when a grid is restored from a folder cache: the widgets are reused, so
-// without this the hash short-circuit in update_weather_tile_state() would skip
-// re-applying the cached payload and the tile could stay blank ("--").
-void tile_renderer_invalidate_weather_payload(GridType grid_type) {
-  WeatherTileWidgets* target = g_tab0_weather;
-  if (grid_type == GridType::TAB1) target = g_tab1_weather;
-  else if (grid_type == GridType::TAB2) target = g_tab2_weather;
-  for (size_t i = 0; i < TILES_PER_GRID; ++i) {
-    target[i].last_payload_hash = 0;
-  }
-}
-
 static void clear_media_widgets(GridType grid_type) {
   MediaTileWidgets* target = tile_renderer_get_media_widgets(grid_type);
   for (size_t i = 0; i < TILES_PER_GRID; ++i) {
@@ -554,8 +563,13 @@ struct SensorUpdate {
   bool valid;
 };
 
-static const uint8_t QUEUE_SIZE = 32;
-static SensorUpdate g_update_queue[QUEUE_SIZE];
+// A full-grid cache application queues every Sensor tile of a grid at once
+// (35 on the 7x5 layouts); the queue must hold that without dropping.
+static constexpr uint8_t QUEUE_SIZE =
+    TILES_PER_GRID + 8 > 32 ? static_cast<uint8_t>(TILES_PER_GRID + 8) : 32;
+// In PSRAM, not in internal RAM: the S3 draw band gets what internal RAM
+// leaves above its reserve (psram_static.h).
+static SensorUpdate (&g_update_queue)[QUEUE_SIZE] = psram_static_array<SensorUpdate, QUEUE_SIZE>();
 
 // Keep byte-sized queue cursors together to avoid padding before each aligned
 // queue array. Array declarations and construction order remain unchanged.
@@ -571,6 +585,7 @@ static volatile uint8_t g_media_head = 0;
 static volatile uint8_t g_media_tail = 0;
 
 static uint32_t g_queue_overflow_count = 0;
+static volatile bool g_queue_overflowed = false;
 
 static uint8_t get_sensor_decimals(GridType grid_type, uint8_t grid_index) {
   if (grid_index >= TILES_PER_GRID) return 0xFF;
@@ -636,13 +651,13 @@ bool is_light_entity_id(const String& entity_id) {
   return entity_id.length() >= 6 && entity_id.startsWith("light.");
 }
 
-static int32_t map_gauge_arc_value(float numeric, int32_t min_value, int32_t max_value) {
+static int32_t map_gauge_arc_value(float numeric, float min_value, float max_value) {
   if (max_value <= min_value) {
     min_value = 0;
     max_value = 100;
   }
-  const float span = static_cast<float>(max_value - min_value);
-  float ratio = (numeric - static_cast<float>(min_value)) / span;
+  const float span = max_value - min_value;
+  float ratio = (numeric - min_value) / span;
   if (ratio < 0.0f) ratio = 0.0f;
   if (ratio > 1.0f) ratio = 1.0f;
   return static_cast<int32_t>(roundf(ratio * static_cast<float>(GAUGE_ARC_STEPS)));
@@ -675,6 +690,9 @@ void queue_sensor_tile_update(GridType grid_type, uint8_t grid_index, const char
     if ((g_queue_overflow_count++ % 10) == 0) {
       Serial.println("[Queue] FULL! Oldest sensor update will be overwritten");
     }
+    // The entity cache already holds the overwritten value; the visible grid
+    // is repaired from it (tiles_process_visible_cache_refresh()).
+    g_queue_overflowed = true;
     g_queue_tail = (g_queue_tail + 1) % QUEUE_SIZE;
   }
 
@@ -685,6 +703,12 @@ void queue_sensor_tile_update(GridType grid_type, uint8_t grid_index, const char
   g_update_queue[g_queue_head].valid = true;
 
   g_queue_head = next_head;
+}
+
+bool tile_renderer_take_sensor_queue_overflow() {
+  if (!g_queue_overflowed) return false;
+  g_queue_overflowed = false;
+  return true;
 }
 
 // The main loop calls this BEFORE lv_timer_handler().
@@ -721,7 +745,10 @@ static_assert(TILES_PER_GRID <= 64,
               "Switch update masks require at most 64 tile slots");
 
 static const uint8_t SWITCH_QUEUE_SIZE = 32;
-static SwitchUpdate g_switch_queue[SWITCH_QUEUE_SIZE];
+// In PSRAM, not in internal RAM: the S3 draw band gets what internal RAM
+// leaves above its reserve (psram_static.h).
+static SwitchUpdate (&g_switch_queue)[SWITCH_QUEUE_SIZE] =
+    psram_static_array<SwitchUpdate, SWITCH_QUEUE_SIZE>();
 static uint32_t g_switch_overflow_count = 0;
 
 static void invalidate_queued_switch_slot(GridType grid_type,
@@ -982,13 +1009,7 @@ static String format_weather_temp_value(float temp) {
       configManager.getConfig().language, temp, 1, true);
 }
 
-static const char* weather_unit_gap() {
-#if defined(DEVICE_LAYOUT_1024X600)
-  return " ";
-#else
-  return "\xE2\x80\x89";
-#endif
-}
+static const char* weather_unit_gap() { return weather_tile::unit_gap(); }
 
 static String format_weather_temp_unit(const String& unit) {
   return String(weather_unit_gap()) + (unit.length() ? unit : String("\xC2\xB0\x43"));
@@ -1014,17 +1035,9 @@ static void position_tile_value_unit_centered(
   if (x < 0) x = 0;
   if (x + total_w > wrap_w) x = wrap_w - total_w;
   lv_obj_set_pos(val_label, x, y);
-#if defined(DEVICE_LAYOUT_1024X600)
-  const lv_coord_t unit_y_offset = 0;
-#elif defined(DEVICE_LAYOUT_480X480)
-  // The compact unit font must share the value's top edge. A baseline-style
-  // offset makes the value/unit pair look low and no longer centered below
-  // the day icon.
-  const lv_coord_t unit_y_offset = 0;
-#else
-  const lv_coord_t unit_y_offset = 5;
-#endif
-  lv_obj_set_pos(unit_label, x + val_w, y + unit_y_offset);
+  // The compact unit fonts share the value's top edge; a baseline-style
+  // offset made the 480x480 pair look low below the day icon.
+  lv_obj_set_pos(unit_label, x + val_w, y + weather_tile::kUnitYOffset);
 }
 
 static void decode_basic_json_escapes(String& text) {
@@ -1187,8 +1200,10 @@ static String weekday_from_iso(const String& iso) {
   return String(kDaysDe[dow]);
 }
 
+// The short "today" like the popup's buttons (French "Auj."): the day's
+// texts set how many days fit (weather_forecast_text_width()).
 static const char* weather_today_tile_label() {
-  return i18n::weather_today_label(configManager.getConfig().language);
+  return i18n::weather_today_button_label(configManager.getConfig().language);
 }
 
 static bool get_local_today_date(String& date_out) {
@@ -1276,10 +1291,6 @@ static bool is_color_mode(const String& mode) {
          mode == "rgbww";
 }
 
-static bool is_switch_widget_style(const Tile& tile) {
-  return tile.sensor_decimals == 1;
-}
-
 static LightPopupInit build_popup_init_from_state(
     GridType grid_type,
     uint8_t tile_index,
@@ -1297,7 +1308,7 @@ static LightPopupInit build_popup_init_from_state(
   init.icon_name = icon_name;
   init.is_light = is_light_entity_id(tile.sensor_entity);
   init.available = state.available;
-  init.keep_icon_white = is_switch_widget_style(tile);
+  init.keep_icon_white = false;
   init.has_tile_ref = true;
   init.tile_grid = static_cast<uint8_t>(grid_type);
   init.tile_index = tile_index;
@@ -1450,6 +1461,8 @@ static SwitchState parse_switch_payload(const char* payload) {
       if (normalized_state == "unavailable") {
         state_unavailable = true;
         out.available = false;
+      } else if (normalized_state == "unknown") {
+        out.unknown = true;
       } else {
         out.has_state = parse_on_off(state, out.is_on);
       }
@@ -1732,11 +1745,12 @@ static bool switch_tile_visual_state_equal(const SwitchState& left,
          left.supports_brightness == right.supports_brightness &&
          left.supports_temperature == right.supports_temperature &&
          left.supported_modes_known == right.supported_modes_known &&
-         left.supported_onoff_only == right.supported_onoff_only;
+         left.supported_onoff_only == right.supported_onoff_only &&
+         left.unknown == right.unknown;
 }
 
 static bool switch_state_has_update(const SwitchState& state) {
-  return !state.available || state.has_state || state.has_color ||
+  return !state.available || state.has_state || state.unknown || state.has_color ||
          state.has_brightness || state.has_color_temp || state.supports_color ||
          state.supports_brightness || state.supports_temperature;
 }
@@ -1744,12 +1758,19 @@ static bool switch_state_has_update(const SwitchState& state) {
 // The Switch tile's icon color for a state: the light color (or the Kelvin
 // color of CCT-only lights, else amber) while on, grey while off or
 // unavailable.
-static uint32_t switch_state_icon_color(const SwitchState& state) {
-  if (!state.available || (state.has_state && !state.is_on)) return 0xB0B0B0;
+uint32_t switch_state_icon_color(const SwitchState& state) {
+  if (!state.available) return ui_theme::icon_unavailable();
+  if (state.has_state && !state.is_on) return ui_theme::icon_off();
+  uint32_t rgb = state.has_color ? state.color : 0xFFD54F;
   if (state.supports_temperature && !state.supports_color && state.has_color_temp) {
-    return lv_color_to_u32(light_color_from_temperature_kelvin(state.color_temp_kelvin)) & 0xFFFFFF;
+    rgb = lv_color_to_u32(light_color_from_temperature_kelvin(state.color_temp_kelvin)) & 0xFFFFFF;
   }
-  return state.has_color ? state.color : 0xFFD54F;
+  // A light's color as Home Assistant shows it, the same on the tile and in
+  // its popup, white light in its light grey (tone_color::ha_light_color):
+  // the light theme since 2026-10-10 ("genau so wie in HA"), the dark theme
+  // since 2026-10-26 (#130: below 40 % saturation raised to 40 %, so 4400 K
+  // fills like 4000 K).
+  return tone_color::ha_light_color(rgb);
 }
 
 bool switch_payload_icon_color(const char* payload, uint32_t& rgb, bool* active) {
@@ -1810,7 +1831,6 @@ static void apply_switch_tile_state(GridType grid_type, uint8_t grid_index,
   const Tile& tile = *tile_ptr;
   const String& entity_id = tile.sensor_entity;
   const bool is_light_entity = is_light_entity_id(entity_id);
-  const bool use_switch_widget = is_switch_widget_style(tile);
   if (is_light_entity) {
     if (state.supported_modes_known && state.supported_onoff_only) {
       state.supports_color = false;
@@ -1819,11 +1839,18 @@ static void apply_switch_tile_state(GridType grid_type, uint8_t grid_index,
     }
   }
 
-  // Brightness-only state echoes do not alter the visible tile. This matters
+  // Brightness-only state echoes do not alter an icon button. This matters
   // when the same entity is present several times: keep every state cache and
   // the bound popup current, but do not invalidate every duplicate tile.
+  // Header layouts show the brightness in their state line and dimmer.
+  SwitchTileWidgets& widgets = target[grid_index];
+  // State colors follow the tile's surface (tile_surface, tile_icon_disc.h).
+  const ui_theme::SurfaceScope surface = tile_surface::scope(widgets.icon_label ? widgets.icon_label : widgets.title_label);
+  const bool shows_level = widgets.view != nullptr;
   const bool tile_visual_unchanged =
-      switch_tile_visual_state_equal(prev, state);
+      switch_tile_visual_state_equal(prev, state) &&
+      (!shows_level || (prev.has_brightness == state.has_brightness &&
+                        (!state.has_brightness || prev.brightness_pct == state.brightness_pct)));
   state_target[grid_index] = state;
 
   if (tile.sensor_entity.length()) {
@@ -1831,53 +1858,18 @@ static void apply_switch_tile_state(GridType grid_type, uint8_t grid_index,
     update_light_popup(init);
   }
   if (tile_visual_unchanged) return;
+  if (!widgets.icon_label && !widgets.title_label && !widgets.view) return;
 
-  SwitchTileWidgets& widgets = target[grid_index];
-  if (!widgets.icon_label && !widgets.title_label && !widgets.switch_obj) return;
-
-  static const uint32_t kIconOff = 0xB0B0B0;
-  static const uint32_t kIconNeutral = 0xFFFFFF;
-  static const uint32_t kSwitchOff = 0xFFFFFF;
-  static const uint32_t kSwitchOn = 0x3B82F6;
-
-  const bool control_unavailable = !state.available;
   // CCT-only lights use the same Kelvin color as the popup instead of the
-  // fixed yellow default used for simple on/off lights.
-  const uint32_t icon_color = switch_state_icon_color(state);
-
-  uint32_t label_color =
-      control_unavailable
-          ? kIconOff
-          : (use_switch_widget ? kIconNeutral : icon_color);
-  lv_color_t lv_color = lv_color_hex(label_color);
-  if (widgets.icon_label) {
-    tile_icon_disc::set_icon_color(widgets.icon_label, lv_color);
-  } else if (widgets.title_label) {
-    lv_obj_set_style_text_color(widgets.title_label, lv_color, 0);
+  // fixed yellow default used for simple on/off lights. A held tile colors
+  // its icon for its own on/off, like its bar.
+  SwitchState shown = state;
+  bool held_on = false;
+  if (state.available && switch_tile_held_on(widgets, held_on)) {
+    shown.has_state = true;
+    shown.is_on = held_on;
   }
-
-  if (widgets.switch_obj) {
-    if (control_unavailable) {
-      lv_obj_remove_state(widgets.switch_obj, LV_STATE_CHECKED);
-      lv_obj_add_state(widgets.switch_obj, LV_STATE_DISABLED);
-    } else if (!state.has_state || state.is_on) {
-      lv_obj_add_state(widgets.switch_obj, LV_STATE_CHECKED);
-      lv_obj_clear_state(widgets.switch_obj, LV_STATE_DISABLED);
-    } else {
-      lv_obj_remove_state(widgets.switch_obj, LV_STATE_CHECKED);
-      lv_obj_clear_state(widgets.switch_obj, LV_STATE_DISABLED);
-    }
-    uint32_t tile_color = tileBgColorOrDefault(tile, tileDefaultBgColor());
-    lv_obj_set_style_bg_color(widgets.switch_obj, lv_color_hex(tile_color), LV_PART_KNOB);
-    lv_obj_set_style_bg_color(
-        widgets.switch_obj,
-        lv_color_hex(use_switch_widget ? kSwitchOff : kIconOff),
-        LV_PART_INDICATOR | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_color(
-        widgets.switch_obj,
-        lv_color_hex(use_switch_widget ? kSwitchOn : icon_color),
-        LV_PART_INDICATOR | LV_STATE_CHECKED);
-  }
+  switch_tile_show_state(widgets, tile, state, switch_state_icon_color(shown));
 }
 
 void update_switch_tile_state(GridType grid_type, uint8_t grid_index,
@@ -2354,7 +2346,8 @@ String climate_visual_icon(
 }
 
 uint32_t climate_visual_color(const ClimateState& state) {
-  if (!state.available) return 0x9E9E9E;
+  // Unavailable: the light theme's faint grey, the dark theme's inactive one.
+  if (!state.available) return ui_theme::light() ? ui_theme::icon_unavailable() : ui_theme::icon_inactive();
   return climate_visuals::state_foreground_color(
       state.hvac_mode, state.hvac_action);
 }
@@ -2424,6 +2417,8 @@ static void update_climate_tile_state(
   ClimateState* states = tile_renderer_get_climate_states(grid_type);
   if (!states) return;
   ClimateTileWidgets& widget = widgets[grid_index];
+  // State colors follow the tile's surface (tile_surface, tile_icon_disc.h).
+  const ui_theme::SurfaceScope surface = tile_surface::scope(widget.icon_label ? widget.icon_label : widget.value_label);
 
   const uint32_t payload_hash = fnv1a_hash(payload);
   if (widget.last_payload_hash == payload_hash) {
@@ -2445,18 +2440,19 @@ static void update_climate_tile_state(
       kept_optimistic_target ? 0 : payload_hash;
 
   if (widget.value_label) {
-    String value = state.has_current_temperature
-                       ? i18n::format_number(
-                             configManager.getConfig().language,
-                             state.current_temperature,
-                             1)
-                       : String("--");
-    value += " ";
-    value += state.temperature_unit[0]
-                 ? state.temperature_unit
-                 : "\xC2\xB0"
-                   "C";
-    lv_label_set_text(widget.value_label, value.c_str());
+    // The unit a step smaller after the number (value_unit.h).
+    const String value = state.has_current_temperature
+                             ? i18n::format_number(
+                                   configManager.getConfig().language,
+                                   state.current_temperature,
+                                   1)
+                             : String("--");
+    value_unit::show(widget.value_label, value,
+                     state.has_current_temperature
+                         ? String(state.temperature_unit[0] ? state.temperature_unit
+                                                            : "\xC2\xB0"
+                                                              "C")
+                         : String());
   }
   refresh_climate_tile_content(grid_type, grid_index, state);
   if (widget.icon_label) {
@@ -2467,7 +2463,7 @@ static void update_climate_tile_state(
           tile ? climate_tile_base_icon(*tile) : String("thermostat");
       String icon = getMdiChar(climate_visual_icon(state, base_icon));
       if (!icon.length()) icon = getMdiChar("thermostat");
-      lv_label_set_text(widget.icon_label, icon.c_str());
+      tile_rule_icon::set_glyph(widget.icon_label, icon.c_str());
     }
     tile_icon_disc::set_icon_color(
         widget.icon_label, lv_color_hex(climate_visual_color(state)));
@@ -2564,8 +2560,30 @@ static void update_weather_tile_state(GridType grid_type, uint8_t grid_index, co
   if (!widgets.icon_label && !widgets.temp_label && !widgets.condition_label && !widgets.location_label) {
     return;
   }
+  // State colors follow the tile's surface (tile_surface, tile_icon_disc.h).
+  const ui_theme::SurfaceScope surface = tile_surface::scope(widgets.icon_label ? widgets.icon_label : widgets.temp_label);
 
-  uint32_t payload_hash = fnv1a_hash(payload);
+  // The tile of the grid these widgets belong to: a hidden folder being built
+  // (tile_renderer_set_build_grid) has its own sizes, so its forecast count
+  // and condition room are its own, not those of the shown folder's tile at
+  // the same index.
+  const Tile* tile_ptr = tile_renderer_get_tile_config(grid_type, grid_index);
+  if (!tile_ptr) return;
+  const Tile& tile = *tile_ptr;
+  // The temperature/humidity sensors (weather_sensors.h) count as part of
+  // the state, so a sensor change re-renders an unchanged weather payload.
+  // So do today's date and day or night: the forecast's day names and the
+  // night icons change with them under the same payload. With all of them
+  // in the hash a restored folder keeps its weather as drawn (V2 b597: the
+  // full re-render on every turn to Home).
+  String today_date;
+  const bool has_today = get_local_today_date(today_date);
+  weather_icons::SunTimes sun;
+  weather_icons::parse_sun(payload, sun);
+  const bool night = weather_icons::night_now(sun);
+  const uint32_t payload_hash = weather_sensors::mix_hash(
+      tile.weather_temperature_sensor, tile.weather_humidity_sensor,
+      fnv1a_hash(payload) ^ (fnv1a_hash(today_date.c_str()) * 31U) ^ (night ? 0x9E3779B9U : 0U));
   if (widgets.last_payload_hash == payload_hash) {
     return;
   }
@@ -2585,6 +2603,12 @@ static void update_weather_tile_state(GridType grid_type, uint8_t grid_index, co
   if (!icon_name.length() && condition.length()) {
     icon_name = weather_icon_from_condition(condition);
   }
+  // Home Assistant reports partly cloudy and sunny at night too; the bridge
+  // sun times switch them to their night icons.
+  theme_schedule::note_sun(sun);
+  icon_name = weather_icons::for_now(icon_name, sun);
+
+  const bool colored_icons = weatherColoredIcons(tile);
 
   float temperature = 0.0f;
   bool has_temp = extract_json_number_or_string_field(json, "temperature", temperature);
@@ -2597,13 +2621,26 @@ static void update_weather_tile_state(GridType grid_type, uint8_t grid_index, co
     extract_json_string_field(json, "temperature_unit", unit);
   }
   decode_basic_json_escapes(unit);
+  weather_sensors::apply_temperature(tile.weather_temperature_sensor, unit, temperature, has_temp);
 
   if (widgets.icon_label) {
     // The icon disc follows the icon; an empty disc never shows.
     if (icon_name.length()) {
-      String iconChar = getMdiChar(icon_name);
+      // A rule's icon color draws the layers in that color; otherwise the
+      // icon carries its weather color, which Tile color "From icon" and the
+      // icon disc follow.
+      lv_color_t forced;
+      const bool icon_forced = tile_icon_disc::forced_color(widgets.icon_label, forced);
+      String iconChar = weather_icons::text(
+          icon_name, !colored_icons ? weather_icons::Style::Outline
+                     : icon_forced  ? weather_icons::Style::Single
+                                    : weather_icons::Style::Colored);
       if (iconChar.length()) {
         lv_label_set_text(widgets.icon_label, iconChar.c_str());
+        if (colored_icons) {
+          const uint32_t tint = weather_icons::tint(icon_name);
+          tile_icon_disc::set_icon_color(widgets.icon_label, lv_color_hex(tint ? tint : ui_theme::text()));
+        }
         tile_icon_disc::set_icon_hidden(widgets.icon_label, false);
       } else {
         tile_icon_disc::set_icon_hidden(widgets.icon_label, true);
@@ -2615,12 +2652,11 @@ static void update_weather_tile_state(GridType grid_type, uint8_t grid_index, co
 
   String condition_text = weather_condition_display_label(condition);
 
-  const TileGridConfig& grid = tileConfig.getActiveGrid();
-  const Tile& tile = grid.tiles[grid_index];
   const bool has_condition_text = condition_text.length() && condition_text != "--";
   const lv_coord_t card_w = tile_geometry::extent(
       tile.col, tile.span_w < 1 ? 1.0f : tile.span_w, GRID_CELL_W, GRID_GAP);
-  const String temp_text = has_temp ? format_weather_temp(temperature, unit) : String("--");
+  String temp_text = has_temp ? format_weather_temp(temperature, unit) : String("--");
+  weather_sensors::append_humidity(tile.weather_humidity_sensor, temp_text);
   bool show_condition = weather_shows_condition(tile.span_w) && has_condition_text;
   if (show_condition && widgets.condition_label && widgets.temp_label) {
     // The condition takes the room left beside the temperature. Below two
@@ -2639,32 +2675,30 @@ static void update_weather_tile_state(GridType grid_type, uint8_t grid_index, co
     lv_text_get_size(&condition_size, condition_text.c_str(),
                      lv_obj_get_style_text_font(widgets.condition_label, LV_PART_MAIN),
                      0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
-    if (tile.span_w < 2.0f ? condition_size.x > room : room < tile_layout::scale(60)) {
+    if (weather_condition_narrow(card_w) ? condition_size.x > room : room < tile_layout::scale(60)) {
       show_condition = false;
     } else {
       lv_obj_set_style_max_width(widgets.condition_label, room, 0);
     }
   }
-  const uint8_t forecast_limit = weather_shows_forecast(tile.span_h)
-      ? weather_forecast_count(tile.span_w, card_w,
-                               tile_geometry::extent(tile.col, tile.span_w + 0.5f,
-                                                     GRID_CELL_W, GRID_GAP))
-      : 0;
-  String today_date;
-  const bool has_today = get_local_today_date(today_date);
+  const lv_coord_t card_h = tile_geometry::extent(
+      tile.row, tile.span_h < 1 ? 1.0f : tile.span_h, GRID_CELL_H, GRID_GAP);
+  const uint8_t forecast_limit = weather_shows_forecast(card_h) ? weather_forecast_count(card_w) : 0;
 
   if (widgets.temp_label) {
-    if (!show_condition) {
-      lv_label_set_text(widgets.temp_label, temp_text.c_str());
-    } else if (!widgets.condition_label) {
+    // The temperature's unit a step smaller after it (value_unit.h); with
+    // the humidity behind it the line keeps one size for both units.
+    const bool own_unit = !tile.weather_humidity_sensor.length();
+    if (!show_condition || widgets.condition_label) {
+      if (own_unit) value_unit::show_text(widgets.temp_label, temp_text);
+      else value_unit::show(widgets.temp_label, temp_text, String());
+    } else {
       String combined = temp_text;
       if (condition_text.length() && condition_text != "--") {
         combined += " ";
         combined += condition_text;
       }
-      lv_label_set_text(widgets.temp_label, combined.c_str());
-    } else {
-      lv_label_set_text(widgets.temp_label, temp_text.c_str());
+      value_unit::show(widgets.temp_label, combined, String());
     }
     lv_obj_clear_flag(widgets.temp_label, LV_OBJ_FLAG_HIDDEN);
   }
@@ -2680,7 +2714,7 @@ static void update_weather_tile_state(GridType grid_type, uint8_t grid_index, co
   }
 
   if (widgets.condition_sep_label) {
-    if (show_condition && has_temp) {
+    if (show_condition && temp_text != "--") {
       lv_label_set_text(widgets.condition_sep_label, "|");
       lv_obj_clear_flag(widgets.condition_sep_label, LV_OBJ_FLAG_HIDDEN);
     } else {
@@ -2789,7 +2823,7 @@ static void update_weather_tile_state(GridType grid_type, uint8_t grid_index, co
     }
   }
 
-  const lv_color_t forecast_active_color = lv_color_white();
+  const lv_color_t forecast_active_color = lv_color_hex(ui_theme::text());
   const lv_color_t forecast_inactive_color = lv_color_hex(0x7F8BAA);
   for (uint8_t i = 0; i < forecast_limit; ++i) {
     WeatherForecastWidgets& fw = widgets.forecast[i];
@@ -2821,7 +2855,8 @@ static void update_weather_tile_state(GridType grid_type, uint8_t grid_index, co
     }
     if (fw.icon_label) {
       if (slot.has_data && slot.icon_name.length()) {
-        String icon_char = getMdiChar(slot.icon_name);
+        String icon_char = weather_icons::text(
+            slot.icon_name, colored_icons ? weather_icons::Style::Colored : weather_icons::Style::Outline);
         if (icon_char.length()) {
           lv_label_set_text(fw.icon_label, icon_char.c_str());
           lv_obj_set_style_text_color(fw.icon_label, forecast_active_color, 0);
@@ -2836,10 +2871,8 @@ static void update_weather_tile_state(GridType grid_type, uint8_t grid_index, co
       }
     }
     if (fw.temp_high_label) {
-      constexpr lv_coord_t kTileForecastTempTop =
-          tile_layout::scale(52 + 54);
-      constexpr lv_coord_t kTileForecastLowTop =
-          kTileForecastTempTop + tile_layout::scale(30);
+      constexpr lv_coord_t kTileForecastTempTop = weather_tile::kForecastTempTop;
+      constexpr lv_coord_t kTileForecastLowTop = weather_tile::kForecastLowTop;
       constexpr lv_coord_t kTileColContentW =
           WEATHER_FORECAST_COL_W -
           (2 * tile_layout::scale_480(20));
@@ -2941,7 +2974,9 @@ struct MediaUpdate {
 };
 
 static const uint8_t MEDIA_QUEUE_SIZE = 24;
-static MediaUpdate g_media_queue[MEDIA_QUEUE_SIZE];
+// In PSRAM, not in internal RAM: the S3 draw band gets what internal RAM
+// leaves above its reserve (psram_static.h).
+static MediaUpdate (&g_media_queue)[MEDIA_QUEUE_SIZE] = psram_static_array<MediaUpdate, MEDIA_QUEUE_SIZE>();
 static uint32_t g_media_overflow_count = 0;
 
 static String media_first_non_empty(const String& a,
@@ -2964,6 +2999,10 @@ static String media_empty_title_label(String state) {
   state.trim();
   state.toLowerCase();
   const auto& tr = i18n::strings(configManager.getConfig().language);
+  // Like Home Assistant: "Unavailable" and "Unknown", not "No playback".
+  if (state == "unavailable" || state == "unknown") {
+    return i18n::entity_state_label(configManager.getConfig().language, state);
+  }
   if (state == "playing") return tr.media_state_playing;
   if (state == "paused") return tr.media_state_paused;
   if (state == "idle") return tr.media_state_idle;
@@ -3066,15 +3105,6 @@ static String media_popup_title_for_tile(const Tile& tile) {
   return title;
 }
 
-static String media_popup_icon_for_tile(const Tile& tile) {
-  String icon_name = normalizeMdiIconName(tile.icon_name);
-  if (!icon_name.length() && tile.sensor_entity.length()) {
-    icon_name = normalizeMdiIconName(haBridgeConfig.findEntityIcon(tile.sensor_entity));
-  }
-  if (!icon_name.length()) icon_name = "television";
-  return icon_name;
-}
-
 static String media_entity_for_grid_index(GridType grid_type, uint8_t grid_index) {
   if (grid_index >= TILES_PER_GRID) return "";
   const Tile* tile = tile_renderer_get_tile_config(grid_type, grid_index);
@@ -3100,6 +3130,21 @@ const lv_image_dsc_t* tile_renderer_find_media_cover(const String& entity_id, ui
   return nullptr;
 }
 
+bool tile_renderer_media_cover_color(const String& entity_id, uint32_t& rgb) {
+  const GridType types[] = {GridType::TAB0, GridType::TAB1, GridType::TAB2, GridType::SCREENSAVER};
+  MediaTileWidgets* const grids[] = {g_tab0_media, g_tab1_media, g_tab2_media, g_screensaver_media};
+  for (size_t grid = 0; grid < 4; ++grid) {
+    if (!grids[grid]) continue;
+    for (uint8_t i = 0; i < TILES_PER_GRID; ++i) {
+      lv_obj_t* clip = grids[grid][i].cover_clip;
+      if (!clip || lv_obj_has_flag(clip, LV_OBJ_FLAG_HIDDEN)) continue;
+      if (!media_entity_for_grid_index(types[grid], i).equalsIgnoreCase(entity_id)) continue;
+      if (tile_icon_source::card_cover_color(lv_obj_get_parent(clip), rgb)) return true;
+    }
+  }
+  return false;
+}
+
 static void update_media_popup_from_widgets(GridType grid_type,
                                             uint8_t grid_index,
                                             MediaTileWidgets& widgets,
@@ -3111,11 +3156,16 @@ static void update_media_popup_from_widgets(GridType grid_type,
   if (!tile_ptr || tile_ptr->type != TILE_MEDIA ||
       !tile_ptr->sensor_entity.length()) return;
   const Tile& tile = *tile_ptr;
+  // Only an open Media popup of this entity takes the update. popup_background
+  // below also makes this tile the popup source: run on every player update,
+  // it let the next "From cover" retint recolor whatever popup was open, such
+  // as Settings after a language save (V2, 2026-10-03).
+  if (!media_popup_showing(tile.sensor_entity)) return;
 
   MediaPopupInit init;
   init.entity_id = tile.sensor_entity;
   init.title = media_popup_title_for_tile(tile);
-  init.icon_name = media_popup_icon_for_tile(tile);
+  init.icon_name = media_tile_icon_name(tile);
   init.icon_char = media_label_text(widgets.icon_label);
   init.bg_color = tile_icon_source::popup_background(widgets.icon_label,
                                                      tileBgColorOrDefault(tile, tileDefaultBgColor()));
@@ -3133,6 +3183,8 @@ static void update_media_popup_from_widgets(GridType grid_type,
   init.has_volume = widgets.has_media_volume;
   init.volume_level = widgets.media_volume_level;
   init.is_muted = widgets.media_is_muted;
+  init.available = widgets.available;
+  init.cover_centered = mediaPopupCoverCentered(tile);
   const bool cover_visible = widgets.cover_ref &&
                              widgets.cover_ref->dsc &&
                              widgets.cover_clip &&
@@ -3369,7 +3421,9 @@ static lv_image_dsc_t* make_media_cover_decoded_jpeg_hw_dsc(const uint8_t* data,
     }
   }
 
-  constexpr uint16_t kMaxCoverSide = 240;
+  // At most the Media popup's cover (bridge_images::coverEdge, V2 400): a
+  // cap of 240 made the V2 popup show a cover stretched from 240 px.
+  const uint16_t kMaxCoverSide = std::max<uint16_t>(240, bridge_images::coverEdge());
   uint16_t dst_w = static_cast<uint16_t>(info.width);
   uint16_t dst_h = static_cast<uint16_t>(info.height);
   if (dst_w > kMaxCoverSide || dst_h > kMaxCoverSide) {
@@ -3445,14 +3499,14 @@ static lv_image_dsc_t* make_media_cover_decoded_jpeg_dsc(const uint8_t* data, si
   JRESULT rc = jd_prepare(&jd, media_cover_jpeg_input, work, 4096, &ctx);
   if (rc != JDR_OK || jd.width == 0 || jd.height == 0 ||
       jd.width > UINT16_MAX || jd.height > UINT16_MAX) {
-    Serial.printf("[MediaCover] MQTT JPEG prepare failed: %d\n", static_cast<int>(rc));
+    Serial.printf("[MediaCover] JPEG prepare failed: %d\n", static_cast<int>(rc));
     free(work);
     return nullptr;
   }
 
   const size_t full_pixels = static_cast<size_t>(jd.width) * jd.height;
   if (full_pixels == 0 || full_pixels > (512U * 512U)) {
-    Serial.printf("[MediaCover] MQTT JPEG too large: %ux%u\n",
+    Serial.printf("[MediaCover] JPEG too large: %ux%u\n",
                   static_cast<unsigned>(jd.width),
                   static_cast<unsigned>(jd.height));
     free(work);
@@ -3473,7 +3527,7 @@ static lv_image_dsc_t* make_media_cover_decoded_jpeg_dsc(const uint8_t* data, si
   rc = jd_decomp(&jd, media_cover_jpeg_output, 0);
   free(work);
   if (rc != JDR_OK) {
-    Serial.printf("[MediaCover] MQTT JPEG decode failed: %d\n", static_cast<int>(rc));
+    Serial.printf("[MediaCover] JPEG decode failed: %d\n", static_cast<int>(rc));
     free(full);
     return nullptr;
   }
@@ -3482,7 +3536,9 @@ static lv_image_dsc_t* make_media_cover_decoded_jpeg_dsc(const uint8_t* data, si
   // renders the same descriptor at its smaller size. Older firmware keeps its
   // previous 160px limit, so the bridge can publish the larger JPEG without a
   // protocol/version split.
-  constexpr uint16_t kMaxCoverSide = 240;
+  // At most the Media popup's cover (bridge_images::coverEdge, V2 400): a
+  // cap of 240 made the V2 popup show a cover stretched from 240 px.
+  const uint16_t kMaxCoverSide = std::max<uint16_t>(240, bridge_images::coverEdge());
   uint16_t dst_w = ctx.w;
   uint16_t dst_h = ctx.h;
   if (dst_w > kMaxCoverSide || dst_h > kMaxCoverSide) {
@@ -3532,7 +3588,7 @@ static lv_image_dsc_t* make_media_cover_decoded_jpeg_dsc(const uint8_t* data, si
   dsc->data_size = final_bytes;
   dsc->data = reinterpret_cast<const uint8_t*>(final_pixels);
 
-  Serial.printf("[MediaCover] MQTT JPEG decoded: %ux%u -> %ux%u, %u bytes\n",
+  Serial.printf("[MediaCover] JPEG decoded: %ux%u -> %ux%u, %u bytes\n",
                 static_cast<unsigned>(ctx.w),
                 static_cast<unsigned>(ctx.h),
                 static_cast<unsigned>(dst_w),
@@ -3622,13 +3678,13 @@ static lv_image_dsc_t* make_media_cover_dsc_from_bytes(const uint8_t* data, size
   if (is_media_cover_png(data, len)) {
     lv_image_dsc_t* dsc = make_media_cover_raw_dsc(data, len);
     if (dsc) {
-      Serial.printf("[MediaCover] MQTT PNG passed to LVGL decoder: %ux%u\n",
+      Serial.printf("[MediaCover] PNG passed to LVGL decoder: %ux%u\n",
                     static_cast<unsigned>(dsc->header.w),
                     static_cast<unsigned>(dsc->header.h));
     }
     return dsc;
   }
-  Serial.printf("[MediaCover] Unknown MQTT image format: %02X %02X %02X %02X\n",
+  Serial.printf("[MediaCover] Unknown image format: %02X %02X %02X %02X\n",
                 data[0], data[1], data[2], data[3]);
   return nullptr;
 }
@@ -3655,7 +3711,7 @@ static lv_image_dsc_t* make_media_cover_dsc_from_base64(const String& encoded) {
     return nullptr;
   }
 
-  Serial.printf("[MediaCover] MQTT Cover Base64: encoded=%u decoded=%d bytes magic=%02X %02X %02X %02X\n",
+  Serial.printf("[MediaCover] Cover Base64: encoded=%u decoded=%d bytes magic=%02X %02X %02X %02X\n",
                 static_cast<unsigned>(encoded.length()),
                 decoded_len,
                 decoded[0], decoded[1], decoded[2], decoded[3]);
@@ -3861,6 +3917,27 @@ static bool media_widgets_are_visible(const MediaTileWidgets& widgets) {
          media_obj_is_visible(widgets.play_pause_label);
 }
 
+// "From cover" (icon color and tile color): reports the color of the cover a
+// Media card shows, or no color when it hides the cover. Sampled once per
+// cover change, at most 32 x 32 pixels (media/cover_color.h).
+static void report_media_cover_color(MediaTileWidgets& widgets, bool visible) {
+  lv_obj_t* card = widgets.cover_clip ? lv_obj_get_parent(widgets.cover_clip) : nullptr;
+  if (!card) return;
+  uint32_t rgb = 0;
+  bool known = false;
+  const void* src = visible && widgets.cover_image ? lv_image_get_src(widgets.cover_image) : nullptr;
+  if (src && lv_image_src_get_type(src) == LV_IMAGE_SRC_VARIABLE) {
+    const lv_image_dsc_t* dsc = static_cast<const lv_image_dsc_t*>(src);
+    const uint32_t stride = dsc->header.stride ? dsc->header.stride : dsc->header.w * 2U;
+    if (dsc->data && dsc->header.cf == LV_COLOR_FORMAT_RGB565_SWAPPED && dsc->header.w && dsc->header.h &&
+        stride >= dsc->header.w * 2U &&
+        dsc->data_size >= stride * (dsc->header.h - 1U) + dsc->header.w * 2U) {
+      known = media_cover_color::pick(dsc->data, dsc->header.w, dsc->header.h, stride, rgb);
+    }
+  }
+  tile_icon_source::set_cover_color(card, known, rgb);
+}
+
 static bool set_media_cover_visible(MediaTileWidgets& widgets, bool visible) {
   bool changed = false;
   if (widgets.cover_clip) {
@@ -3883,6 +3960,7 @@ static bool set_media_cover_visible(MediaTileWidgets& widgets, bool visible) {
       changed = true;
     }
   }
+  report_media_cover_color(widgets, visible);
   return changed;
 }
 
@@ -4182,17 +4260,30 @@ static void update_media_cover(GridType grid_type,
   queue_media_cover_request(grid_type, grid_index, ref, url, hash);
 }
 
-static bool update_media_cover_from_base64(MediaTileWidgets& widgets, const String& raw_data,
-                                         const String& source_url = String()) {
-  String encoded = raw_data;
-  encoded.trim();
-  if (!widgets.cover_image || !widgets.cover_ref || !encoded.length()) return false;
+// What a cover's pixels decode from: the Base64 text embedded in a media
+// state, or the bytes of the Bridge's picture (bridge_images.h).
+struct MediaCoverSource {
+  const String* base64 = nullptr;
+  const uint8_t* bytes = nullptr;
+  size_t length = 0;
+  const char* tag = "mqtt";      // MediaCoverRef::source_url
+  const char* label = "MQTT";    // in the log
+};
 
+static lv_image_dsc_t* decode_media_cover_source(const MediaCoverSource& source) {
+  return source.base64 ? make_media_cover_dsc_from_base64(*source.base64)
+                       : make_media_cover_dsc_from_bytes(source.bytes, source.length);
+}
+
+// Shows a cover's pixels (content hash `hash`) on a tile: unchanged pixels
+// stay, a sibling tile's pixels are copied, otherwise `source` is decoded.
+static bool show_media_cover_pixels(MediaTileWidgets& widgets, uint32_t hash,
+                                    uint32_t embedded_url_hash, const MediaCoverSource& source) {
+  if (!widgets.cover_image || !widgets.cover_ref) return false;
   MediaCoverRef* ref = widgets.cover_ref;
-  const uint32_t hash = fnv1a_hash(encoded.c_str());
   if (ref->url_hash == hash && ref->dsc) {
-    ref->source_url = "mqtt";
-    ref->embedded_url_hash = source_url.length() ? fnv1a_hash(source_url.c_str()) : 0;
+    ref->source_url = source.tag;
+    ref->embedded_url_hash = embedded_url_hash;
     ref->requested_url_hash = 0;
     ref->failed_url_hash = 0;
     ref->failed_at_ms = 0;
@@ -4226,9 +4317,9 @@ static bool update_media_cover_from_base64(MediaTileWidgets& widgets, const Stri
   }
 
   if (!adopted_from_sibling) {
-    lv_image_dsc_t* decoded_dsc = make_media_cover_dsc_from_base64(encoded);
+    lv_image_dsc_t* decoded_dsc = decode_media_cover_source(source);
     if (!decoded_dsc) {
-      Serial.println("[MediaCover] MQTT cover could not be decoded");
+      Serial.printf("[MediaCover] %s cover could not be decoded\n", source.label);
       return false;
     }
 
@@ -4255,21 +4346,80 @@ static bool update_media_cover_from_base64(MediaTileWidgets& widgets, const Stri
 
   ref->dsc = dsc;
   ref->popup_dsc = popup_dsc;
-  ref->source_url = "mqtt";
+  ref->source_url = source.tag;
   ref->url_hash = hash;
-  ref->embedded_url_hash = source_url.length() ? fnv1a_hash(source_url.c_str()) : 0;
+  ref->embedded_url_hash = embedded_url_hash;
   ref->requested_url_hash = 0;
   ref->failed_url_hash = 0;
   ref->failed_at_ms = 0;
   free_media_cover_dsc(old);
   free_media_cover_dsc(old_popup);
   if (adopted_from_sibling) {
-    Serial.println("[MediaCover] MQTT cover adopted from neighboring tile (no re-decode)");
+    Serial.printf("[MediaCover] %s cover adopted from neighboring tile (no re-decode)\n", source.label);
   } else {
-    Serial.printf("[MediaCover] MQTT cover loaded (tile scaling=%u ms)\n",
+    Serial.printf("[MediaCover] %s cover loaded (tile scaling=%u ms)\n", source.label,
                   static_cast<unsigned>(tile_scale_ms));
   }
   return true;
+}
+
+static bool update_media_cover_from_base64(MediaTileWidgets& widgets, const String& raw_data,
+                                         const String& source_url = String()) {
+  String encoded = raw_data;
+  encoded.trim();
+  if (!widgets.cover_image || !widgets.cover_ref || !encoded.length()) return false;
+  MediaCoverSource source;
+  source.base64 = &encoded;
+  return show_media_cover_pixels(widgets, fnv1a_hash(encoded.c_str()),
+                                 source_url.length() ? fnv1a_hash(source_url.c_str()) : 0, source);
+}
+
+// Panels on the direct link show the Bridge's picture of the player
+// (bridge_images.h), keyed by the state's "image_key": a picture is shown only
+// with its song; until the new song's picture arrives the tile keeps its
+// cover, as with every other replacement. An empty key clears the cover.
+static bool bridge_pictures_enabled() {
+  return networkManager.linkConfigured();
+}
+
+static void show_media_picture(MediaTileWidgets& widgets, const bridge_images::Picture& picture) {
+  MediaCoverSource source;
+  source.bytes = picture.jpeg;
+  source.length = picture.length;
+  source.tag = "image";
+  source.label = "Bridge picture";
+  show_media_cover_pixels(widgets, fnv1a_hash(picture.key), 0, source);
+}
+
+static void update_media_cover_from_picture(GridType grid_type, uint8_t grid_index,
+                                            MediaTileWidgets& widgets, const String& key) {
+  MediaCoverRef* ref = widgets.cover_ref;
+  if (!ref || !widgets.cover_image) return;
+  strlcpy(ref->image_key, key.c_str(), sizeof(ref->image_key));
+  if (!key.length()) {
+    update_media_cover(grid_type, grid_index, widgets, String());
+    return;
+  }
+  const bridge_images::Picture* picture =
+      bridge_images::find(media_entity_for_grid_index(grid_type, grid_index).c_str());
+  if (picture && strcmp(picture->key, ref->image_key) == 0) show_media_picture(widgets, *picture);
+}
+
+void tile_renderer_media_picture_arrived(const char* entity_id) {
+  const bridge_images::Picture* picture = bridge_images::find(entity_id);
+  if (!picture) return;
+  const GridType types[] = {GridType::TAB0, GridType::TAB1, GridType::TAB2, GridType::SCREENSAVER};
+  MediaTileWidgets* const grids[] = {g_tab0_media, g_tab1_media, g_tab2_media, g_screensaver_media};
+  for (size_t grid = 0; grid < 4; ++grid) {
+    if (!grids[grid]) continue;
+    for (uint8_t i = 0; i < TILES_PER_GRID; ++i) {
+      MediaTileWidgets& widgets = grids[grid][i];
+      if (!widgets.cover_ref || strcmp(widgets.cover_ref->image_key, picture->key) != 0) continue;
+      if (!media_entity_for_grid_index(types[grid], i).equalsIgnoreCase(entity_id)) continue;
+      show_media_picture(widgets, *picture);
+      update_media_popup_from_widgets(types[grid], i, widgets);
+    }
+  }
 }
 
 static void retry_failed_media_covers_for_grid(GridType grid_type, MediaTileWidgets* target) {
@@ -4314,6 +4464,9 @@ void update_media_tile_state(GridType grid_type, uint8_t grid_index, const char*
       !widgets.media_subtitle_label && !widgets.state_label) {
     return;
   }
+  // State colors follow the tile's surface (tile_surface, tile_icon_disc.h).
+  const ui_theme::SurfaceScope surface =
+      tile_surface::scope(widgets.icon_label ? widgets.icon_label : widgets.media_title_label);
 
   const char* payload_start = payload;
   while (*payload_start == ' ' || *payload_start == '\t' ||
@@ -4325,6 +4478,9 @@ void update_media_tile_state(GridType grid_type, uint8_t grid_index, const char*
   const uint32_t payload_hash = fnv1a_hash(payload_start);
   if (widgets.last_payload_hash == payload_hash) return;
   widgets.last_payload_hash = payload_hash;
+  // The fields only the Media popup shows (features, shuffle, repeat,
+  // sources, the group, artist and album), also while it is closed.
+  if (*payload_start == '{') media_popup_note_state(media_entity_for_grid_index(grid_type, grid_index), payload_start);
 
   String state;
   String title;
@@ -4339,6 +4495,7 @@ void update_media_tile_state(GridType grid_type, uint8_t grid_index, const char*
   float media_duration = 0.0f;
   bool has_media_position = false;
   bool has_media_duration = false;
+  String position_updated_at;
   bool is_muted = false;
   bool has_muted = false;
 
@@ -4357,6 +4514,7 @@ void update_media_tile_state(GridType grid_type, uint8_t grid_index, const char*
     }
     has_media_position = extract_json_number_field_cstr(payload_start, "media_position", media_position);
     has_media_duration = extract_json_number_field_cstr(payload_start, "media_duration", media_duration);
+    extract_json_string_field_cstr(payload_start, "media_position_updated_at", position_updated_at);
     has_muted = extract_json_bool_field_cstr(payload_start, "is_volume_muted", is_muted);
     if (!has_muted) {
       has_muted = extract_json_bool_field_cstr(payload_start, "muted", is_muted);
@@ -4390,10 +4548,35 @@ void update_media_tile_state(GridType grid_type, uint8_t grid_index, const char*
   widgets.has_media_volume = has_volume_level;
   widgets.media_volume_level = has_volume_level ? volume_level : 0.0f;
   if (has_muted) widgets.media_is_muted = is_muted;
+  // The position is Home Assistant's at media_position_updated_at: a state
+  // that repeats the last report (a volume change) keeps the running
+  // position; a new one counts the time since it was taken (media_position.h).
+  const bool had_position = widgets.has_media_position;
   widgets.has_media_position = has_media_position && has_media_duration && media_duration > 0.0f;
-  widgets.media_position = widgets.has_media_position ? media_position : 0.0f;
   widgets.media_duration = widgets.has_media_position ? media_duration : 0.0f;
-  widgets.media_position_received_ms = widgets.has_media_position ? millis() : 0;
+  const bool playing = state.equalsIgnoreCase("playing");
+  double position_updated = -1.0;
+  if (!media_progress::parse_utc(position_updated_at.c_str(), position_updated)) position_updated = -1.0;
+  const bool same_report = had_position && widgets.has_media_position &&
+                           media_position == widgets.media_position_reported &&
+                           position_updated == widgets.media_position_updated &&
+                           playing == widgets.media_position_playing;
+  if (!widgets.has_media_position) {
+    widgets.media_position = 0.0f;
+    widgets.media_position_received_ms = 0;
+    widgets.media_position_reported = -1.0f;
+    widgets.media_position_updated = -1.0;
+  } else if (!same_report) {
+    struct timeval now {};
+    gettimeofday(&now, nullptr);
+    widgets.media_position =
+        media_progress::now_position(media_position, media_duration, playing, now.tv_sec + now.tv_usec / 1e6,
+                                     position_updated >= 0.0, position_updated);
+    widgets.media_position_received_ms = millis();
+    widgets.media_position_reported = media_position;
+    widgets.media_position_updated = position_updated;
+  }
+  widgets.media_position_playing = playing;
 
   String main_text = media_first_non_empty(title, channel);
   const bool has_real_media_title = main_text.length() > 0;
@@ -4413,6 +4596,14 @@ void update_media_tile_state(GridType grid_type, uint8_t grid_index, const char*
   // Artwork is independent of title/state. Lightweight payloads omit it;
   // explicit empty/null fields clear it, and URL changes must always apply.
   const bool should_update_cover = is_json_payload && media_artwork::has_fields(payload_start);
+  // Home Assistant disables the controls of an unavailable player.
+  widgets.available = !state.equalsIgnoreCase("unavailable");
+  for (lv_obj_t* label : {widgets.previous_label, widgets.play_pause_label, widgets.next_label}) {
+    lv_obj_t* button = label ? lv_obj_get_parent(label) : nullptr;
+    if (!button || lv_obj_has_state(button, LV_STATE_DISABLED) == !widgets.available) continue;
+    if (widgets.available) lv_obj_remove_state(button, LV_STATE_DISABLED);
+    else lv_obj_add_state(button, LV_STATE_DISABLED);
+  }
   if (widgets.play_pause_label) {
     String icon = getMdiChar(media_icon_for_state(state));
     if (icon.length()) {
@@ -4420,8 +4611,34 @@ void update_media_tile_state(GridType grid_type, uint8_t grid_index, const char*
       lv_obj_clear_flag(widgets.play_pause_label, LV_OBJ_FLAG_HIDDEN);
     }
   }
+  // The tile's icon in the player's state form, the same as the popup's
+  // head (state_icon.h); a hidden icon stays hidden.
+  const media_state_icon::Form icon_form = media_state_icon::form_of(state);
+  widgets.icon_form = static_cast<uint8_t>(icon_form);
+  if (widgets.icon_label && !lv_obj_has_flag(widgets.icon_label, LV_OBJ_FLAG_HIDDEN)) {
+    const Tile* tile = tile_renderer_get_tile_config(grid_type, grid_index);
+    if (tile && tile->type == TILE_MEDIA) {
+      const String icon = getMdiChar(media_state_icon::name(media_tile_icon_name(*tile), icon_form));
+      if (icon.length()) tile_rule_icon::set_glyph(widgets.icon_label, icon.c_str());
+    }
+  }
 
   bool text_layout_dirty = false;
+  // The playing bars over the title (playing_bars.h): shown while a song
+  // plays or pauses, moving while it plays (their timer, renderer.cpp).
+  if (widgets.bars) {
+    const bool bars_shown = playing || state.equalsIgnoreCase("paused");
+    if (lv_obj_has_flag(widgets.bars, LV_OBJ_FLAG_HIDDEN) == bars_shown) {
+      if (bars_shown) lv_obj_remove_flag(widgets.bars, LV_OBJ_FLAG_HIDDEN);
+      else lv_obj_add_flag(widgets.bars, LV_OBJ_FLAG_HIDDEN);
+      text_layout_dirty = true;
+    }
+    if (lv_obj_has_state(widgets.bars, LV_STATE_CHECKED) != playing) {
+      if (playing) lv_obj_add_state(widgets.bars, LV_STATE_CHECKED);
+      else lv_obj_remove_state(widgets.bars, LV_STATE_CHECKED);
+      lv_obj_invalidate(widgets.bars);
+    }
+  }
   bool title_text_changed = false;
   bool subtitle_text_changed = false;
   if (widgets.media_title_label) {
@@ -4454,7 +4671,11 @@ void update_media_tile_state(GridType grid_type, uint8_t grid_index, const char*
     lv_obj_add_flag(widgets.state_label, LV_OBJ_FLAG_HIDDEN);
   }
 
-  if (should_update_cover) {
+  String image_key;
+  if (should_update_cover && bridge_pictures_enabled() &&
+      media_artwork::read_string(payload_start, "image_key", image_key)) {
+    update_media_cover_from_picture(grid_type, grid_index, widgets, image_key);
+  } else if (should_update_cover) {
     String cover_url;
     String cover_data;
     if (!media_artwork::read_string(payload_start, "entity_picture", cover_url)) {
@@ -4547,7 +4768,12 @@ struct TileGraphHistoryUpdate {
   bool valid = false;
 };
 
-static TileGraphHistoryUpdate g_tile_graph_history;
+// Answers wait here until the loop applies them: several graph tiles ask at
+// once (tile_graph_service_periodic), and one slot lost every answer but the
+// last of a loop pass. Bounded: when full, the oldest answer is replaced.
+constexpr size_t kTileGraphQueueSlots = 4;
+static TileGraphHistoryUpdate g_tile_graph_history[kTileGraphQueueSlots];
+static size_t g_tile_graph_next = 0;
 
 static bool extract_numeric_for_chart(const String& text, float& out) {
   String normalized = text;
@@ -4569,6 +4795,10 @@ static void apply_tile_graph_history(const char* target_entity, const char* payl
   String json = payload;
   String entity_id;
   if (!extract_json_string_field(json, "entity_id", entity_id)) return;
+  // A tile shows the day: the popup's 6H and 7D answers come through here
+  // too and replaced it until the next refresh.
+  float hours = 24.0f;
+  if (extract_json_number_field(json, "hours", hours) && lroundf(hours) != 24) return;
 
   // Find matching tile with graph in active grid
   const TileGridConfig& grid = tileConfig.getActiveGrid();
@@ -4660,7 +4890,30 @@ static void apply_tile_graph_history(const char* target_entity, const char* payl
       }
     }
 
-    // Use all points (same as popup - no downsampling)
+    // One point per four pixels of the graph's width (the mean of each run,
+    // about the mockup's 96 points on a two-cell tile): the area below the
+    // line draws one rect and one triangle per segment (area_graph.h), and
+    // the line stays a calm line instead of LVGL's crowded mode of upright
+    // strokes. The popup keeps every point.
+    const int32_t graph_w = lv_obj_get_content_width(w.chart);
+    const size_t target = graph_w > 8 ? static_cast<size_t>(graph_w / 4) : 96;
+    if (values.size() > target && target >= 2) {
+      std::vector<float> reduced(target);
+      for (size_t j = 0; j < target; ++j) {
+        const size_t from = j * values.size() / target;
+        const size_t to = std::max(from + 1, (j + 1) * values.size() / target);
+        float sum = 0.0f;
+        size_t valid = 0;
+        for (size_t k = from; k < to; ++k) {
+          if (!isfinite(values[k])) continue;
+          sum += values[k];
+          ++valid;
+        }
+        reduced[j] = valid ? sum / valid : NAN;
+      }
+      values.swap(reduced);
+    }
+
     // Calculate min/max for range
     float min_v = 0.0f, max_v = 0.0f;
     bool has_range = false;
@@ -4720,17 +4973,77 @@ static void apply_tile_graph_history(const char* target_entity, const char* payl
 
 void queue_tile_graph_history(const char* entity_id, const char* payload, size_t len) {
   if (!payload || len == 0) return;
-  g_tile_graph_history.entity_id = entity_id ? entity_id : "";
-  g_tile_graph_history.payload = String(payload).substring(0, len);
-  g_tile_graph_history.valid = true;
+  TileGraphHistoryUpdate& slot = g_tile_graph_history[g_tile_graph_next];
+  g_tile_graph_next = (g_tile_graph_next + 1) % kTileGraphQueueSlots;
+  slot.entity_id = entity_id ? entity_id : "";
+  slot.payload = String(payload).substring(0, len);
+  slot.valid = true;
 }
 
 void process_tile_graph_queue() {
-  if (!g_tile_graph_history.valid) return;
+  // Oldest first.
+  for (size_t i = 0; i < kTileGraphQueueSlots; ++i) {
+    TileGraphHistoryUpdate& slot = g_tile_graph_history[(g_tile_graph_next + i) % kTileGraphQueueSlots];
+    if (!slot.valid) continue;
+    apply_tile_graph_history(slot.entity_id.c_str(), slot.payload.c_str());
+    slot.valid = false;
+    slot.payload = String();
+  }
+}
 
-  apply_tile_graph_history(g_tile_graph_history.entity_id.c_str(),
-                           g_tile_graph_history.payload.c_str());
-  g_tile_graph_history.valid = false;
+// Whether a graph tile's chart holds a day (a point that is not
+// LV_CHART_POINT_NONE).
+static bool tile_graph_has_day(const SensorTileWidgets& widgets) {
+  if (!widgets.chart || !widgets.series) return false;
+  const int32_t* values = lv_chart_get_series_y_array(widgets.chart, widgets.series);
+  const uint32_t count = lv_chart_get_point_count(widgets.chart);
+  for (uint32_t i = 0; values && i < count; ++i) {
+    if (values[i] != LV_CHART_POINT_NONE) return true;
+  }
+  return false;
+}
+
+// Graph tiles ask for their day when they are built; offline that request
+// is dropped (mqttPublishHistoryRequest), so a tile built at boot stayed
+// empty until its popup asked (user log 2026-10-26). The shown grid's graph
+// tiles ask again once the connection is up and every five minutes after
+// (the Bridge's day comes in 5-minute steps), so the graph follows the day.
+// A tile still without its day asks again every 15 s, and at once when its
+// page is shown (tile_graph_request_soon): the first request after
+// connecting timed out while the Bridge was not ready yet, and its late
+// answer came while another page was shown, where apply_tile_graph_history
+// finds no tile for it (user log 2026-10-28: graphs empty until pressed).
+constexpr uint32_t kTileGraphRefreshMs = 5UL * 60UL * 1000UL;
+constexpr uint32_t kTileGraphRetryMs = 15UL * 1000UL;
+static bool g_tile_graph_online = false;
+static uint32_t g_tile_graph_asked_ms = 0;
+static uint32_t g_tile_graph_retried_ms = 0;
+static bool g_tile_graph_page_shown = false;
+
+void tile_graph_request_soon() { g_tile_graph_page_shown = true; }
+
+void tile_graph_service_periodic() {
+  if (!networkManager.isMqttConnected()) {
+    g_tile_graph_online = false;
+    return;
+  }
+  const uint32_t now = millis();
+  const bool refresh = !g_tile_graph_online || (uint32_t)(now - g_tile_graph_asked_ms) >= kTileGraphRefreshMs;
+  const bool retry = g_tile_graph_page_shown || (uint32_t)(now - g_tile_graph_retried_ms) >= kTileGraphRetryMs;
+  if (!refresh && !retry) return;
+  g_tile_graph_page_shown = false;
+  g_tile_graph_retried_ms = now;
+  if (refresh) {
+    g_tile_graph_online = true;
+    g_tile_graph_asked_ms = now;
+  }
+  const TileGridConfig& grid = tileConfig.getActiveGrid();
+  for (uint8_t i = 0; i < TILES_PER_GRID; ++i) {
+    const Tile& tile = grid.tiles[i];
+    if (tile.type != TILE_SENSOR || tile.sensor_display_mode != 2 || !g_tab0_sensors[i].chart) continue;
+    if (!refresh && tile_graph_has_day(g_tab0_sensors[i])) continue;
+    if (tile.sensor_entity.length()) request_tile_graph_history(tile.sensor_entity.c_str());
+  }
 }
 
 void request_tile_graph_history(const char* entity_id) {
@@ -4752,31 +5065,29 @@ void set_label_style(lv_obj_t* lbl, lv_color_t c, const lv_font_t* f) {
 
 void set_tile_grid_cell(lv_obj_t* obj, uint8_t col, uint8_t row, uint8_t span_w, uint8_t span_h) {
   if (!obj) return;
+  // The grid's tracks: the profile's, or the shown grid's with its half row
+  // (grid_layout.h, tab_tiles_unified.cpp create_tiles_grid).
+  const int cols = grid_layout::head_bar() ? GRID_SHOWN_COLS : GRID_COLS;
+  const int rows = grid_layout::head_bar() ? grid_layout::whole_rows(grid_layout::shown()) : GRID_ROWS;
+  if (col >= cols || row >= rows) return;
   uint8_t w = span_w < 1 ? 1 : span_w;
   uint8_t h = span_h < 1 ? 1 : span_h;
-  if (w > GRID_COLS - col) w = GRID_COLS - col;
-  if (h > GRID_ROWS - row) h = GRID_ROWS - row;
+  if (w > cols - col) w = static_cast<uint8_t>(cols - col);
+  if (h > rows - row) h = static_cast<uint8_t>(rows - row);
   lv_obj_set_grid_cell(obj,
       LV_GRID_ALIGN_STRETCH, col, w,
       LV_GRID_ALIGN_STRETCH, row, h);
 }
 
 static bool get_tile_layout(const Tile& tile, float& col, float& row, float& span_w, float& span_h) {
-  if (tile.col >= GRID_COLS || tile.row >= GRID_ROWS) return false;
-  col = tile.col;
-  row = tile.row;
-  span_w = tile.span_w < 0.5f ? 1 : tile.span_w;
-  span_h = tile.span_h < 0.5f ? 1 : tile.span_h;
-  clamp_media_tile_layout(tile.type, col, row, span_w, span_h);
-  if (span_w > GRID_COLS - col) span_w = GRID_COLS - col;
-  if (span_h > GRID_ROWS - row) span_h = GRID_ROWS - row;
-  return true;
+  return shownTileLayout(tile, col, row, span_w, span_h);
 }
 
-static void mark_occupied(bool occupied[GRID_ROWS][GRID_COLS], float col, float row, float span_w, float span_h) {
+static void mark_occupied(bool occupied[GRID_SPACE_ROWS][GRID_SPACE_COLS], float col, float row, float span_w,
+                          float span_h) {
   for (uint8_t r = static_cast<uint8_t>(row); r < row + span_h; ++r) {
     for (uint8_t c = static_cast<uint8_t>(col); c < col + span_w; ++c) {
-      if (r < GRID_ROWS && c < GRID_COLS) {
+      if (r < GRID_SPACE_ROWS && c < GRID_SPACE_COLS) {
         occupied[r][c] = true;
       }
     }
@@ -4809,7 +5120,7 @@ void render_tile_grid(lv_obj_t* parent, const TileGridConfig& config, GridType g
     }
   }
 
-  bool occupied[GRID_ROWS][GRID_COLS] = {};
+  bool occupied[GRID_SPACE_ROWS][GRID_SPACE_COLS] = {};
   struct TileLayout {
     float col = 0;
     float row = 0;
@@ -4831,8 +5142,9 @@ void render_tile_grid(lv_obj_t* parent, const TileGridConfig& config, GridType g
     mark_occupied(occupied, col, row, span_w, span_h);
   }
 
-  for (uint8_t r = 0; r < GRID_ROWS; ++r) {
-    for (uint8_t c = 0; c < GRID_COLS; ++c) {
+  // The empty cells of the shown grid (grid_layout.h).
+  for (uint8_t r = 0; r < GRID_SHOWN_ROWS; ++r) {
+    for (uint8_t c = 0; c < GRID_SHOWN_COLS; ++c) {
       if (!occupied[r][c]) {
         render_empty_tile(parent, c, r);
       }
@@ -4875,23 +5187,109 @@ void render_tile_grid(lv_obj_t* parent, const TileGridConfig& config, GridType g
   Serial.printf("[TileRenderer] Minimum free heap since boot: %u KB\n", ESP.getMinFreeHeap() / 1024);
 }
 
+// A tile in its own color (not Global, not "From icon").
+static bool tile_has_own_color(const Tile& tile) { return tileHasOwnColor(tile); }
+
+// The surface a tile draws on (tile_surface in tile_icon_disc.h, user 2026-10-10):
+// a tile in its own color follows that color's lightness (a black tile is the
+// light theme's screen: the theme); every other tile, and the screensaver (a
+// photo frame), keeps the theme.
+static uint8_t tile_surface_rule_of(const Tile& tile, GridType grid_type);
+
+static uint8_t tile_surface_of(const Tile& tile, GridType grid_type) {
+  // The screensaver's own design (user 2026-10-11): Dark or Light for all its
+  // tiles, Automatic follows the panel.
+  if (grid_type == GridType::SCREENSAVER) {
+    const uint8_t theme = screensaverConfig.get().theme;
+    return theme == 0 ? tile_surface::kDark : theme == 1 ? tile_surface::kLight : tile_surface::kNone;
+  }
+  // A Camera tile's head over its picture: dark or light in either theme,
+  // or the design's (types/camera/picture.h).
+  if (grid_type != GridType::SCREENSAVER && camera_picture::head_over_picture(tile)) {
+    return camera_picture::light_head(tile)  ? tile_surface::kLight
+           : camera_picture::dark_head(tile) ? tile_surface::kDark
+                                             : tile_surface::kNone;
+  }
+  // A tile that is always filled in the light theme (kNeutralIdle: its icon's
+  // color or the idle grey) is drawn filled from the start: a later tint only
+  // changes its card color, like the dark theme (user 2026-10-10: colors
+  // built up late while the tile switched from white to filled).
+  if (tile_surface_rule_of(tile, grid_type) & tile_surface::kNeutralIdle) return tile_surface::kJewel;
+  if (grid_type == GridType::SCREENSAVER || !tile_has_own_color(tile)) return tile_surface::kNone;
+  const uint32_t own = tileBgColorRgb(tile);
+  if (!own) return tile_surface::kNone;
+  return tone_color::light_surface(own) ? tile_surface::kLight : tile_surface::kDark;
+}
+
+// The rule of a filled tile (tile_surface set_rule, 0 = none): in the light
+// theme a tile with "Ausfuellen" (tileFills) is filled from the
+// start, with its icon's color or, without one, the neutral grey
+// (kNeutralIdle; user 2026-10-10). A Switch tile (lights, switches) is filled
+// only while it is on: off it keeps the white card, so a white light that is
+// on (filled grey) never looks like one that is off (#130, user 2026-10-26).
+// A rule row with its own "Fuellen" (user 2026-10-11)
+// changes a tile between the white and the filled look while it runs: filled
+// while a row with "Fuellen" matches, white while a row without it matches.
+// Every other tile keeps the theme's card.
+static uint8_t tile_surface_rule_of(const Tile& tile, GridType grid_type) {
+  if (grid_type == GridType::SCREENSAVER || tile.type == TILE_EMPTY || !ui_theme::theme_light() ||
+      tile_has_own_color(tile) || camera_picture::head_over_picture(tile)) {
+    return 0;
+  }
+  if (tileFills(tile)) {
+    return tile.type == TILE_SWITCH ? tile_surface::kFollowTint : tile_surface::kFollowTint | tile_surface::kNeutralIdle;
+  }
+  return tile_icon_colors::rows_fill(tile.icon_colors.c_str()) ? tile_surface::kFollowTint : 0;
+}
+
 lv_obj_t* render_tile(lv_obj_t* parent, int col, int row, const Tile& tile, uint8_t index, GridType grid_type, scene_publish_cb_t scene_cb) {
   // Serial.printf("[render_tile] Index=%d, Type=%d, Title='%s'\n", index, tile.type, tile.title.c_str());
 
   const TileTypeDescriptor* desc = get_tile_type_descriptor(tile.type);
   if (desc && desc->render) {
+    // The whole tile draws with its surface's rules; its card keeps the
+    // surface for every later color change (tile_surface::scope).
+    const uint8_t surface = tile_surface_of(tile, grid_type);
+    const int8_t surface_theme = tile_surface::theme_of(surface);
+    const ui_theme::SurfaceScope scope(surface_theme >= 0 ? surface_theme : ui_theme::kThemeSurface);
     lv_obj_t* tile_obj =
         desc->render(parent, col, row, tile, index, grid_type, scene_cb);
+    // Its rounded fill, frame line, icon discs, control bars and pills drawn
+    // from kept corners (rounded_corners.h). First, so the probe below times
+    // the corners with everything else.
+    rounded_corners::attach_tree(tile_obj);
+    // What it costs in large frames (tile_frame_probe.h).
+    tile_frame_probe::watch(tile_obj, index, static_cast<uint8_t>(tile.type));
+    tile_surface::set(tile_obj, surface);
+    if (const uint8_t rule = tile_surface_rule_of(tile, grid_type)) {
+      // A tile filled from the start stays filled (its base is kJewel).
+      tile_surface::set_rule(tile_obj, surface == tile_surface::kJewel ? tile_surface::kJewel : tile_surface::kNone,
+                             rule);
+    }
     apply_fractional_tile_geometry(tile_obj, tile);
     // Rules (forced icon color, tile tint) from the cached states, before the
-    // discs take the icon color and the background.
+    // discs take the icon color and the background. A tint may change the
+    // surface (tile_surface rule).
     tile_icon_source::refresh_card(tile_obj, tile);
-    tile_icon_disc::apply_tile_options(tile_obj, tile.icon_disc_mode, tile.icon_glow);
+    tile_icon_source::settle_filled(tile_obj);
+    // Every circle shows, in its icon's color (user 2026-10-11: no circle
+    // options per tile or global).
+    tile_icon_disc::apply_tile_options(tile_obj, 0, true);
+    disable_pressed_recolor(tile_obj);
+    tile_press::apply(tile_obj);
     if (!tileBorderEnabled(tile)) ui_surface_style::disable_tile_border(tile_obj);
-    // Normal grids use the global display option. The screensaver has its
-    // own setting and applies it after rendering in image_screensaver.cpp.
-    if (tile_obj && grid_type != GridType::SCREENSAVER &&
-        tile.type != TILE_EMPTY) {
+    // "Transparent" (tileTransparent): no card and no line; a press still
+    // shows, as the theme's pressed card.
+    if (tile_obj && tileTransparent(tile)) {
+      lv_obj_set_style_bg_opa(tile_obj, LV_OPA_TRANSP, LV_PART_MAIN | LV_STATE_DEFAULT);
+      lv_obj_set_style_bg_color(tile_obj, lv_color_hex(tone_color::pressed_card(ui_theme::card())),
+                                LV_PART_MAIN | LV_STATE_PRESSED);
+      lv_obj_set_style_bg_opa(tile_obj, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_PRESSED);
+      ui_surface_style::disable_tile_border(tile_obj);
+    }
+    // Normal grids use the global display option. The screensaver has its own setting and
+    // applies it after rendering in image_screensaver.cpp.
+    if (tile_obj && grid_type != GridType::SCREENSAVER && tile.type != TILE_EMPTY) {
       ui_surface_style::apply_global_tile_border(tile_obj);
     }
     return tile_obj;
@@ -4909,6 +5307,8 @@ void update_sensor_tile_value(GridType grid_type, uint8_t grid_index, const char
   if (!value_label) {
     return;
   }
+  // State colors follow the tile's surface (tile_surface, tile_icon_disc.h).
+  const ui_theme::SurfaceScope surface = tile_surface::scope(value_label);
 
   if (target[grid_index].gauge && value) {
     float numeric = 0.0f;
@@ -4918,6 +5318,13 @@ void update_sensor_tile_value(GridType grid_type, uint8_t grid_index, const char
                                                  target[grid_index].gauge_max);
       lv_arc_set_value(target[grid_index].gauge, mapped);
     }
+  }
+  // A look shows the value on its gauge; an unknown or unavailable state
+  // empties it.
+  if (lv_obj_t* look = target[grid_index].look) {
+    float numeric = NAN;
+    if (!value || !parse_sensor_number(String(value), numeric)) numeric = NAN;
+    sensor_look_view::set_value(look, numeric);
   }
 
   String displayValue = value ? String(value) : String();
@@ -4942,13 +5349,13 @@ void update_sensor_tile_value(GridType grid_type, uint8_t grid_index, const char
     displayValue = "--";
   }
 
-  // Combine value and unit in one label at the same size.
-  String combined = displayValue;
-  if (unit && strlen(unit) > 0 && displayValue != "--") {
-    combined += " ";
-    combined += unit;
-  }
-  lv_label_set_text(value_label, combined.c_str());
+  // The unit a step smaller right after the value, like the weather
+  // forecast (value_unit.h, user 2026-10-26). The Bridge repeats unchanged
+  // states (minute snapshot, reconnects): show() hands LVGL changed texts
+  // only, since lv_label_set_text() always relayouts and redraws.
+  String unit_text = unit && displayValue != "--" ? String(unit) : String();
+  unit_text.trim();
+  value_unit::show(value_label, target[grid_index].unit_label, displayValue, unit_text);
 
   // Per-tile icon colors follow every state update; "--" covers empty,
   // unavailable and unknown states, which keep the default white icon.
@@ -4958,7 +5365,17 @@ void update_sensor_tile_value(GridType grid_type, uint8_t grid_index, const char
     if (tile && tile->icon_colors.length()) {
       tile_icon_color_rules::apply(icon, tile->icon_colors.c_str(),
                                    displayValue != "--", value, nullptr,
-                                   lv_color_white());
+                                   lv_color_hex(ui_theme::text()));
     }
+    // The graph's line takes the icon's color when it draws
+    // (sensor_graph_area_cb): a new icon color redraws it.
+    lv_obj_t* chart = target[grid_index].chart;
+    lv_chart_series_t* series = target[grid_index].series;
+    if (chart && series &&
+        !lv_color_eq(lv_chart_get_series_color(chart, series), lv_obj_get_style_text_color(icon, LV_PART_MAIN))) {
+      lv_obj_invalidate(chart);
+    }
+    // A look's lit places take the icon's color when it draws.
+    if (target[grid_index].look) sensor_look_view::sync_color(target[grid_index].look);
   }
 }

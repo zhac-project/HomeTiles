@@ -43,12 +43,14 @@ struct String : std::string {
   String(int value):std::string(std::to_string(value)) {}
   String substring(size_t from) const { return substr(from); }
   String substring(size_t from, size_t end) const { return substr(from, end - from); }
+  bool startsWith(const char* prefix) const { return rfind(prefix, 0) == 0; }
 };
 String operator+(const String& a,const String& b){return String(std::string(a)+std::string(b));}
 String operator+(const String& a,const char* b){return String(std::string(a)+b);}
 String operator+(const char* a,const String& b){return String(a+std::string(b));}
 enum TileType { TILE_EMPTY, TILE_NUMBER, TILE_SELECT, TILE_DATETIME, TILE_SENSOR, TILE_BINARY_SENSOR, TILE_SWITCH,
-  TILE_WEATHER, TILE_ENERGY, TILE_MEDIA, TILE_CLIMATE, TILE_COVER, TILE_CAMERA, TILE_SCENE };
+  TILE_WEATHER, TILE_ENERGY, TILE_MEDIA, TILE_CLIMATE, TILE_COVER, TILE_CAMERA, TILE_SCENE,
+  TILE_LOCK, TILE_ALARM, TILE_FAN, TILE_CALENDAR, TILE_VACUUM };
 constexpr size_t TILES_PER_GRID = 6;
 struct Tile { TileType type = TILE_EMPTY; uint16_t view_id = 0; String sensor_entity; int popup = 0; };
 struct TileGridConfig { Tile tiles[TILES_PER_GRID]; };
@@ -65,6 +67,7 @@ struct TileConfig {
   const TileGridConfig& getActiveGrid() const { return grid; }
   uint16_t getActiveFolderId() const { return active; }
   uint32_t viewRevision() const { return revision; }
+  void noteViewLabelsChanged() { ++revision; }
 } tileConfig;
 struct lv_obj_t { lv_obj_t* parent=nullptr; bool hidden=false; uint16_t source=0; };
 struct lv_event_t { void* data=nullptr; };
@@ -97,8 +100,10 @@ struct {
     else {tileConfig.active=id;switch_pending=false;}
   }
 } uiManager;
-struct {struct Config{int language=0;} cfg; const Config& getConfig(){return cfg;}} configManager;
-namespace i18n {struct Text{const char* home="Home";}; Text strings(int){return {};}}
+namespace tile_icon_source { void open_popup_without_tile() {} }
+struct {struct Config{const char* language="en";} cfg; const Config& getConfig(){return cfg;}} configManager;
+namespace i18n {struct Text{const char* home="Home";}; Text strings(const char*){return {};}}
+String catalog_language;
 constexpr size_t kMaxFolders=128;
 String popup_entity;
 lv_obj_t* popup_card=nullptr;
@@ -118,13 +123,22 @@ void hide_energy_popup(){card.hidden=true;}
 void hide_media_popup(){card.hidden=true;}
 void hide_climate_popup(){card.hidden=true;}
 void hide_cover_popup(){card.hidden=true;}
+void hide_device_popup(){card.hidden=true;}
+void hide_calendar_popup(){card.hidden=true;}
+void hide_vacuum_popup(){card.hidden=true;}
 void viewNavigationSource(lv_obj_t*);
 void viewNavigationPopupShown(lv_obj_t*,const char*);
+// The camera popup's full-screen request (#65): set just before the opening.
+bool next_full=false, last_open_full=false, camera_full=false;
+void camera_popup_open_next_in_full_screen(bool on){next_full=on;}
+bool camera_popup_is_full_screen(){return camera_full;}
 void lv_obj_send_event(lv_obj_t* obj,int event,void*){
   if(event==LV_EVENT_PRESSED)return;
   const auto& tile=tileConfig.grid.tiles[0];
-  const int popup_event=tile.type==TILE_CAMERA||tile.type==TILE_MEDIA||tile.type==TILE_WEATHER||tile.popup==1 ? 1:2;
-  if(event==popup_event){++opens;card.hidden=false;viewNavigationSource(obj);viewNavigationPopupShown(&card,tile.sensor_entity.c_str());}
+  // Like the renderers: Camera and Media open on a tap, every other type
+  // (Weather included) on its popup mode's gesture.
+  const int popup_event=tile.type==TILE_CAMERA||tile.type==TILE_MEDIA||tile.popup==1 ? 1:2;
+  if(event==popup_event){++opens;last_open_full=next_full;card.hidden=false;viewNavigationSource(obj);viewNavigationPopupShown(&card,tile.sensor_entity.c_str());}
   else ++toggles;
 }
 struct ScopedStorageWriteDisplayGuard {};
@@ -148,6 +162,7 @@ struct Preferences {
   + definition(navigation, 'String boundedLabel(')
   + definition(navigation, 'String folderLabel(')
   + definition(navigation, 'void cancelPending(')
+  + definition(navigation, 'void serviceLanguage(')
   + definition(tiles, 'bool tiles_open_view_popup(')
   + definition(navigation, 'size_t firstRequiredFolderStep(')
   + definition(navigation, 'void servicePending(')
@@ -155,6 +170,8 @@ struct Preferences {
   + definition(navigation, 'void viewNavigationClosePopups(')
   + definition(navigation, 'void viewNavigationSource(')
   + definition(navigation, 'void viewNavigationPopupShown(')
+  + definition(navigation, 'uint16_t viewNavigationVisiblePopupTile(')
+  + definition(navigation, 'void viewNavigationReopenPopup(')
   + definition(persistence, 'static uint16_t reserveNavigationId(')
   + definition(persistence, 'static bool ensureNavigationIds(')
   + String.raw`
@@ -197,6 +214,11 @@ int main(){
   assert(boundedLabel("A\xc3\xbcZ", 3, true) == "\xc3\xbcZ");
   // Select options use line breaks as separators; visual title wrapping must
   // never leak into the navigation catalog consumed by the Bridge.
+  // A Camera tile showing an image entity's picture has no popup yet (#50).
+  Tile picture; picture.type=TILE_CAMERA; picture.sensor_entity="image.vacuum_map";
+  assert(!popupSupported(picture));
+  picture.sensor_entity="camera.door";
+  assert(popupSupported(picture));
   const String visual_title = "Waveshare Touch\nLcd 8 Ansicht";
   assert(boundedLabel(visual_title, 80) == "Waveshare Touch Lcd 8 Ansicht");
   assert(visual_title == "Waveshare Touch\nLcd 8 Ansicht");
@@ -225,7 +247,7 @@ int main(){
   assert(!pending.active&&opens==1);connected=true;
   prepare(2,id,{0,2});viewNavigationSource(&object);assert(!pending.active);
   prepare(2,id,{0,2});servicePending(61000);assert(!pending.active);
-  for(auto type:{TILE_CAMERA,TILE_MEDIA,TILE_WEATHER,TILE_SENSOR,TILE_SWITCH,TILE_CLIMATE,TILE_COVER,TILE_ENERGY,TILE_BINARY_SENSOR,TILE_NUMBER,TILE_SELECT,TILE_DATETIME}){
+  for(auto type:{TILE_CAMERA,TILE_MEDIA,TILE_WEATHER,TILE_SENSOR,TILE_SWITCH,TILE_CLIMATE,TILE_COVER,TILE_ENERGY,TILE_BINARY_SENSOR,TILE_NUMBER,TILE_SELECT,TILE_DATETIME,TILE_LOCK,TILE_ALARM,TILE_FAN,TILE_CALENDAR,TILE_VACUUM}){
     tileConfig.grid.tiles[0].type=type;
     for(int mode:{0,1}){tileConfig.grid.tiles[0].popup=mode;assert(tiles_open_view_popup(id));}
   }
@@ -233,6 +255,19 @@ int main(){
   assert(!tiles_open_view_popup(60000));
   g_folder_switch_pending=true;assert(!tiles_open_view_popup(id));g_folder_switch_pending=false;
   g_tiles_reload_requested[0]=true;assert(!tiles_open_view_popup(id));g_tiles_reload_requested[0]=false;
+  // A grid reload (a Web Admin save) reopens the visible popup from its new
+  // tile, so it reads the tile's new colors (regression: only a manual
+  // reopen showed them). A hidden popup, another entity and Camera (its
+  // stream) do not reopen.
+  tileConfig.grid.tiles[0].type=TILE_SENSOR;tileConfig.grid.tiles[0].popup=1;
+  assert(tiles_open_view_popup(id)&&!card.hidden);
+  const int reopened=opens;assert(viewNavigationVisiblePopupTile()==id);
+  viewNavigationReopenPopup(viewNavigationVisiblePopupTile());assert(opens==reopened+1&&toggles==0);
+  tileConfig.grid.tiles[0].sensor_entity="sensor.other";viewNavigationReopenPopup(id);assert(opens==reopened+1);
+  tileConfig.grid.tiles[0].sensor_entity="camera.door";tileConfig.grid.tiles[0].type=TILE_CAMERA;
+  viewNavigationReopenPopup(id);assert(opens==reopened+1);
+  tileConfig.grid.tiles[0].type=TILE_SENSOR;card.hidden=true;assert(viewNavigationVisiblePopupTile()==0);
+  viewNavigationReopenPopup(viewNavigationVisiblePopupTile());assert(opens==reopened+1);
   viewNavigationClosePopups();assert(camera_stops==1&&card.hidden);
   auto before=opens;
 
@@ -280,8 +315,60 @@ int main(){
   // A full route after waking still tolerates the earlier lock-to-Home switch.
   prepare(3,id,{0,1,2,3});tileConfig.active=0;servicePending(100);
   assert(pending.active&&requests==std::vector<uint16_t>{0});cancelPending();
+  // The full-screen option (#65): the camera popup opens straight in full
+  // screen, the request ends with that opening, and the state reports it.
+  tileConfig.grid.tiles[0].type=TILE_CAMERA;tileConfig.grid.tiles[0].sensor_entity="camera.door";
+  viewNavigationClosePopups();tileConfig.active=2;
+  prepare(2,id,{0,1,2});pending.full=true;pending.step=firstRequiredFolderStep(pending.path);
+  before=opens;servicePending(100);
+  assert(opens==before+1&&last_open_full&&!next_full&&!pending.active&&!pending.full);
+  assert(displayedView().current==String("tile:")+String(id)&&!displayedView().full);
+  camera_full=true;assert(displayedView().full);
+  card.hidden=true;assert(!displayedView().full);camera_full=false;
+  prepare(2,id,{0,1,2});pending.step=firstRequiredFolderStep(pending.path);
+  servicePending(100);assert(!last_open_full);
+  prepare(2,id,{0,1,2});pending.full=true;cancelPending();assert(!pending.full);
+  // A new display language publishes the catalog again (#72): the Bridge keeps
+  // a catalog's names until its revision changes. The first look only notes
+  // the language; the same language changes nothing.
+  const uint32_t revision=tileConfig.revision;
+  serviceLanguage();assert(tileConfig.revision==revision);
+  configManager.cfg.language="pl";serviceLanguage();assert(tileConfig.revision==revision+1);
+  serviceLanguage();assert(tileConfig.revision==revision+1);
+  configManager.cfg.language="en";serviceLanguage();assert(tileConfig.revision==revision+2);
 }
 `;
+
+// Full-screen targets in a key of their own: an unknown id among "targets"
+// makes a Bridge before v0.9.0b27 drop the whole catalog page.
+const catalogSource = definition(navigation, 'void serviceCatalog(');
+assert.match(catalogSource, /JsonArray full_options = doc\.createNestedArray\("full_targets"\);/);
+assert.match(catalogSource, /if \(fullScreenSupported\(tile\)\) \{\s*JsonObject full = full_options\.createNestedObject\(\);\s*full\["id"\] = "full:" \+ String\(tile\.view_id\);/);
+assert.match(catalogSource, /camera_view_full_screen/);
+assert.doesNotMatch(catalogSource, /option\["id"\] = "full:/);
+assert.match(definition(navigation, 'bool fullScreenSupported('), /tile\.type == TILE_CAMERA && popupSupported\(tile\)/);
+const handler = definition(navigation, 'bool viewNavigationHandleMessage(');
+assert.match(definition(navigation, 'void viewNavigationService('), /serviceLanguage\(\);\s*servicePending\(now\);\s*serviceCatalog\(now\);/);
+assert.match(handler, /if \(target\.camera && requested == "full:" \+ String\(target\.id\)\) \{\s*folder = target\.folder; tile_id = target\.id; full = true; found = true; break;/);
+assert.match(handler, /pending\.full = full;/);
+assert.match(definition(navigation, 'void publishState('), /if \(displayed\.full\) doc\["full"\] = true;/);
+// The popup: straight to the full screen without a popup stream, the popup's
+// stream where the full screen cannot start, nothing left over after a close.
+const cameraPopup = read('src/ui/popups/camera/camera_popup.cpp');
+assert.match(definition(cameraPopup, 'static void finish_camera_popup_open('), /if \(g_camera_popup->open_full\) \{[\s\S]*?full_request = kFullEnter;[\s\S]*?return;\s*\}/);
+assert.match(cameraPopup, /enter_full_screen\(\);\s*(?:\/\/[^\n]*\n\s*)+if \(g_camera_popup->open_full && !g_camera_popup->full\) \{\s*reveal_skipped_popup\(g_camera_popup\);\s*open_popup_stream\(g_camera_popup\);\s*\}\s*g_camera_popup->open_full = false;/);
+assert.match(definition(cameraPopup, 'static void close_camera_popup('), /full_request = 0;\s*g_camera_popup->open_full = false;/);
+// A Camera tile set to open in full screen uses the same way (and a tap there
+// closes it to the tiles, test-camera-picture.mjs).
+assert.match(cameraPopup, /g_camera_popup->open_full = g_open_next_full \|\| init\.full_screen;\s*g_camera_popup->close_on_leave = init\.full_screen;\s*g_camera_popup->shell_skipped = init\.full_screen;\s*g_open_next_full = false;/);
+const i18nSource = read('src/core/i18n/i18n.cpp');
+// camera_view_full_screen follows camera_mqtt_queue_full in every language.
+for (const pair of [['MQTT-Warteschlange voll', 'Vollbild'], ['MQTT queue full', 'Full screen'],
+                    ["File d'attente MQTT pleine", 'Plein écran'], ['Kolejka MQTT pełna', 'Pełny ekran']]) {
+  assert.ok(i18nSource.includes(`"${pair[0]}",\n    "${pair[1]}",`) ||
+            i18nSource.includes(`"${pair[0]}",\r\n    "${pair[1]}",`), pair[1]);
+}
+assert.match(read('src/core/i18n/i18n.h'), /const char\* camera_mqtt_queue_full;\s*\/\/[^\n]*\n\s*const char\* camera_view_full_screen;/);
 
 assert.match(navigation, /requestFolderAccess\(next/);
 assert.match(navigation, /gate\.accept/);

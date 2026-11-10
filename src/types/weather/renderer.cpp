@@ -1,63 +1,67 @@
 #include "src/ui/shared/ui_surface_style.h"
 #include "src/tiles/runtime/tile_icon_source.h"
 #include "src/types/weather/renderer.h"
+#include "src/types/weather/weather_icons.h"
+#include "src/types/weather/tile_layout.h"
 #include "src/tiles/runtime/tile_renderer_shared.h"
+#include "src/ui/shared/tone_color.h"
 #include "src/tiles/runtime/tile_renderer_fonts.h"
 #include "src/tiles/runtime/tile_icon_disc.h"
 #include "src/tiles/icons/mdi_icons.h"
 #include "src/types/types_registry.h"
 #include "src/network/bridge/ha_bridge_config.h"
 #include "src/ui/popups/weather/weather_popup.h"
-#include "src/ui/popups/popup_shell.h"
 #include "src/devices/device_select.h"
 #include <Arduino.h>
+#include <string.h>
+#include "src/core/config/config_manager.h"
+#include "src/core/i18n/i18n.h"
+#include "src/ui/shared/ui_theme.h"
 
 struct WeatherEventData {
   String entity_id;
   String title;
   lv_obj_t* location_label = nullptr;
   uint32_t bg_color = 0;
+  bool colored_icons = true;
+  String temperature_sensor;
+  String humidity_sensor;
 };
 
-namespace {
-#if defined(DEVICE_WAVESHARE_TOUCH_LCD_1280X800) || \
-    defined(DEVICE_GUITION_JC8012P4A1) || \
-    defined(DEVICE_GUITION_JC8012P4A1_V2)
-constexpr lv_coord_t kWeatherTileForecastYOffset = -10;
-#elif defined(DEVICE_LAYOUT_1024X600)
-constexpr lv_coord_t kWeatherTileForecastYOffset = -5;
-#else
-constexpr lv_coord_t kWeatherTileForecastYOffset = 0;
-#endif
-
-const lv_font_t* weather_value_font() {
-  return FONT_VALUE;
+// The widest text of a forecast day: its label in the language (the short
+// "today" like the popup's, the weekdays) or a two-digit negative
+// temperature with its unit. The Web Admin preview gets the same number.
+lv_coord_t weather_forecast_text_width(const char* language) {
+  auto width = [](const char* text, const lv_font_t* font) {
+    lv_point_t size{};
+    lv_text_get_size(&size, text, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    return static_cast<lv_coord_t>(size.x);
+  };
+  const lv_font_t* day_font = weather_tile::forecast_day_font();
+  lv_coord_t widest = width(i18n::weather_today_button_label(language), day_font);
+  for (int day = 1; day <= 7; ++day) {
+    char iso[11];
+    snprintf(iso, sizeof(iso), "2024-01-%02d", day);
+    const lv_coord_t weekday = width(i18n::weather_weekday_short(language, iso).c_str(), day_font);
+    if (weekday > widest) widest = weekday;
+  }
+  String unit = String(weather_tile::unit_gap()) + "\xC2\xB0" "C";
+  const lv_coord_t temperature = width("-12", weather_tile::forecast_font()) +
+                                 width(unit.c_str(), weather_tile::unit_font());
+  return temperature > widest ? temperature : widest;
 }
 
-const lv_font_t* weather_forecast_font() {
-#if defined(DEVICE_LAYOUT_1024X600)
-  return tile_layout::content_font_20();
-#else
-  return tile_layout::content_font_24();
-#endif
+// The panel's language, measured once per language.
+lv_coord_t weather_forecast_text_width() {
+  static char measured_language[8] = "";
+  static lv_coord_t widest = 0;
+  const char* language = configManager.getConfig().language;
+  if (widest > 0 && strncmp(measured_language, language, sizeof(measured_language) - 1) == 0) return widest;
+  widest = weather_forecast_text_width(language);
+  strncpy(measured_language, language, sizeof(measured_language) - 1);
+  measured_language[sizeof(measured_language) - 1] = '\0';
+  return widest;
 }
-
-const lv_font_t* weather_forecast_day_font() {
-#if defined(DEVICE_LAYOUT_1024X600)
-  return tile_layout::content_font_20();
-#else
-  return FONT_TITLE;
-#endif
-}
-
-const lv_font_t* weather_unit_font() {
-#if defined(DEVICE_LAYOUT_1024X600)
-  return LV_FONT_DEFAULT;
-#else
-  return FONT_SMALL;
-#endif
-}
-}  // namespace
 
 lv_obj_t* render_weather_tile(lv_obj_t* parent, int col, int row, const Tile& tile, uint8_t index, GridType grid_type) {
   if (!parent) {
@@ -65,19 +69,14 @@ lv_obj_t* render_weather_tile(lv_obj_t* parent, int col, int row, const Tile& ti
     return nullptr;
   }
 
-  const uint8_t span_w = weather_whole_cells(tile.span_w);
-  const uint8_t span_h = weather_whole_cells(tile.span_h);
-  const bool show_forecast = weather_shows_forecast(tile.span_h);
+  // The real card size decides what shows (widgets.h).
   // Pixel geometry uses the real card size, including half steps.
   const lv_coord_t tile_w = tile_geometry::extent(
       tile.col, tile.span_w < 1 ? 1.0f : tile.span_w, GRID_CELL_W, GRID_GAP);
   const lv_coord_t tile_h = tile_geometry::extent(
       tile.row, tile.span_h < 1 ? 1.0f : tile.span_h, GRID_CELL_H, GRID_GAP);
-  uint8_t forecast_cols = show_forecast
-      ? weather_forecast_count(tile.span_w, tile_w,
-                               tile_geometry::extent(tile.col, tile.span_w + 0.5f,
-                                                     GRID_CELL_W, GRID_GAP))
-      : 0;
+  const bool show_forecast = weather_shows_forecast(tile_h);
+  uint8_t forecast_cols = show_forecast ? weather_forecast_count(tile_w) : 0;
 
   lv_obj_t* card = lv_button_create(parent);
   if (!card) return nullptr;
@@ -86,7 +85,7 @@ lv_obj_t* render_weather_tile(lv_obj_t* parent, int col, int row, const Tile& ti
   lv_obj_set_style_bg_color(card, lv_color_hex(card_color), LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_set_style_bg_grad_color(card, lv_color_hex(card_color), LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_set_style_bg_grad_dir(card, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_DEFAULT);
-  uint32_t pressed_color = brighten_rgb_color(card_color, 0x10);
+  uint32_t pressed_color = tone_color::pressed_card(card_color);
   lv_obj_set_style_bg_color(card, lv_color_hex(pressed_color), LV_PART_MAIN | LV_STATE_PRESSED);
   lv_obj_set_style_bg_grad_color(card, lv_color_hex(pressed_color), LV_PART_MAIN | LV_STATE_PRESSED);
   lv_obj_set_style_bg_grad_dir(card, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_PRESSED);
@@ -111,13 +110,14 @@ lv_obj_t* render_weather_tile(lv_obj_t* parent, int col, int row, const Tile& ti
   if (!location.length()) location = "--";
 
   lv_obj_t* icon_label = lv_label_create(card);
-  set_label_style(icon_label, lv_color_white(), FONT_MDI_ICONS);
+  set_label_style(icon_label, lv_color_hex(ui_theme::icon()), FONT_MDI_ICONS);
+  weather_icons::style_label(icon_label);
   lv_obj_align(icon_label, LV_ALIGN_TOP_LEFT,
                tile_layout::scale_480(-8),
                tile_layout::scale_480(-8));
 
   lv_obj_t* location_label = lv_label_create(card);
-  set_label_style(location_label, lv_color_white(),
+  set_label_style(location_label, lv_color_hex(ui_theme::text()),
                   tile_layout::header_title_font());
   lv_label_set_long_mode(location_label, LV_LABEL_LONG_DOT);
   lv_obj_set_width(location_label, LV_PCT(70));
@@ -135,7 +135,13 @@ lv_obj_t* render_weather_tile(lv_obj_t* parent, int col, int row, const Tile& ti
   }
   String iconChar;
   if (!icon_disabled && icon_name.length() && FONT_MDI_ICONS != nullptr) {
-    iconChar = getMdiChar(icon_name);
+    iconChar = weather_icons::text(icon_name, weatherColoredIcons(tile)
+                                                  ? weather_icons::Style::Colored
+                                                  : weather_icons::Style::Outline);
+    // A colored icon carries its weather color (Tile color "From icon").
+    if (weatherColoredIcons(tile) && weather_icons::tint(icon_name)) {
+      lv_obj_set_style_text_color(icon_label, lv_color_hex(weather_icons::tint(icon_name)), 0);
+    }
   }
   if (icon_label) {
     if (iconChar.length()) {
@@ -154,7 +160,7 @@ lv_obj_t* render_weather_tile(lv_obj_t* parent, int col, int row, const Tile& ti
   lv_obj_set_size(value_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
   lv_obj_set_flex_flow(value_row, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(value_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lv_obj_set_style_pad_gap(value_row, tile_layout::scale(14), 0);
+  lv_obj_set_style_pad_gap(value_row, weather_tile::kValueGap, 0);
   lv_obj_set_style_bg_opa(value_row, LV_OPA_TRANSP, 0);
   lv_obj_remove_flag(value_row, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_remove_flag(value_row, LV_OBJ_FLAG_SCROLLABLE);
@@ -164,10 +170,10 @@ lv_obj_t* render_weather_tile(lv_obj_t* parent, int col, int row, const Tile& ti
   lv_obj_t* temp_label = nullptr;
 
   if (weather_shows_condition(tile.span_w)) {
-    const lv_font_t* condition_font = weather_value_font();
+    const lv_font_t* condition_font = weather_tile::value_font();
 
     condition_label = lv_label_create(value_row);
-    set_label_style(condition_label, lv_color_white(), condition_font);
+    set_label_style(condition_label, lv_color_hex(ui_theme::text()), condition_font);
     lv_label_set_long_mode(condition_label, LV_LABEL_LONG_DOT);
     lv_obj_set_height(condition_label, lv_font_get_line_height(condition_font));
     lv_obj_set_width(condition_label, LV_SIZE_CONTENT);
@@ -177,33 +183,32 @@ lv_obj_t* render_weather_tile(lv_obj_t* parent, int col, int row, const Tile& ti
     lv_obj_add_flag(condition_label, LV_OBJ_FLAG_HIDDEN);
 
     sep_label = lv_label_create(value_row);
-    set_label_style(sep_label, lv_color_hex(0xB0B0B0),
-                    weather_value_font());
+    set_label_style(sep_label, lv_color_hex(ui_theme::text()),
+                    weather_tile::value_font());
     lv_label_set_text(sep_label, "|");
     lv_obj_add_flag(sep_label, LV_OBJ_FLAG_HIDDEN);
   }
 
   temp_label = lv_label_create(value_row);
-  set_label_style(temp_label, lv_color_white(), weather_value_font());
+  set_label_style(temp_label, lv_color_hex(ui_theme::text()), weather_tile::value_font());
   lv_label_set_text(temp_label, "--");
 
   if (!show_forecast) {
     // Like the Sensor tile: centred in the real card plus the same offset, so
     // a half-step taller card moves the value down with it (identical at 1 cell).
-    lv_obj_align(value_row, LV_ALIGN_CENTER, 0, tile_layout::scale(28));
+    lv_obj_align(value_row, LV_ALIGN_CENTER, 0, weather_tile::kValueDy);
   } else {
     // With a forecast the value stays in the top cell above the forecast row.
     lv_obj_update_layout(value_row);
     lv_coord_t row_h = lv_obj_get_height(value_row);
     lv_coord_t value_row_y =
-        (GRID_CELL_H - 2 * pad_ver) / 2 - row_h / 2 + tile_layout::scale(28);
+        (GRID_CELL_H - 2 * pad_ver) / 2 - row_h / 2 + weather_tile::kValueDy;
     lv_obj_align(value_row, LV_ALIGN_TOP_MID, 0, value_row_y);
   }
 
   lv_obj_t* forecast_row = nullptr;
   if (show_forecast) {
-    constexpr lv_coord_t kTileForecastTopHeadroom =
-        tile_layout::scale(52);
+    constexpr lv_coord_t kTileForecastTopHeadroom = weather_tile::kForecastHeadroom;
     forecast_row = lv_obj_create(card);
     lv_obj_remove_style_all(forecast_row);
     lv_obj_set_size(forecast_row, tile_w,
@@ -216,7 +221,7 @@ lv_obj_t* render_weather_tile(lv_obj_t* parent, int col, int row, const Tile& ti
     lv_coord_t forecast_x = -pad_hor;
     lv_coord_t forecast_y =
         (tile_h - GRID_CELL_H) - pad_ver - kTileForecastTopHeadroom +
-        kWeatherTileForecastYOffset;
+        weather_tile::kForecastYOffset;
     lv_obj_set_pos(forecast_row, forecast_x, forecast_y);
   }
 
@@ -230,13 +235,11 @@ lv_obj_t* render_weather_tile(lv_obj_t* parent, int col, int row, const Tile& ti
     widgets.location_label = location_label;
 
     if (forecast_row && forecast_cols > 0) {
-      constexpr lv_coord_t kTileForecastTopHeadroom =
-          tile_layout::scale(52);
-      const lv_coord_t total_w = tile_w;
-      const lv_coord_t cols_total = forecast_cols * WEATHER_FORECAST_COL_W;
-      const lv_coord_t remaining = total_w - cols_total;
-      // Distribute evenly: left margin + gaps + right margin = forecast_cols + 1 spaces.
-      const lv_coord_t spacing = remaining / (forecast_cols + 1);
+      constexpr lv_coord_t kTileForecastTopHeadroom = weather_tile::kForecastHeadroom;
+      // Even room around the days' texts: the same between two days and at
+      // the card's edges; each column centres on its day.
+      const lv_coord_t text_w = weather_forecast_text_width();
+      const lv_coord_t spacing = (tile_w - forecast_cols * text_w) / (forecast_cols + 1);
       for (uint8_t i = 0; i < forecast_cols; ++i) {
         lv_obj_t* col = lv_obj_create(forecast_row);
         lv_obj_remove_style_all(col);
@@ -248,55 +251,46 @@ lv_obj_t* render_weather_tile(lv_obj_t* parent, int col, int row, const Tile& ti
         lv_obj_remove_flag(col, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(col, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
         lv_obj_set_pos(col,
-                       spacing + i * (WEATHER_FORECAST_COL_W + spacing),
+                       spacing + text_w / 2 + i * (text_w + spacing) - WEATHER_FORECAST_COL_W / 2,
                        0);
 
-        constexpr lv_coord_t kTileForecastDayTop =
-            kTileForecastTopHeadroom - tile_layout::scale(33);
-        constexpr lv_coord_t kTileForecastIconTop =
-            kTileForecastTopHeadroom - tile_layout::scale(8);
-        constexpr lv_coord_t kTileForecastTempTop =
-            kTileForecastTopHeadroom + tile_layout::scale(54);
-
         lv_obj_t* day = lv_label_create(col);
-        set_label_style(day, lv_color_white(), weather_forecast_day_font());
+        set_label_style(day, lv_color_hex(ui_theme::text()), weather_tile::forecast_day_font());
         lv_label_set_long_mode(day, LV_LABEL_LONG_DOT);
         lv_obj_set_width(day, LV_PCT(100));
         lv_obj_set_style_text_align(day, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_text(day, "--");
-        lv_obj_set_pos(day, 0, kTileForecastDayTop);
+        lv_obj_set_pos(day, 0, weather_tile::kForecastDayTop);
 
         lv_obj_t* icon = lv_label_create(col);
-        set_label_style(icon, lv_color_white(), FONT_MDI_ICONS);
+        set_label_style(icon, lv_color_hex(ui_theme::icon()), FONT_MDI_ICONS);
+        weather_icons::style_label(icon);
         lv_obj_set_width(icon, LV_PCT(100));
         lv_obj_set_style_text_align(icon, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_text(icon, "");
         lv_obj_add_flag(icon, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_pos(icon, 0, kTileForecastIconTop);
-
-        constexpr lv_coord_t kTileForecastLowTop =
-            kTileForecastTempTop + tile_layout::scale(30);
+        lv_obj_set_pos(icon, 0, weather_tile::kForecastIconTop);
 
         lv_obj_t* hi_val = lv_label_create(col);
-        set_label_style(hi_val, lv_color_white(), weather_forecast_font());
+        set_label_style(hi_val, lv_color_hex(ui_theme::text()), weather_tile::forecast_font());
         lv_obj_set_style_text_align(hi_val, LV_TEXT_ALIGN_LEFT, 0);
         lv_label_set_text(hi_val, "");
         lv_obj_add_flag(hi_val, LV_OBJ_FLAG_HIDDEN);
 
         lv_obj_t* hi_unit = lv_label_create(col);
-        set_label_style(hi_unit, lv_color_white(), weather_unit_font());
+        set_label_style(hi_unit, lv_color_hex(ui_theme::text()), weather_tile::unit_font());
         lv_obj_set_style_text_align(hi_unit, LV_TEXT_ALIGN_LEFT, 0);
         lv_label_set_text(hi_unit, "");
         lv_obj_add_flag(hi_unit, LV_OBJ_FLAG_HIDDEN);
 
         lv_obj_t* lo_val = lv_label_create(col);
-        set_label_style(lo_val, lv_color_white(), weather_forecast_font());
+        set_label_style(lo_val, lv_color_hex(ui_theme::text()), weather_tile::forecast_font());
         lv_obj_set_style_text_align(lo_val, LV_TEXT_ALIGN_LEFT, 0);
         lv_label_set_text(lo_val, "");
         lv_obj_add_flag(lo_val, LV_OBJ_FLAG_HIDDEN);
 
         lv_obj_t* lo_unit = lv_label_create(col);
-        set_label_style(lo_unit, lv_color_white(), weather_unit_font());
+        set_label_style(lo_unit, lv_color_hex(ui_theme::text()), weather_tile::unit_font());
         lv_obj_set_style_text_align(lo_unit, LV_TEXT_ALIGN_LEFT, 0);
         lv_label_set_text(lo_unit, "");
         lv_obj_add_flag(lo_unit, LV_OBJ_FLAG_HIDDEN);
@@ -319,7 +313,10 @@ lv_obj_t* render_weather_tile(lv_obj_t* parent, int col, int row, const Tile& ti
       tile.sensor_entity,
       location,
       location_label,
-      card_color
+      card_color,
+      weatherColoredIcons(tile),
+      tile.weather_temperature_sensor,
+      tile.weather_humidity_sensor
     };
 
     const lv_event_code_t popup_event =
@@ -347,7 +344,12 @@ lv_obj_t* render_weather_tile(lv_obj_t* parent, int col, int row, const Tile& ti
       // The popup header icon shows the tile icon's current color.
       if (lv_obj_t* icon = tile_icon_source::card_icon(static_cast<lv_obj_t*>(lv_event_get_current_target(e)))) {
         init.icon_color = lv_color_to_u32(lv_obj_get_style_text_color(icon, LV_PART_MAIN)) & 0xFFFFFF;
+        lv_color_t forced;
+        init.icon_forced = tile_icon_disc::forced_color(icon, forced);
       }
+      init.colored_icons = data->colored_icons;
+      init.temperature_sensor = data->temperature_sensor;
+      init.humidity_sensor = data->humidity_sensor;
       finish_press_before_popup(e);
       show_weather_popup(init);
     };
@@ -365,6 +367,5 @@ lv_obj_t* render_weather_tile(lv_obj_t* parent, int col, int row, const Tile& ti
         data);
   }
 
-  if (grid_type != GridType::SCREENSAVER) register_popup_background(card);
   return card;
 }

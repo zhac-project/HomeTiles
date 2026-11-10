@@ -8,13 +8,19 @@
 #include "src/core/i18n/i18n.h"
 #include "src/network/bridge/ha_bridge_config.h"
 #include "src/network/mqtt/mqtt_handlers.h"
+#include "src/tiles/config/tile_geometry.h"
 #include "src/tiles/icons/mdi_icons.h"
+#include "src/tiles/runtime/compact_sensor_layout.h"
+#include "src/tiles/runtime/tile_header.h"
 #include "src/tiles/runtime/tile_icon_disc.h"
 #include "src/tiles/runtime/tile_icon_source.h"
 #include "src/tiles/runtime/tile_renderer_fonts.h"
 #include "src/tiles/runtime/tile_renderer_shared.h"
+#include "src/ui/shared/tone_color.h"
 #include "src/types/climate/layout.h"
 #include "src/ui/popups/climate/climate_popup.h"
+#include "src/ui/shared/ui_theme.h"
+#include "src/ui/shared/value_unit.h"
 
 namespace {
 
@@ -43,12 +49,9 @@ struct ClimateAdjustEventData {
 
 constexpr uint32_t kMiniTargetRemoteBlockMs = 2200;
 constexpr uint32_t kMiniTargetDebounceMs = 1000;
-// The control pill and its pressed buttons are white overlays, a lighter step
-// of whatever the tile shows (global, own color or a rules tint). On a
-// 0x222222 tile they give the former 0x3A3A3A pill and 0x4A4A4A pressed
-// button.
-constexpr lv_opa_t kSlotSurfaceOpa = 28;
-constexpr lv_opa_t kSlotPressedOpa = 21;
+// The control pill and its pressed buttons take the popup control fill
+// (tile_icon_source::refresh_controls): the icon color only with tile color
+// "From icon" and "Circle in icon color", else white, at the disc opacity.
 
 enum class ClimateMiniTargetCommand : uint8_t {
   NONE = 0,
@@ -260,6 +263,20 @@ String climate_temperature_text(const ClimateState& state, float value) {
   return text;
 }
 
+// The header's value pair like Home Assistant's tile card: the action or
+// mode and the current temperature ("Cooling · 20.5 °C").
+String climate_header_text(const ClimateState& state) {
+  if (!state.valid) return "--";
+  const char* language = configManager.getConfig().language;
+  String text = state.available ? i18n::climate_state_label(language, state.hvac_mode, state.hvac_action)
+                                : i18n::climate_state_label(language, "unavailable", "");
+  if (state.available && state.has_current_temperature) {
+    text += " \xC2\xB7 ";
+    text += climate_temperature_text(state, state.current_temperature);
+  }
+  return text;
+}
+
 String climate_slot_text(
     ClimateTileSlotKind kind, const ClimateState& state) {
   switch (kind) {
@@ -385,6 +402,9 @@ uint8_t build_automatic_slot_kinds(
   // half steps (1 -> 1 row, 1.5 -> 2, 2 -> 3, 2.5 -> 4).
   const uint8_t span_w = climateTileGridColumns(tile);
   const uint8_t rows = climateTileGridRows(tile);
+  // Layout "with value": the header already shows the current temperature,
+  // so the fields start with the target (a 1x1 tile shows the target).
+  const bool header = climateTileShowsValue(tile);
 
   const String mode = state.hvac_mode;
   if (!state.available || mode.equalsIgnoreCase("unavailable") ||
@@ -409,7 +429,7 @@ uint8_t build_automatic_slot_kinds(
   };
 
   if (span_w == 1 && rows == 1) {
-    if (!state.valid || state.has_current_temperature) {
+    if (!header && (!state.valid || state.has_current_temperature)) {
       append(ClimateTileSlotKind::CURRENT_TEMPERATURE);
     } else {
       // A climate entity without a current-temperature sensor can still
@@ -420,7 +440,7 @@ uint8_t build_automatic_slot_kinds(
   }
 
   if (span_w >= 2 && rows == 1) {
-    if (!state.valid || state.has_current_temperature) {
+    if (!header && (!state.valid || state.has_current_temperature)) {
       append(ClimateTileSlotKind::CURRENT_TEMPERATURE);
     }
     append_primary_target();
@@ -428,7 +448,7 @@ uint8_t build_automatic_slot_kinds(
   }
 
   if (span_w == 1) {
-    if (!state.valid || state.has_current_temperature) {
+    if (!header && (!state.valid || state.has_current_temperature)) {
       append(ClimateTileSlotKind::CURRENT_TEMPERATURE);
     }
     append_primary_target();
@@ -441,7 +461,7 @@ uint8_t build_automatic_slot_kinds(
     return count;
   }
 
-  if (!state.valid || state.has_current_temperature) {
+  if (!header && (!state.valid || state.has_current_temperature)) {
     append(ClimateTileSlotKind::CURRENT_TEMPERATURE);
   }
   if (state.has_current_humidity) {
@@ -768,13 +788,13 @@ void layout_climate_slots(
         compact_target, horizontal_target,
         vertical_target](lv_obj_t* button) {
       if (!button) return;
-      lv_obj_set_style_bg_opa(
-          button,
-          (compact_target || horizontal_target ||
-           vertical_target)
-              ? LV_OPA_TRANSP
-              : kSlotPressedOpa,
-          LV_PART_MAIN | LV_STATE_PRESSED);
+      // Compact layouts press without a fill; the others take the shared
+      // control fill opacity.
+      if (compact_target || horizontal_target || vertical_target) {
+        lv_obj_set_style_bg_opa(button, LV_OPA_TRANSP, LV_PART_MAIN | LV_STATE_PRESSED);
+      } else {
+        lv_obj_remove_local_style_prop(button, LV_STYLE_BG_OPA, LV_PART_MAIN | LV_STATE_PRESSED);
+      }
     };
     auto layout_adjust_symbol = [
         compact_target, horizontal_target,
@@ -1102,7 +1122,7 @@ lv_obj_t* create_climate_slot(
     lv_obj_t* card, GridType grid_type, uint8_t index,
     uint8_t slot_index) {
   lv_obj_t* root = lv_obj_create(card);
-  lv_obj_set_style_bg_color(root, lv_color_white(), LV_PART_MAIN);
+  tile_icon_disc::mark_surface(root);
   lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_width(root, 0, 0);
   lv_obj_set_style_shadow_width(root, 0, 0);
@@ -1115,14 +1135,9 @@ lv_obj_t* create_climate_slot(
 
   auto create_adjust_button = [&](int8_t direction) {
     lv_obj_t* button = lv_button_create(root);
+    tile_icon_disc::mark_control(button);
     lv_obj_set_style_bg_opa(
         button, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(
-        button, lv_color_white(),
-        LV_PART_MAIN | LV_STATE_PRESSED);
-    lv_obj_set_style_bg_opa(
-        button, kSlotPressedOpa,
-        LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_set_style_border_width(button, 0, 0);
     lv_obj_set_style_shadow_width(button, 0, 0);
     lv_obj_set_style_radius(button, LV_RADIUS_CIRCLE, 0);
@@ -1131,7 +1146,7 @@ lv_obj_t* create_climate_slot(
     disable_pressed_button_animation(button);
 
     lv_obj_t* label = lv_label_create(button);
-    set_label_style(label, lv_color_white(),
+    set_label_style(label, lv_color_hex(ui_theme::text()),
                     tile_layout::content_font_24());
     lv_label_set_text(label, direction < 0 ? "-" : "+");
     lv_obj_center(label);
@@ -1152,7 +1167,7 @@ lv_obj_t* create_climate_slot(
   create_adjust_button(-1);
 
   lv_obj_t* value = lv_label_create(root);
-  set_label_style(value, lv_color_white(),
+  set_label_style(value, lv_color_hex(ui_theme::text()),
                   tile_layout::content_font_24());
   lv_obj_set_style_text_align(value, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_long_mode(value, LV_LABEL_LONG_CLIP);
@@ -1162,7 +1177,7 @@ lv_obj_t* create_climate_slot(
   create_adjust_button(1);
 
   lv_obj_t* caption = lv_label_create(root);
-  set_label_style(caption, lv_color_white(), FONT_TITLE);
+  set_label_style(caption, lv_color_hex(ui_theme::text()), FONT_TITLE);
   lv_obj_set_style_text_align(caption, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_long_mode(caption, LV_LABEL_LONG_DOT);
   lv_label_set_text(caption, "");
@@ -1268,6 +1283,10 @@ void refresh_climate_tile_content(
   if (!widgets || !tile) return;
 
   ClimateTileWidgets& widget = widgets[index];
+  if (widget.state_label) {
+    const String text = climate_header_text(state);
+    tile_header::set_state(widget.state_label, text.c_str(), widget.state_font, widget.state_width, -1);
+  }
   const bool has_slot_layout = widget.slot_roots[0] != nullptr;
   ClimateTileSlotKind kinds[ClimateTileWidgets::kMaxSlots] = {};
   ClimateTileTargetLayout layouts[
@@ -1285,8 +1304,8 @@ void refresh_climate_tile_content(
       const ClimateTileSlotKind kind =
           count > 0 ? kinds[0]
                     : ClimateTileSlotKind::CURRENT_TEMPERATURE;
-      const String text = climate_slot_text(kind, state);
-      lv_label_set_text(widget.value_label, text.c_str());
+      // The unit a step smaller after the number (value_unit.h).
+      value_unit::show_text(widget.value_label, climate_slot_text(kind, state));
       lv_obj_clear_flag(widget.value_label, LV_OBJ_FLAG_HIDDEN);
     }
     return;
@@ -1320,9 +1339,12 @@ void refresh_climate_tile_content(
     widget.slot_geometry[i] = geometry[i];
     const bool adjustable = slot_is_adjustable(kind);
     const bool interactive_control = slot_is_interactive(kind, state);
-    lv_obj_set_style_bg_opa(
-        root, interactive_control ? kSlotSurfaceOpa : LV_OPA_TRANSP,
-        LV_PART_MAIN);
+    // The shared control fill shows while the slot is interactive.
+    if (interactive_control) {
+      lv_obj_remove_local_style_prop(root, LV_STYLE_BG_OPA, LV_PART_MAIN);
+    } else {
+      lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, LV_PART_MAIN);
+    }
     lv_obj_set_style_border_width(root, 0, LV_PART_MAIN);
 
     lv_obj_t* minus = lv_obj_get_child(root, 0);
@@ -1354,9 +1376,8 @@ void refresh_climate_tile_content(
       }
     }
     if (value) {
-      const String text = climate_slot_text(kind, state);
-      lv_label_set_text(value, text.c_str());
-      lv_obj_set_style_text_color(value, lv_color_white(), 0);
+      lv_obj_set_style_text_color(value, lv_color_hex(ui_theme::text()), 0);
+      // The font first: the unit's size follows it (value_unit.h).
       lv_obj_set_style_text_font(
           value,
           adjustable
@@ -1365,6 +1386,7 @@ void refresh_climate_tile_content(
                      ? FONT_TITLE
                      : FONT_VALUE),
           0);
+      value_unit::show_text(value, climate_slot_text(kind, state));
     }
     if (caption) {
       if (interactive_control) {
@@ -1394,7 +1416,7 @@ lv_obj_t* render_climate_tile(lv_obj_t* parent,
   lv_obj_set_style_bg_grad_color(card, lv_color_hex(color), LV_PART_MAIN);
   lv_obj_set_style_bg_grad_dir(card, LV_GRAD_DIR_NONE, LV_PART_MAIN);
   lv_obj_set_style_bg_color(
-      card, lv_color_hex(brighten_rgb_color(color, 0x10)),
+      card, lv_color_hex(tone_color::pressed_card(color)),
       LV_PART_MAIN | LV_STATE_PRESSED);
   ui_surface_style::apply_radius(card, tile_layout::scale_480(22), 0);
   lv_obj_set_style_border_width(card, 0, 0);
@@ -1417,27 +1439,52 @@ lv_obj_t* render_climate_tile(lv_obj_t* parent,
   if (!icon_char.length()) icon_char = getMdiChar("thermostat");
   if (!icon_disabled && FONT_MDI_ICONS) {
     icon_label = lv_label_create(card);
-    set_label_style(icon_label, lv_color_white(), FONT_MDI_ICONS);
+    set_label_style(icon_label, lv_color_hex(ui_theme::icon()), FONT_MDI_ICONS);
     lv_label_set_text(icon_label, icon_char.c_str());
     lv_obj_align(
         icon_label, LV_ALIGN_TOP_LEFT,
         -8, -8);
   }
 
-  if (tile.title.length()) {
-    lv_obj_t* title = lv_label_create(card);
-    set_label_style(title, lv_color_white(),
-                    tile_layout::header_title_font());
-    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(title, LV_PCT(70));
-    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_RIGHT, 0);
-    hometiles_title::tile(title, tile.title.c_str(), true);
-    lv_obj_align(
-        title, LV_ALIGN_TOP_RIGHT,
-        4, 4);
+  // Half height (user 2026-10-01): the Sensor compact layout with the value
+  // pair. Layout "with value" (or half height): title and "Cooling · 20.5 °C"
+  // left beside the corner disc like the Switch header; the mini fields stay
+  // below. Layout "title only": the title top right.
+  const bool compact = tile_geometry::compact_climate(tile.type, tile.span_w, tile.span_h);
+  const bool with_value = compact || climateTileShowsValue(tile);
+  lv_obj_t* title = nullptr;
+  lv_obj_t* state_label = nullptr;
+  const lv_font_t* state_font = nullptr;
+  int16_t state_width = 0;
+  if (with_value) {
+    // The shared header (tile_header.h) like the Switch tile; the mini
+    // fields below leave no room for its tall look.
+    const tile_header::Header text = tile_header::create(card, tile, false, 0);
+    title = text.title;
+    state_label = text.state;
+    state_font = compact ? nullptr : text.state_font;
+    state_width = text.state_width;
+    if (compact) {
+      compact_sensor_layout::apply(card, icon_label, title, state_label, tile);
+    } else if (icon_label) {
+      tile_icon_disc::add_round(card, icon_label);
+    }
+  } else {
+    if (tile.title.length()) {
+      title = lv_label_create(card);
+      set_label_style(title, lv_color_hex(ui_theme::text()),
+                      tile_layout::header_title_font());
+      lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+      lv_obj_set_width(title, LV_PCT(70));
+      lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_RIGHT, 0);
+      hometiles_title::tile(title, tile.title.c_str(), true);
+      lv_obj_align(
+          title, LV_ALIGN_TOP_RIGHT,
+          4, 4);
+    }
+    // After the title exists, so the disc can lift the whole header.
+    if (icon_label) tile_icon_disc::add_round(card, icon_label);
   }
-  // After the title exists, so the disc can lift the whole header.
-  if (icon_label) tile_icon_disc::add_round(card, icon_label);
 
   ClimateTileWidgets* widgets = tile_renderer_get_climate_widgets(grid_type);
   if (widgets && index < TILES_PER_GRID) {
@@ -1448,28 +1495,35 @@ lv_obj_t* render_climate_tile(lv_obj_t* parent,
     // stale mini-slot layout still existed.
     widget = ClimateTileWidgets{};
     widget.icon_label = icon_label;
+    widget.state_label = state_label;
+    widget.state_font = state_font;
+    widget.state_width = state_width;
     widget.dynamic_icon = dynamic_icon;
     // A newly created card must accept the next state payload even when the
     // same entity/value was rendered by a previous cached card instance.
     widget.last_payload_hash = 0;
-    lv_obj_t* value = lv_label_create(card);
-    set_label_style(value, lv_color_white(), FONT_VALUE);
-    lv_obj_set_width(value, LV_PCT(100));
-    lv_obj_set_style_text_align(
-        value, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(
-        value, "-- \xC2\xB0"
-               "C");
-    lv_obj_align(value, LV_ALIGN_CENTER, 0, tile_layout::scale(28));
-    widget.value_label = value;
+    if (!compact) {
+      lv_obj_t* value = lv_label_create(card);
+      set_label_style(value, lv_color_hex(ui_theme::text()), FONT_VALUE);
+      lv_obj_set_width(value, LV_PCT(100));
+      lv_obj_set_style_text_align(
+          value, LV_TEXT_ALIGN_CENTER, 0);
+      lv_label_set_text(
+          value, "-- \xC2\xB0"
+                 "C");
+      lv_obj_align(value, LV_ALIGN_CENTER, 0, tile_layout::scale(28));
+      widget.value_label = value;
+    }
 
     // Every climate size, including 1x1, renders its configured mini content
     // through the same slot path. A 1x1 slot remains visually identical to
     // the former centered value label, but now matches the Web UI semantics.
+    // Half height has no mini fields.
     const uint8_t slot_count =
-        std::min<uint8_t>(
-            ClimateTileWidgets::kMaxSlots,
-            climateTileSlotCapacity(tile));
+        compact ? 0
+                : std::min<uint8_t>(
+                      ClimateTileWidgets::kMaxSlots,
+                      climateTileSlotCapacity(tile));
     for (uint8_t slot = 0; slot < slot_count; ++slot) {
       widget.slot_roots[slot] =
           create_climate_slot(
@@ -1481,6 +1535,7 @@ lv_obj_t* render_climate_tile(lv_obj_t* parent,
         states ? states[index] : ClimateState{};
     refresh_climate_tile_content(
         grid_type, index, initial_state);
+    tile_icon_source::refresh_controls(card);
   }
 
   if (grid_type != GridType::SCREENSAVER && tile.sensor_entity.length()) {

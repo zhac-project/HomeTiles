@@ -4,6 +4,11 @@ These notes describe each release at publication. For current hardware support a
 
 | Version | Release notes |
 | --- | --- |
+| v0.9.3 | [Read release notes](v0.9.3.md) |
+| v0.9.2 | [Read release notes](v0.9.2.md) |
+| v0.9.1 | [Read release notes](v0.9.1.md) |
+| v0.9.0 | [Read release notes](v0.9.0.md) |
+| v0.8.0 | [Read release notes](v0.8.0.md) |
 | v0.7.0 | [Read release notes](v0.7.0.md) |
 | v0.6.12 | [Read release notes](v0.6.12.md) |
 | v0.6.11 | [Read release notes](v0.6.11.md) |

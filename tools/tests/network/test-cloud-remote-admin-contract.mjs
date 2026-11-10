@@ -54,14 +54,15 @@ const route = uri => {
   const next = start.indexOf('server.on(', at);
   return start.slice(at, next < 0 ? undefined : next);
 };
+// POST /api/link stays open: it needs a Pair press on the panel itself.
 const localOnly = ['/api/ota/prepare', '/api/ota/install', '/api/ota/github/install', '/api/files/delete',
-  '/api/files/rename', '/api/files/mkdir', '/api/coredump/erase'];
+  '/api/files/rename', '/api/files/mkdir', '/api/coredump/erase', '/api/auth/password'];
 for (const uri of localOnly) assert.match(route(uri), /localOnly\(/, `${uri} is local-only`);
 for (const uri of ['/api/ota/upload', '/api/ota/upload/raw', '/api/files/upload']) {
   assert.match(route(uri), /localOnly\([\s\S]*localOnlyUpload\(/, `${uri}: 403 and the upload body is dropped`);
 }
 for (const uri of ['/api/ota/github/check', '/api/ota/status', '/restart', '/api/tiles', '/api/screensaver',
-  '/api/screenshot', '/api/upload_icon', '/api/files/list', '/bridge']) {
+  '/api/screenshot', '/api/icons/upload', '/api/icons/download', '/api/files/list', '/bridge']) {
   assert.doesNotMatch(route(uri), /localOnly/, `${uri} stays available remotely`);
 }
 

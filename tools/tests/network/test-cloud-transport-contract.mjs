@@ -78,7 +78,8 @@ const fn = name => {
   return found.body;
 };
 assert.match(fn('HomeTilesNetworkManager::connectMqtt'),
-  /cloudRefused\(\) \? kCloudRefusalRetryMs/, 'a refused handshake uses the long retry');
+  /if \(cloudRefused\(\)\) mqtt_retry_at = millis\(\) \+ kCloudRefusalRetryMs;/,
+  'a refused handshake uses the long retry');
 assert.match(fn('HomeTilesNetworkManager::serviceMqttWorker'),
   /if \(cloudRefused\(\)\) mqtt_retry_at = millis\(\) \+ kCloudRefusalRetryMs;/,
   'a close with 1008/4402 uses the long retry');

@@ -73,15 +73,21 @@ int main() {
       assert(lv_obj_get_style_border_width(card, LV_PART_MAIN) == 0);
       assert(lv_obj_get_style_outline_width(card, LV_PART_MAIN) == (border ? 1 : 0));
       assert(lv_obj_get_style_outline_pad(card, LV_PART_MAIN) == -1);
-      assert(lv_obj_get_style_outline_opa(card, LV_PART_MAIN) == (border ? 51 : 0));
+      // The frame line is solid and follows the resting card (frame_line): a
+      // dark own card gets a slightly lighter line, also while pressed.
+      assert(lv_obj_get_style_outline_opa(card, LV_PART_MAIN) == (border ? LV_OPA_COVER : 0));
+      if (border) assert(lv_color_eq(lv_obj_get_style_outline_color(card, LV_PART_MAIN),
+                                     lv_color_mix(lv_color_white(), lv_color_hex(0x223355), 23)));
+      // LVGL 9.6 (lvgl#10654) refreshes the subtree once when a finished
+      // transition empties its style; the press itself stays free of it.
       lv_tick_inc(200); lv_timer_handler(); lv_refr_now(display);
-      assert(style_changes == 0 && "Finishing the press transition must not invalidate descendant text layout");
+      assert(style_changes <= children && "Finishing the press transition may refresh each descendant at most once");
       assert(lv_color_eq(lv_obj_get_style_bg_color(card, LV_PART_MAIN), lv_color_hex(0x324365)));
       style_changes = 0;
       lv_obj_remove_state(card, LV_STATE_PRESSED);
       assert(style_changes == 0 && "Release must not rebuild descendant layout before the click callback");
       lv_tick_inc(200); lv_timer_handler(); lv_refr_now(display);
-      assert(style_changes == 0 && "Finishing the release transition must not invalidate descendant text layout");
+      assert(style_changes <= children && "Finishing the release transition may refresh each descendant at most once");
       assert(lv_color_eq(lv_obj_get_style_bg_color(card, LV_PART_MAIN), lv_color_hex(0x223355)));
       for (size_t i = 0; i < labels.size(); ++i) {
         lv_area_t actual; lv_obj_get_coords(labels[i], &actual);

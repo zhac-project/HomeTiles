@@ -328,18 +328,20 @@ bool createUiScreenshot(String& error) {
     return false;
   }
 
-  lv_obj_t* top_layer = lv_display_get_layer_top(disp);
-  if (top_layer && hasVisibleDirectChildren(top_layer)) {
-    lv_area_t top_layer_area;
-    getSnapshotAreaForObject(top_layer, top_layer_area);
-    lv_draw_buf_t* overlay_buf = lv_snapshot_take(top_layer, LV_COLOR_FORMAT_ARGB8888);
+  // The popups on the top layer, then the light theme's screen corners on
+  // the system layer (UIManager::applyScreenCorners), as the panel shows them.
+  for (lv_obj_t* layer : {lv_display_get_layer_top(disp), lv_display_get_layer_sys(disp)}) {
+    if (!layer || !hasVisibleDirectChildren(layer)) continue;
+    lv_area_t layer_area;
+    getSnapshotAreaForObject(layer, layer_area);
+    lv_draw_buf_t* overlay_buf = lv_snapshot_take(layer, LV_COLOR_FORMAT_ARGB8888);
     if (!overlay_buf) {
       lv_draw_buf_destroy(draw_buf);
       error = "Popup overlay snapshot failed";
       return false;
     }
 
-    const bool blended = blendArgb8888OverRgb565(draw_buf, screen_area, overlay_buf, top_layer_area, error);
+    const bool blended = blendArgb8888OverRgb565(draw_buf, screen_area, overlay_buf, layer_area, error);
     lv_draw_buf_destroy(overlay_buf);
     if (!blended) {
       lv_draw_buf_destroy(draw_buf);

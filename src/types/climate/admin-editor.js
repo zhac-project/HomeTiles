@@ -238,18 +238,13 @@
           ? (data.sensor_entity || '')
           : (data.climate_entity || '');
       entity.value = configuredEntity;
-      if (configuredEntity) {
-        entity.dataset.configuredValue = configuredEntity;
-      } else {
-        // The option list is rebuilt asynchronously. Do not let a value from
-        // the previously edited climate tile come back when this tile
-        // explicitly has no entity configured.
-        delete entity.dataset.configuredValue;
-      }
     }
     const popup = document.getElementById(tab + '_climate_popup_open_mode');
     if (popup) popup.value = (data.popup_open_mode !== undefined)
       ? String(data.popup_open_mode) : '1';
+    const view = document.getElementById(tab + '_climate_view');
+    if (view) view.value = Number(data.sensor_display_mode) === 1 ? '1' : '0';
+    if (typeof syncSwitchChoices === 'function') syncSwitchChoices(tab);
     const slots = decodeClimateSlotConfig(
       data.climate_slots_packed ?? data.sensor_gauge_min ?? 0);
     slots.forEach((value, index) => {

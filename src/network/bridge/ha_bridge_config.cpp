@@ -8,10 +8,13 @@
 #include <lvgl.h>
 #include <strings.h>
 #include <ctype.h>
+#include <utility>
 #include "src/core/config/batched_nvs_write.h"
 #include "src/devices/device.h"
 #include "src/io/hardware_io.h"
 #include "src/video/local_camera/local_camera.h"
+#include "src/audio/speaker.h"
+#include "src/types/scene/scene_target.h"
 #include <vector>
 
 static const char* PREF_NAMESPACE = "tab5_config";
@@ -82,7 +85,13 @@ bool HaBridgeConfig::load() {
   data.media_players_text = "";
   data.climates_text = "";
   data.covers_text = "";
+  data.locks_text = "";
+  data.alarm_panels_text = "";
+  data.fans_text = "";
+  data.vacuums_text = "";
+  data.calendars_text = "";
   data.cameras_text = "";
+  data.images_text = "";
   data.scene_alias_text = "";
   data.sensor_units_map = "";
   data.sensor_names_map = "";
@@ -238,7 +247,13 @@ bool HaBridgeConfig::hasData() const {
          data.media_players_text.length() > 0 ||
          data.climates_text.length() > 0 ||
          data.covers_text.length() > 0 ||
+         data.locks_text.length() > 0 ||
+         data.alarm_panels_text.length() > 0 ||
+         data.fans_text.length() > 0 ||
+         data.vacuums_text.length() > 0 ||
+         data.calendars_text.length() > 0 ||
          data.cameras_text.length() > 0 ||
+         data.images_text.length() > 0 ||
          data.scene_alias_text.length() > 0;
 }
 
@@ -299,6 +314,8 @@ String HaBridgeConfig::findEntityIcon(const char* entity_id) const {
 }
 
 String HaBridgeConfig::findSceneEntity(const String& alias) const {
+  // A Scene tile that stores the entity id names its entity itself.
+  if (sceneTargetIsEntityId(alias)) return alias;
   return lookupKeyValue(data.scene_alias_text, alias);
 }
 
@@ -340,6 +357,15 @@ String HaBridgeConfig::buildJsonPayload(const char* device_id,
   // Live upload to the Bridge (panel -> Bridge TCP stream); same conditions.
   json += ",\"local_camera_stream\":";
   json += local_camera::bridgeStreamCapability() ? "true" : "false";
+  // Speaker playback (media_player entity): codec found on its exact profile.
+  json += ",\"audio_output\":";
+  json += speaker::bridgeCapability() ? "true" : "false";
+  // Microphone capture for Assist: ES7210 answered on its exact profile.
+  json += ",\"audio_input\":";
+  json += speaker::micCapability() ? "true" : "false";
+  // Home Assistant's theme select and rotation select (the rotation's steps
+  // come with its retained state, mqttPublishDeviceSettings).
+  json += ",\"display_theme\":true,\"display_rotation\":true";
   json += "}";
   if (data.has_editable_lists) {
     json += ",\"numbers\":";
@@ -562,6 +588,34 @@ bool HaBridgeConfig::applyJson(const char* json_payload, bool* out_reload, bool*
 
   uint32_t t_copy0 = millis();
   String json = json_payload;
+  {
+    // "entity_search": <level> (Python json.dumps writes ": " between key and value).
+    const int key = json.indexOf("\"entity_search\"");
+    int at = key >= 0 ? key + 15 : -1;
+    while (at >= 0 && at < static_cast<int>(json.length()) && (json[at] == ':' || json[at] == ' ')) ++at;
+    const bool digit = at > 0 && at < static_cast<int>(json.length()) && json[at] >= '0' && json[at] <= '9';
+    entity_search_ = digit ? static_cast<uint8_t>(json[at] - '0') : 0;
+  }
+  {
+    // "push": <level>, the same format as "entity_search". An entity named
+    // "push" is a value, not a key: skip occurrences without a colon.
+    push_ = 0;
+    const int len = static_cast<int>(json.length());
+    for (int key = json.indexOf("\"push\""); key >= 0; key = json.indexOf("\"push\"", key + 6)) {
+      int at = key + 6;
+      while (at < len && json[at] == ' ') ++at;
+      if (at >= len || json[at] != ':') continue;
+      ++at;
+      while (at < len && json[at] == ' ') ++at;
+      if (at < len && json[at] >= '0' && json[at] <= '9') {
+        push_ = static_cast<uint8_t>(json[at] - '0');
+      }
+      break;
+    }
+  }
+  // Live values must be in the blob before it is copied and the indexes are
+  // rebuilt from the merged copy.
+  if (values_blob_dirty_) materializeValuesBlob();
   HaBridgeConfigData merged = data;
   uint32_t t_start = millis();
   // merged = data deep-copies every String field of HaBridgeConfigData (7 text
@@ -637,6 +691,18 @@ bool HaBridgeConfig::applyJson(const char* json_payload, bool* out_reload, bool*
     parseArraySection(json.substring(covers_idx), merged.covers_text);
   }
 
+  // Like climates and covers: a reply without the key keeps the last list
+  // (older Bridges send none).
+  for (auto section : {std::make_pair("\"locks\"", &merged.locks_text),
+                       std::make_pair("\"alarm_panels\"", &merged.alarm_panels_text),
+                       std::make_pair("\"fans\"", &merged.fans_text),
+                       std::make_pair("\"vacuums\"", &merged.vacuums_text),
+                       std::make_pair("\"calendars\"", &merged.calendars_text),
+                       std::make_pair("\"images\"", &merged.images_text)}) {
+    const int index = json.indexOf(section.first);
+    if (index >= 0) parseArraySection(json.substring(index), *section.second);
+  }
+
   int cameras_idx = json.indexOf("\"cameras\"");
   if (cameras_idx >= 0) {
     parseArraySection(json.substring(cameras_idx), merged.cameras_text);
@@ -666,6 +732,11 @@ bool HaBridgeConfig::applyJson(const char* json_payload, bool* out_reload, bool*
   parseEntityNameSection(json, "media_player_meta", merged.sensor_names_map);
   parseEntityNameSection(json, "climate_meta", merged.sensor_names_map);
   parseEntityNameSection(json, "cover_meta", merged.sensor_names_map);
+  parseEntityNameSection(json, "lock_meta", merged.sensor_names_map);
+  parseEntityNameSection(json, "alarm_panel_meta", merged.sensor_names_map);
+  parseEntityNameSection(json, "fan_meta", merged.sensor_names_map);
+  parseEntityNameSection(json, "vacuum_meta", merged.sensor_names_map);
+  parseEntityNameSection(json, "calendar_meta", merged.sensor_names_map);
   parseEntityNameSection(json, "camera_meta", merged.sensor_names_map);
   parseEntityNameSection(json, "editable_meta", merged.sensor_names_map);
   parseIconMetaSections(json, merged.entity_icons_map);
@@ -713,7 +784,7 @@ bool HaBridgeConfig::applyJson(const char* json_payload, bool* out_reload, bool*
     if (ok) {
       Serial.printf("[Bridge] Configuration received from Home Assistant: "
                     "sensors=%d binary=%d energy=%d weather=%d lights=%d switches=%d "
-                    "media=%d climate=%d covers=%d cameras=%d scenes=%d\n",
+                    "media=%d climate=%d covers=%d locks=%d alarms=%d fans=%d vacuums=%d calendars=%d cameras=%d scenes=%d\n",
                     countListEntries(data.sensors_text),
                     countListEntries(data.binary_sensors_text),
                     countListEntries(data.energy_text),
@@ -723,6 +794,11 @@ bool HaBridgeConfig::applyJson(const char* json_payload, bool* out_reload, bool*
                     countListEntries(data.media_players_text),
                     countListEntries(data.climates_text),
                     countListEntries(data.covers_text),
+                    countListEntries(data.locks_text),
+                    countListEntries(data.alarm_panels_text),
+                    countListEntries(data.fans_text),
+                    countListEntries(data.vacuums_text),
+                    countListEntries(data.calendars_text),
                     countListEntries(data.cameras_text),
                     countMapEntries(data.scene_alias_text));
       if (out_reload) {
@@ -959,7 +1035,13 @@ static bool bridgeConfigEquals(const HaBridgeConfigData& a, const HaBridgeConfig
   if (!listEqualsIgnoringOrder(a.media_players_text, b.media_players_text)) return false;
   if (!listEqualsIgnoringOrder(a.climates_text, b.climates_text)) return false;
   if (!listEqualsIgnoringOrder(a.covers_text, b.covers_text)) return false;
+  if (!listEqualsIgnoringOrder(a.locks_text, b.locks_text)) return false;
+  if (!listEqualsIgnoringOrder(a.alarm_panels_text, b.alarm_panels_text)) return false;
+  if (!listEqualsIgnoringOrder(a.fans_text, b.fans_text)) return false;
+  if (!listEqualsIgnoringOrder(a.vacuums_text, b.vacuums_text)) return false;
+  if (!listEqualsIgnoringOrder(a.calendars_text, b.calendars_text)) return false;
   if (!listEqualsIgnoringOrder(a.cameras_text, b.cameras_text)) return false;
+  if (!listEqualsIgnoringOrder(a.images_text, b.images_text)) return false;
   if (!mapEqualsIgnoringOrder(a.scene_alias_text, b.scene_alias_text)) return false;
 
   for (size_t i = 0; i < HA_SENSOR_SLOT_COUNT; ++i) {
@@ -1089,7 +1171,7 @@ static bool extractStringField(const String& object, const char* key, String& ou
   return out.length() > 0;
 }
 
-static const char* energyIconForCategory(const String& category, const String& id, const String& unit) {
+const char* energySourceIcon(const String& category, const String& id, const String& unit) {
   String cat = category;
   cat.trim();
   cat.toLowerCase();
@@ -1171,7 +1253,7 @@ static void parseEnergySection(const String& body,
 
       String category;
       extractStringField(object, "category", category);
-      icon_updates.push_back({id, energyIconForCategory(category, id, unit)});
+      icon_updates.push_back({id, energySourceIcon(category, id, unit)});
     }
 
     obj_start = segment.indexOf('{', obj_end + 1);
@@ -1400,6 +1482,11 @@ static void parseIconMetaSections(const String& body, String& icons) {
   parseEntityIconSection(body, "media_player_meta", icons);
   parseEntityIconSection(body, "climate_meta", icons);
   parseEntityIconSection(body, "cover_meta", icons);
+  parseEntityIconSection(body, "lock_meta", icons);
+  parseEntityIconSection(body, "alarm_panel_meta", icons);
+  parseEntityIconSection(body, "fan_meta", icons);
+  parseEntityIconSection(body, "vacuum_meta", icons);
+  parseEntityIconSection(body, "calendar_meta", icons);
   parseEntityIconSection(body, "camera_meta", icons);
 }
 
@@ -1683,6 +1770,8 @@ static size_t indexApproxBytes(const HaEntityKeyMap& m) {
 
 void HaBridgeConfig::rebuildEntityIndexes() {
   pruneEditableValues();
+  // The blob was just swapped in as a whole and is now the source again.
+  values_blob_dirty_ = false;
   rebuildIndexFromBlob(data.sensor_units_map, units_index_);
   rebuildIndexFromBlob(data.sensor_names_map, names_index_);
   rebuildIndexFromBlob(data.sensor_values_map, values_index_);
@@ -1735,51 +1824,34 @@ void HaBridgeConfig::updateEntityMeta(const String& entity_id, const String& nam
 
 void HaBridgeConfig::updateSensorValue(const String& entity_id, const String& value) {
   if (entity_id.length() == 0) return;
-
-  // Parse sensor_values_map and update/add the value
-  String& valuesMap = data.sensor_values_map;
-  String newMap = "";
-  bool found = false;
-
-  int start = 0;
-  while (start < valuesMap.length()) {
-    int end = valuesMap.indexOf('\n', start);
-    if (end < 0) end = valuesMap.length();
-
-    String line = valuesMap.substring(start, end);
-    int eq = line.indexOf('=');
-
-    if (eq > 0) {
-      String entity = line.substring(0, eq);
-      entity.trim();
-
-      if (entity.equalsIgnoreCase(entity_id)) {
-        // Update existing entry
-        if (newMap.length()) newMap += '\n';
-        newMap += entity_id + "=" + value;
-        found = true;
-      } else {
-        // Keep existing entry
-        if (newMap.length()) newMap += '\n';
-        newMap += line;
-      }
-    } else if (line.length() > 0) {
-      // Keep non-empty lines without '='
-      if (newMap.length()) newMap += '\n';
-      newMap += line;
-    }
-
-    start = end + 1;
+  // Every live sensor state lands here. Rewriting the whole blob line by line
+  // (one substring allocation per entity) cost each update the same as the
+  // blocking blob scans removed from lookupKeyValue(); only the index changes
+  // now, and get() rebuilds the blob when Web Admin or applyJson needs it.
+  auto it = values_index_.find(entity_id.c_str());
+  if (it != values_index_.end() &&
+      it->second.size() == value.length() &&
+      memcmp(it->second.c_str(), value.c_str(), value.length()) == 0) {
+    return;
   }
-
-  // Add new entry if not found
-  if (!found) {
-    if (newMap.length()) newMap += '\n';
-    newMap += entity_id + "=" + value;
-  }
-
-  valuesMap = newMap;
   indexPut(values_index_, entity_id, value);
+  values_blob_dirty_ = true;
+}
+
+void HaBridgeConfig::materializeValuesBlob() const {
+  size_t bytes = 0;
+  for (const auto& kv : values_index_) bytes += kv.first.size() + kv.second.size() + 2;
+  String blob;
+  blob.reserve(bytes);
+  for (const auto& kv : values_index_) {
+    if (blob.length()) blob += '\n';
+    blob.concat(kv.first.c_str(), kv.first.size());
+    blob += '=';
+    blob.concat(kv.second.c_str(), kv.second.size());
+  }
+  // The global configuration object is never const; only get() is.
+  const_cast<HaBridgeConfig*>(this)->data.sensor_values_map = std::move(blob);
+  values_blob_dirty_ = false;
 }
 
 String HaBridgeConfig::findEditableValue(const String& entity_id) const {
@@ -1792,6 +1864,20 @@ void HaBridgeConfig::updateEditableValue(const String& entity_id, const String& 
   auto it = editable_values_index_.find(entity_id.c_str());
   if (it == editable_values_index_.end() && editable_values_index_.size() >= 128) return;
   editable_values_index_[PsString(entity_id.c_str())] = PsString(payload.c_str());
+}
+
+String HaBridgeConfig::findDetailValue(const String& entity_id) const {
+  auto it = detail_values_index_.find(entity_id.c_str());
+  return it == detail_values_index_.end() ? String() : String(it->second.c_str());
+}
+
+void HaBridgeConfig::updateDetailValue(const String& entity_id, const String& payload) {
+  // A detail state is a few hundred bytes (a Fan with 16 preset names stays
+  // below 1 KiB); the map holds at most one entry per selected device.
+  if (!entity_id.length() || payload.length() > 2048) return;
+  auto it = detail_values_index_.find(entity_id.c_str());
+  if (it == detail_values_index_.end() && detail_values_index_.size() >= 64) return;
+  detail_values_index_[PsString(entity_id.c_str())] = PsString(payload.c_str());
 }
 
 void HaBridgeConfig::pruneEditableValues() {

@@ -48,6 +48,28 @@ void displayEndFullFramePreview() {
 #endif
 }
 
+// Camera full screen (#65): every ESP32-P4 panel.
+#if defined(DEVICE_P4_IDF_DSI) || defined(DEVICE_M5STACKS_TAB5) || defined(DEVICE_WAVESHARE_4B)
+bool displayFullFrameInfo(uint16_t& width, uint16_t& height, uint16_t& turn_cw) {
+  return DeviceImpl::displayFullFrameInfo(width, height, turn_cw);
+}
+bool displayBeginFullFrames() { return DeviceImpl::displayBeginFullFrames(); }
+uint16_t* displayAcquireFullFrame(size_t& bytes) {
+  return DeviceImpl::displayAcquireFullFrame(bytes);
+}
+bool displaySubmitFullFrame() { return DeviceImpl::displaySubmitFullFrame(); }
+void displayEndFullFrames() { DeviceImpl::displayEndFullFrames(); }
+#else
+bool displayFullFrameInfo(uint16_t&, uint16_t&, uint16_t&) { return false; }
+bool displayBeginFullFrames() { return false; }
+uint16_t* displayAcquireFullFrame(size_t& bytes) {
+  bytes = 0;
+  return nullptr;
+}
+bool displaySubmitFullFrame() { return false; }
+void displayEndFullFrames() {}
+#endif
+
 bool ppaCooldownActive() {
 #if defined(DEVICE_WAVESHARE_TOUCH_LCD_X) || \
     defined(DEVICE_GUITION_JC1060P470C_FAMILY) || \
@@ -76,6 +98,20 @@ void displayFillScreen(uint16_t color) {
 
 void displaySetRotation(uint8_t rotation) {
   DeviceImpl::displaySetRotation(rotation);
+}
+
+void displaySetUpright(bool upright) {
+#if defined(DEVICE_GUITION_JC8012P4A1) || defined(DEVICE_GUITION_JC8012P4A1_V2) || \
+    defined(DEVICE_WAVESHARE_TOUCH_LCD_4_3) || defined(DEVICE_WAVESHARE_TOUCH_LCD_7) || \
+    defined(DEVICE_WAVESHARE_TOUCH_LCD_8) || defined(DEVICE_WAVESHARE_TOUCH_LCD_10_1) || \
+    defined(DEVICE_M5STACKS_TAB5) || \
+    defined(DEVICE_GUITION_JC1060P470C) || defined(DEVICE_GUITION_JC1060P470C_V2) || \
+    defined(DEVICE_WAVESHARE_TOUCH_LCD_7B) || defined(DEVICE_GUITION_JC4880P443_PORTRAIT) || \
+    defined(DEVICE_WAVESHARE_TOUCH_LCD_5)
+  DeviceImpl::displaySetUpright(upright);
+#else
+  (void)upright;
+#endif
 }
 
 void setBrightness(uint8_t value) {
@@ -129,14 +165,14 @@ void prepareForRestart() {
 }
 
 void displayUpdateCheckGuardBegin() {
-#if defined(DEVICE_GUITION_ESP32_4848S040) || \
+#if defined(DEVICE_GUITION_ESP32_4848S040) || defined(DEVICE_GOLDEN_SECURITY_GS_T3E_V2) || \
     defined(DEVICE_SUNTON_ESP32_8048S070C)
   DeviceImpl::displayUpdateCheckGuardBegin();
 #endif
 }
 
 void displayUpdateCheckGuardEnd() {
-#if defined(DEVICE_GUITION_ESP32_4848S040) || \
+#if defined(DEVICE_GUITION_ESP32_4848S040) || defined(DEVICE_GOLDEN_SECURITY_GS_T3E_V2) || \
     defined(DEVICE_SUNTON_ESP32_8048S070C)
   DeviceImpl::displayUpdateCheckGuardEnd();
 #endif

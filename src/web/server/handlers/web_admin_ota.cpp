@@ -75,7 +75,7 @@ constexpr const char* kOtaRawContentType = "application/octet-stream";
 constexpr const char* kOtaRawFilenameHeader = "X-HomeTiles-OTA-Filename";
 
 void logOtaMemory(const char* tag) {
-  Serial.printf("[OTA/Mem] %s | Int free=%u KB | DMA free=%u KB | DMA largest=%u KB | PSRAM free=%u KB | MQTT buf=%u B\n",
+  Serial.printf("[OTA/Mem] %s | Int free=%u KB | DMA free=%u KB | DMA largest=%u KB | PSRAM free=%u KB | send buf=%u B\n",
                 tag ? tag : "?",
                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA) / 1024),

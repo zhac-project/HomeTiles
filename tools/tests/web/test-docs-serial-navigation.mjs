@@ -225,7 +225,8 @@ try {
   await until("fixture.opened", "Reconnect after flasher releases USB");
   await evaluate("fixture.emit('After flashing\\n')");
   await evaluate(`const legacy = document.createElement('a'); legacy.href = ${JSON.stringify(base + "flashing/")}; document.body.append(legacy); legacy.click();`);
-  await until(`window.finishedNavigation === ${JSON.stringify(base + "installer/#manual-flashing")}`, "Legacy flashing redirect");
+  // Manual flashing lives on the Advanced setup page since v0.9.0.
+  await until(`window.finishedNavigation === ${JSON.stringify(base + "advanced-setup/#manual-flashing")}`, "Legacy flashing redirect");
   assert.equal(await evaluate("window.navigationToken === 'retained' && fixture.opened"), true, "Legacy redirect interrupted capture");
   await navigate("faq/");
   await evaluate("document.querySelector('[data-md-component=search-query]').focus()");

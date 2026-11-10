@@ -8,10 +8,12 @@ function loadAnimationFields(tab, data) {
       el.value = val;
       if (el.value !== val) el.value = '';  // saved file gone from SD -> none
     }
-    // Speed (fps) is stored in image_slideshow_sec for this tile type.
+    // Speed (fps) is stored in image_slideshow_sec for this tile type; a
+    // copied tile or a draft carries the field's own name.
     const fps = document.getElementById(tab + '_animation_fps');
     if (fps) {
-      let v = data && data.image_slideshow_sec ? parseInt(data.image_slideshow_sec, 10) : 10;
+      const raw = data && data.animation_fps !== undefined ? data.animation_fps : data && data.image_slideshow_sec;
+      let v = raw ? parseInt(raw, 10) : 10;
       if (!(v >= 1 && v <= 30)) v = 10;
       fps.value = v;
       const lbl = document.getElementById(tab + '_animation_fps_val');

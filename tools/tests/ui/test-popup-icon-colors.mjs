@@ -6,6 +6,7 @@
 // color, so the header disc glow and the popup border follow.
 import assert from 'node:assert/strict';
 import {readRepoFile} from '../../lib/admin-source.mjs';
+import {cppFunctionDefinitions} from '../../lib/cpp-source.mjs';
 
 const read = file => readRepoFile(file).replace(/\r\n?/g, '\n');
 const popup = read('src/ui/popups/sensor/sensor_popup.cpp');
@@ -21,10 +22,10 @@ for (const marker of [
 ]) assert.ok(popup.includes(marker), `sensor popup: ${marker}`);
 // Every state path applies the color: opening, live Sensor values, Binary
 // states and editable value changes.
-assert.match(popup, /set_label_text_if_changed\(ctx->value_label, display\.c_str\(\)\);\s*if \(!ctx->binary_mode && !ctx->editable\) \{\s*apply_popup_icon_color\(ctx, popup_icon_state_known\(value\), value\.c_str\(\), nullptr,/);
+assert.match(popup, /show_header_value\(ctx, sensor_value_display\(value, ctx->decimals, categorical_state\), unit\);\s*if \(!ctx->binary_mode && !ctx->editable\) \{\s*apply_popup_icon_color\(ctx, popup_icon_state_known\(value\), value\.c_str\(\), nullptr,/);
 assert.equal((popup.match(/apply_editable_icon_color\(ctx, (?:value|editable_value)\);/g) || []).length, 3,
   'Editable values color the icon when opening, rebinding and updating');
-assert.match(popup, /init\.state_history_mode\)\.c_str\(\)\);\s*apply_popup_icon_color\(ctx, popup_icon_state_known\(init\.value\)/);
+assert.match(popup, /init\.state_history_mode\), init\.unit\);\s*apply_popup_icon_color\(ctx, popup_icon_state_known\(init\.value\)/);
 assert.ok(read('src/ui/popups/sensor/sensor_popup.h').includes('  String icon_colors;\n') &&
   read('src/ui/popups/sensor/sensor_popup.h').includes('  bool forced_icon = false;'));
 // Tiles hand over their record or color.
@@ -46,8 +47,8 @@ assert.ok(camera.includes('lv_obj_t* icon = tile_icon_source::card_icon(static_c
 assert.ok(read('src/ui/popups/camera/camera_popup.cpp').includes('lv_obj_set_style_text_color(g_camera_popup->icon_label, lv_color_hex(init.icon_color), 0);'));
 // A protected Folder's PIN popup shows the icon in the tile's current color.
 const pin = read('src/ui/popups/pin/pin_popup.cpp');
-assert.ok(pin.includes('lv_obj_set_style_text_color(g_ctx->icon_label, lv_color_hex(init.icon_color), 0);') &&
-  pin.includes('lv_obj_set_style_text_color(parts.icon, lv_color_hex(init.icon_color), 0);'),
+assert.ok(pin.includes('lv_obj_set_style_text_color(ctx->icon_label, lv_color_hex(init.icon_color), 0);') &&
+  (pin.match(/apply_header\((?:g_)?ctx, init\);/g) || []).length === 2,
   'PIN popup icon color on first build and on reuse');
 assert.ok(read('src/ui/ui_manager.cpp').includes('init.icon_color = icon_color;'));
 const navigateSource = read('src/types/navigate/renderer.cpp');
@@ -76,7 +77,7 @@ for (const file of ['src/types/climate/renderer.cpp', 'src/types/cover/renderer.
     `${file} keeps the global tile color`);
 }
 assert.ok(read('src/types/climate/renderer.cpp').includes('init.bg_color = tileDefaultBgColor();'));
-assert.match(read('src/tiles/runtime/tile_icon_source.cpp'), /void forget_popup_source\(lv_obj_t\* obj\) \{\s*remember_popup_source\(nullptr\);/);
+assert.match(read('src/tiles/runtime/tile_icon_source.cpp'), /void forget_popup_source\(lv_obj_t\* obj\) \{[^}]*?popup_surface::g_open_surface = ui_theme::kThemeSurface;\s*remember_popup_source\(nullptr\);/);
 // Weather and Media pass the tile icon's color to the popup header icon.
 const weatherOpener = read('src/types/weather/renderer.cpp');
 assert.ok(weatherOpener.includes('init.icon_color = lv_color_to_u32(lv_obj_get_style_text_color(icon, LV_PART_MAIN)) & 0xFFFFFF;'),
@@ -87,8 +88,23 @@ for (const file of ['src/types/media/renderer.cpp', 'src/tiles/runtime/tile_rend
   assert.ok(read(file).includes('init.icon_color = lv_color_to_u32(lv_obj_get_style_text_color(widgets.icon_label, LV_PART_MAIN)) & 0xFFFFFF;'),
     `${file} passes the Media tile icon color`);
 }
-assert.equal((read('src/ui/popups/media/media_popup.cpp').match(/lv_obj_set_style_text_color\(ctx->icon_label, lv_color_hex\(init\.icon_color\), 0\);/g) || []).length, 2,
-  'Media applies the icon color on update and on opening');
-// The shell follows the body icon color every sync, so disc and border follow.
-assert.match(read('src/ui/popups/popup_shell.cpp'), /copy_label\(shell\.icon, shell\.active->icon, false\);\s*apply_header_disc_tint\(shell\.icon_disc, shell\.icon\);/);
+{
+  // Media keeps the tile icon's color for the player's head (show_head) and
+  // sets it before the first frame (prepare_media_popup_open) and on every
+  // update (apply_init_to_context).
+  const media = read('src/ui/popups/media/media_popup.cpp');
+  const mediaFn = name => cppFunctionDefinitions(media).find(f => f.name === name)?.source || '';
+  for (const name of ['prepare_media_popup_open', 'apply_init_to_context']) {
+    assert.ok(mediaFn(name).includes('ctx->icon_color = init.icon_color;'), `Media ${name} takes the icon color`);
+  }
+  assert.ok(mediaFn('prepare_media_popup_open').includes(
+    'lv_obj_set_style_text_color(ctx->icon_label, lv_color_hex(ctx->icon_color), 0);'), 'Media opening applies it');
+  // The head always shows the player (the menu leaves it free, 2026-10-22).
+  assert.match(mediaFn('show_head'),
+    /lv_obj_set_style_text_color\(ctx->icon_label, lv_color_hex\(ctx->icon_color\), 0\);/,
+    'Media update applies it to the player head');
+}
+// The shell follows the body icon color every sync, so the disc follows and
+// the header icon shows that color readable on it.
+assert.match(read('src/ui/popups/popup_shell.cpp'), /copy_label\(shell\.icon, shell\.active->icon, false, nullptr, false\);\s*apply_header_disc_tint\(shell\.icon_disc, shell\.icon, shell\.active->icon\);/);
 console.log('Popup header icons follow the tile icon colors');

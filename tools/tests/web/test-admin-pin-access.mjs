@@ -31,7 +31,6 @@ for (const marker of [
   'settings-access-toggles',
   'settings-access-columns',
   'settings-pin-fields',
-  'settings-edge-fields',
   'settings_pin_enabled',
   'data-pin-configured=\\"',
   'settings_pin',
@@ -49,10 +48,15 @@ for (const marker of [
 
 const togglesPosition = settingsHtml.indexOf('settings-access-toggles');
 const pinFieldsPosition = settingsHtml.indexOf('settings-pin-fields');
-const edgeFieldsPosition = settingsHtml.indexOf('settings-edge-fields');
-if (togglesPosition < 0 || pinFieldsPosition < togglesPosition ||
-    edgeFieldsPosition < pinFieldsPosition) {
-  throw new Error('Settings access controls must render as top toggles, then PIN and edge');
+if (togglesPosition < 0 || pinFieldsPosition < togglesPosition) {
+  throw new Error('Settings access controls must render as top toggles, then PIN');
+}
+// The swipe is set in the gesture menu (swipe_gestures.h, Global tab): the
+// tile keeps hidden fields so access saves carry the current swipe.
+if (settingsHtml.includes('settings-edge-fields') || settingsHtml.includes('tr.settings_reveal_edge') ||
+    !settingsHtml.includes('<input type=\\"checkbox\\" hidden id=\\"" + prefix + "settings_swipe_enabled\\"') ||
+    !settingsHtml.includes('<input type=\\"hidden\\" id=\\"" + prefix + "settings_reveal_edge\\" value=\\"')) {
+  throw new Error('The Settings tile keeps its swipe only in hidden fields');
 }
 
 for (const forbidden of [
@@ -182,7 +186,7 @@ for (const marker of [
   "input.value = String(data?.folder_pin || '')",
   "const storedPin = enabled ? String(result.folder_pin || '') : '';",
   "const showPinEditor = isFolderTile && toggle?.checked === true;",
-  "fields.classList.toggle('is-hidden', !isFolderTile)",
+  "fields.classList.toggle('is-hidden', !isFolderTile || isPage)",
   "targetSelect?.value ?? tile?.navigate_target",
   'delete exported.folder_pin_enabled;',
   'delete exported.folder_pin;',
@@ -194,10 +198,6 @@ for (const marker of [
   'reconcileSettingsTileUi(false, snapshot, true)',
   'function saveHiddenSettingsTile(tab, silent = false)',
   "body.set('settings_tile_snapshot_present', '1')",
-  "body.set('settings_tile_col', String(layout.col))",
-  "body.set('settings_tile_row', String(layout.row))",
-  "body.set('settings_tile_span_w', String(layout.span_w))",
-  "body.set('settings_tile_span_h', String(layout.span_h))",
   'if (settingsBody) settingsBody.scrollTop = 0;',
   'function enableSettingsHiddenSlot()',
   "dragSource.kind !== 'grid-tile'",
@@ -211,7 +211,7 @@ for (const marker of [
   "body.set('settings_tile_target_col'",
   "body.set('settings_tile_target_row'",
   'async function flushSettingsTileSaveBeforeHide',
-  'settingsTileTransferInFlight',
+  'settingsTileTransfersInFlight',
   "const swipe = settingsAccessElement('settings_swipe_enabled');",
   'if (swipe) swipe.checked = true;',
   'dragSource.hiddenTarget = null;',
@@ -244,8 +244,18 @@ for (const [label, block, queueMarker, reconcileMarker] of [
 ]) {
   requireMarker(block, queueMarker, `${label} immutable transfer`);
   requireMarker(block, reconcileMarker, `${label} final reconciliation`);
-  if ((block.match(/reconcileSettingsTileUi\(/g) || []).length !== 1) {
-    throw new Error(`${label} must expose the destination only after one reconciliation`);
+  // The move shows at once (previewSettingsTileTransfer, user 2026-10-02);
+  // a successful save reconciles with the device once, a failed one draws
+  // the stored state back.
+  if ((block.match(/return await reconcileSettingsTileUi\(/g) || []).length !== 1) {
+    throw new Error(`${label} must reconcile a successful transfer exactly once`);
+  }
+  if (!(block.indexOf('previewSettingsTileTransfer(') >= 0 &&
+        block.indexOf('previewSettingsTileTransfer(') < block.indexOf(queueMarker))) {
+    throw new Error(`${label} must show the move before the device saves it`);
+  }
+  if (!/if \(!saved\) \{\s+await reconcileSettingsTileUi\(/.test(block)) {
+    throw new Error(`${label} must draw the stored state back after a failed save`);
   }
   if (block.includes('location.reload')) {
     throw new Error(`${label} must not reload the page`);
@@ -378,15 +388,11 @@ if (adminCss.includes('height:44px;\n      min-width:0;\n      margin:0;')) {
 }
 
 for (const marker of [
-  'const char* admin_access_control;',
   'const char* settings_home_full;',
   'const char* folder_pin_enable;',
   'const char* pin_popup_incorrect;',
 ]) requireMarker(i18nHeader, marker, 'Central PIN translations');
 for (const marker of [
-  '"Zugriffsschutz"',
-  '"Access control"',
-  '"Contrôle d’accès"',
   '"Falsche PIN"',
   '"Incorrect PIN"',
   '"Code PIN incorrect"',

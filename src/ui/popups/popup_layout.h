@@ -1,12 +1,14 @@
 #pragma once
 
 #include "src/ui/shared/ui_surface_style.h"
+#include "src/core/config/tile_radius.h"
 
 #include "src/ui/shared/title_label.h"
 
 #include "src/core/display/display_manager.h"
 #include "src/fonts/ui_fonts.h"
 #include "src/tiles/icons/mdi_icons.h"
+#include "src/ui/shared/ui_theme.h"
 
 namespace popup_layout {
 
@@ -166,26 +168,33 @@ inline void applyIconScale(lv_obj_t* label) {
   (void)label;
 }
 
+// The header like the Home head bar and the Settings head (home_bar.cpp,
+// settings_style.h), with the card as the frame: the X's box one grid gap
+// inside the card corner (its pressed shape concentric with the card), the
+// header circle mirroring it, circle, title and X on the X's centre line
+// (user 2026-10-08: the head and every popup match). The offsets are from the
+// card's content box (kCardPad, below).
+constexpr int kHeadCardPad = scale(20);
 #if defined(DEVICE_LAYOUT_1024X600)
-constexpr int kHeaderCenterY = 50;
+constexpr int kHeaderCenterY = Device::kGridGap + 72 / 2;
 constexpr int kCloseButtonSize = 72;
 constexpr int kCloseButtonRadius = 13;
-constexpr int kCloseButtonOffsetX = 3;
-constexpr int kCloseButtonOffsetY = -3;
+constexpr int kCloseButtonOffsetX = kHeadCardPad - Device::kGridGap;
+constexpr int kCloseButtonOffsetY = -(kHeadCardPad - Device::kGridGap);
 constexpr int kCloseButtonClickArea = 7;
 #elif defined(DEVICE_LAYOUT_480X480)
-constexpr int kHeaderCenterY = 40;
+constexpr int kHeaderCenterY = Device::kGridGap + 64 / 2;
 constexpr int kCloseButtonSize = 64;
 constexpr int kCloseButtonRadius = 11;
-constexpr int kCloseButtonOffsetX = 4;
-constexpr int kCloseButtonOffsetY = -4;
+constexpr int kCloseButtonOffsetX = kHeadCardPad - Device::kGridGap;
+constexpr int kCloseButtonOffsetY = -(kHeadCardPad - Device::kGridGap);
 constexpr int kCloseButtonClickArea = 6;
 #else
-constexpr int kHeaderCenterY = 60;
+constexpr int kHeaderCenterY = Device::kGridGap + 96 / 2;
 constexpr int kCloseButtonSize = 96;
 constexpr int kCloseButtonRadius = 16;
-constexpr int kCloseButtonOffsetX = 6;
-constexpr int kCloseButtonOffsetY = -6;
+constexpr int kCloseButtonOffsetX = kHeadCardPad - Device::kGridGap;
+constexpr int kCloseButtonOffsetY = -(kHeadCardPad - Device::kGridGap);
 constexpr int kCloseButtonClickArea = 8;
 #endif
 // Header icon disc: a translucent circle at the card content's left edge,
@@ -194,37 +203,79 @@ constexpr int kCloseButtonClickArea = 8;
 constexpr int kHeaderIconDiscSize = scale(72);
 constexpr int kHeaderIconDiscGap = scale(16);
 constexpr int kHeaderIconDiscOpa = 38;
-// A colored header icon tints its disc like tile glow, with the global Glow
-// strength (ui_surface_style::icon_glow_opa, scaled). The card hairline is
-// the plain white 20 % tile border.
+// A colored header icon tints its disc like the tile's circle
+// (tone_color::fill, popup_shell.cpp header_fill). The card hairline is the
+// plain white 20 % tile border.
 constexpr int kPopupBorderOpa = 51;
-// Same contrast rule as tile_icon_disc::contrast_step_for/scaled_opa: the disc
-// is subtler on dark cards (8 % instead of 15 % at luma <= 0.08).
-inline uint8_t headerDiscContrastStep(uint32_t rgb) {
-  const float luma = (0.2126f * ((rgb >> 16) & 0xFF) + 0.7152f * ((rgb >> 8) & 0xFF) +
-                      0.0722f * (rgb & 0xFF)) / 255.0f;
-  float t = (luma - 0.08f) / 0.17f;
-  if (t < 0.0f) t = 0.0f;
-  if (t > 1.0f) t = 1.0f;
-  return static_cast<uint8_t>(t * 3.0f + 0.5f);
-}
-inline int headerDiscScaledOpa(int full, uint8_t step) { return (full * (24 + 7 * step) + 22) / 45; }
-constexpr int kHeaderIconX = 0;
-constexpr int kHeaderTitleX = kHeaderIconDiscSize + kHeaderIconDiscGap;
+constexpr int kHeaderIconX = Device::kGridGap + (kCloseButtonSize - kHeaderIconDiscSize) / 2 - kHeadCardPad;
+constexpr int kHeaderTitleX = kHeaderIconX + kHeaderIconDiscSize + kHeaderIconDiscGap;
 
+// The card reaches the screen edge (user 2026-10-08: the 3 or 4 px margin
+// gave away 8 px in every dimension; the shadow is cut at the edge anyway).
+// The head bar and the Settings head keep the same frame (kHeadMargin,
+// settings_style.h), so the X stays over the gear and every corner stays
+// concentric.
+constexpr int kCardMargin = 0;
 #if defined(DEVICE_LAYOUT_480X480)
-constexpr int kCardMargin = 3;
 constexpr int kCardRadius = 15;
 #else
-constexpr int kCardMargin = 4;
 constexpr int kCardRadius = 22;
 #endif
+
+// The card shadow of every popup: tile popups and the PIN pad (popup_shell),
+// the Settings dialogs and the first-start setup, the camera pill. LVGL keeps
+// a blurred shadow corner only while blur width + radius stays below
+// LV_DRAW_SW_SHADOW_CACHE_SIZE (lv_draw_sw_box_shadow.c, the cache of
+// lv_conf.h: S3 48, P4 72); a missed corner is computed again for every
+// refresh band. Since b284 the card radius is the tile radius plus a grid
+// gap, and the former 28 px blur missed the cache on the V2, 8-inch, 10.1",
+// Tab5, 7", 4B and the S3 (V2: 14.6 ms per frame while a popup slider
+// moved). LVGL computes the whole corner before it clips it to the screen,
+// so a shadow cut at the edge costs the same. The blur is therefore as wide
+// as the cache still holds at the object's current radius (it follows the
+// tile radius setting), at most the former 28 px (user 2026-10-08: smaller,
+// the same on every popup). A card that fills a square screen gets none.
+#if defined(DEVICE_ESP32_S3_RGB_480) || defined(DEVICE_GUITION_ESP32_4848S040) || \
+    defined(DEVICE_WAVESHARE_S3_TOUCH_LCD_4) || defined(DEVICE_WAVESHARE_S3_TOUCH_LCD_4B)
+constexpr int kShadowCacheSize = 48;
+#else
+constexpr int kShadowCacheSize = 72;
+#endif
+#if defined(LV_DRAW_SW_SHADOW_CACHE_SIZE) && LV_DRAW_SW_SHADOW_CACHE_SIZE > 0
+static_assert(kShadowCacheSize == LV_DRAW_SW_SHADOW_CACHE_SIZE, "the shadow cache of lv_conf.h");
+#endif
+constexpr int kCardShadowMax = scale480(28);
+constexpr int kCardShadowSpread = scale480(2);
+// The widest blur LVGL still caches with this corner radius.
+inline int shadow_width_for(int radius) {
+  const int room = kShadowCacheSize - 1 - radius;
+  return room <= 0 ? 0 : room < kCardShadowMax ? room : kCardShadowMax;
+}
+
+// The card is a square in the middle of the screen: of the screen height on
+// landscape panels, of the screen width on portrait ones (like the 480x480
+// panels; a card over the whole portrait height left the square content
+// above a large gap, user 2026-10-07).
 constexpr int kCardWidth =
     (SCREEN_WIDTH > SCREEN_HEIGHT)
         ? (SCREEN_HEIGHT - (kCardMargin * 2))
         : (SCREEN_WIDTH - (kCardMargin * 2));
-constexpr int kCardHeight = SCREEN_HEIGHT - (kCardMargin * 2);
-constexpr int kCardPad = scale(20);
+constexpr int kCardHeight =
+    (SCREEN_HEIGHT > SCREEN_WIDTH) ? kCardWidth : (SCREEN_HEIGHT - (kCardMargin * 2));
+// A card that fills a square screen: its shadow would lie outside it.
+constexpr bool kCardFillsScreen = kCardWidth == SCREEN_WIDTH && kCardHeight == SCREEN_HEIGHT;
+// PIN keypad keys at most this share of the card height, per mille. On the
+// panels of 7 inches and more (1024x600 7", 1280x800 8" and 10.1") filling
+// the card would make them physically about twice the size of the 4" and 5"
+// boards, which fill the space (Tab5 included, 1280x720 at 5").
+#if defined(DEVICE_LAYOUT_1024X600) || defined(DEVICE_WAVESHARE_TOUCH_LCD_8) || \
+    defined(DEVICE_WAVESHARE_TOUCH_LCD_10_1) || defined(DEVICE_GUITION_JC8012P4A1) || \
+    defined(DEVICE_GUITION_JC8012P4A1_V2)
+constexpr int kKeypadKeyMaxPermille = 125;
+#else
+constexpr int kKeypadKeyMaxPermille = 1000;
+#endif
+constexpr int kCardPad = kHeadCardPad;
 constexpr int kContentWidth = kCardWidth - (kCardPad * 2);
 
 #if defined(DEVICE_LAYOUT_1024X600) || defined(DEVICE_LAYOUT_480X480)
@@ -330,19 +381,29 @@ inline void alignHeader(lv_obj_t* card, lv_obj_t* title, lv_obj_t* icon,
 // behavior; `user_data` reaches it unchanged.
 inline lv_obj_t* createCloseButton(lv_obj_t* card, lv_event_cb_t handler,
                                    void* user_data) {
+  // The pressed shape of every head button (the Settings X and gear, the
+  // head bar's): halfway between the header circle and the full X, centred
+  // where the X always was, its corner the tile radius minus its inset
+  // (concentric), without the theme's grow on press (user 2026-10-07: every
+  // head button the same size, every one concentric). The touch area keeps
+  // the full X box.
+  constexpr int kPressed = (kCloseButtonSize + kHeaderIconDiscSize) / 2;
+  constexpr int kInset = (kCloseButtonSize - kPressed) / 2;
   lv_obj_t* close_btn = lv_button_create(card);
-  lv_obj_set_size(close_btn, kCloseButtonSize, kCloseButtonSize);
+  lv_obj_set_size(close_btn, kPressed, kPressed);
+  lv_obj_set_style_transform_width(close_btn, 0, LV_PART_MAIN | LV_STATE_PRESSED);
+  lv_obj_set_style_transform_height(close_btn, 0, LV_PART_MAIN | LV_STATE_PRESSED);
   lv_obj_set_style_bg_opa(close_btn, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_bg_color(close_btn, lv_color_hex(0xFFFFFF), LV_STATE_PRESSED);
+  lv_obj_set_style_bg_color(close_btn, lv_color_hex(ui_theme::text()), LV_STATE_PRESSED);
   lv_obj_set_style_bg_opa(close_btn, LV_OPA_20, LV_STATE_PRESSED);
   lv_obj_set_style_border_opa(close_btn, LV_OPA_TRANSP, 0);
   lv_obj_set_style_outline_opa(close_btn, LV_OPA_TRANSP, 0);
   lv_obj_set_style_shadow_opa(close_btn, LV_OPA_TRANSP, 0);
-  ui_surface_style::apply_radius(close_btn, kCloseButtonRadius, 0);
+  ui_surface_style::apply_radius(close_btn, tile_radius::kMinimum - kInset, 0);
   lv_obj_set_style_pad_all(close_btn, 0, 0);
-  lv_obj_align(close_btn, LV_ALIGN_TOP_RIGHT, kCloseButtonOffsetX,
-               kCloseButtonOffsetY);
-  lv_obj_set_ext_click_area(close_btn, kCloseButtonClickArea);
+  lv_obj_align(close_btn, LV_ALIGN_TOP_RIGHT, kCloseButtonOffsetX - kInset,
+               kCloseButtonOffsetY + kInset);
+  lv_obj_set_ext_click_area(close_btn, kCloseButtonClickArea + kInset);
   lv_obj_add_flag(close_btn, LV_OBJ_FLAG_PRESS_LOCK);
   lv_obj_clear_flag(close_btn, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_event_cb(close_btn, handler, LV_EVENT_CLICKED, user_data);
@@ -351,10 +412,19 @@ inline lv_obj_t* createCloseButton(lv_obj_t* card, lv_event_cb_t handler,
   lv_obj_t* close_label = lv_label_create(close_btn);
   lv_obj_set_style_text_font(close_label, FONT_MDI_ICONS, 0);
   applyIconScale(close_label);
-  lv_obj_set_style_text_color(close_label, lv_color_white(), 0);
+  lv_obj_set_style_text_color(close_label, lv_color_hex(ui_theme::text()), 0);
   lv_label_set_text(close_label, getMdiChar("window-close").c_str());
   lv_obj_center(close_label);
   return close_btn;
+}
+
+// The popups' card shadow (kCardShadowMax, shadow_width_for() above).
+// After the object's radius is set (apply_radius()).
+inline void apply_card_shadow(lv_obj_t* obj) {
+  lv_obj_set_style_shadow_width(obj, shadow_width_for(lv_obj_get_style_radius(obj, LV_PART_MAIN)), 0);
+  lv_obj_set_style_shadow_color(obj, lv_color_black(), 0);
+  lv_obj_set_style_shadow_opa(obj, LV_OPA_40, 0);
+  lv_obj_set_style_shadow_spread(obj, kCardShadowSpread, 0);
 }
 
 // Header icon label: as wide as the icon disc with centered text, so the
@@ -372,7 +442,7 @@ inline lv_obj_t* createHeaderIconDisc(lv_obj_t* card) {
   lv_obj_remove_flag(disc, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
   lv_obj_set_size(disc, kHeaderIconDiscSize, kHeaderIconDiscSize);
   lv_obj_set_style_radius(disc, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_bg_color(disc, lv_color_white(), 0);
+  lv_obj_set_style_bg_color(disc, lv_color_hex(ui_theme::icon()), 0);
   lv_obj_set_style_bg_opa(disc, static_cast<lv_opa_t>(kHeaderIconDiscOpa), 0);
   return disc;
 }

@@ -1,5 +1,8 @@
 #include "src/core/text/title_text.h"
 #include "src/tiles/config/tile_config.h"
+#include "src/types/sensor/gauge_range.h"
+#include "src/types/sensor/sensor_look.h"
+#include "src/tiles/config/tile_layouts.h"
 #include "src/devices/device.h"
 #include "src/core/config/config_manager.h"
 #include "src/core/i18n/i18n.h"
@@ -12,6 +15,7 @@
 #include <memory>
 #include <new>
 #include <esp_heap_caps.h>
+#include "src/core/memory/psram_allocator.h"
 
 static const char* PREF_NAMESPACE = "tab5_tiles";
 static constexpr uint8_t PACKED_GRID_VERSION = 7;
@@ -243,6 +247,12 @@ static constexpr size_t TILES_PER_QUARTER = 4;
 static constexpr size_t QUARTERS_PER_GRID =
     (TILES_PER_GRID + TILES_PER_QUARTER - 1) / TILES_PER_QUARTER;
 static_assert(QUARTERS_PER_GRID > 0, "Grid must contain at least one tile");
+// Grids written before the storage entries held one entry per classic cell:
+// the V7 reader takes such a file as it is (the rest empty), and the V6 and
+// NVS migrations only ever find that many.
+static constexpr size_t LEGACY_QUARTERS_PER_GRID =
+    (GRID_CELLS + TILES_PER_QUARTER - 1) / TILES_PER_QUARTER;
+static_assert(LEGACY_QUARTERS_PER_GRID <= QUARTERS_PER_GRID, "The list holds at least the cells");
 
 static constexpr size_t quarterGridIndex(size_t quarter, size_t tile_index) {
   return quarter * TILES_PER_QUARTER + tile_index;
@@ -347,13 +357,32 @@ TileGridConfig* allocateTileGridStorage(const char* name) {
   return new (memory) TileGridConfig();
 }
 
+void TileGridScratchDeleter::operator()(TileGridConfig* grid) const {
+  if (!grid) return;
+  grid->~TileGridConfig();
+  heap_caps_free(grid);
+}
+
+TileGridScratch makeTileGridScratch() {
+  void* memory = heap_caps_malloc(sizeof(TileGridConfig), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!memory) memory = heap_caps_malloc(sizeof(TileGridConfig), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!memory) {
+    Serial.printf("[TileConfig] ERROR: No room for a %u byte grid\n",
+                  static_cast<unsigned>(sizeof(TileGridConfig)));
+    return TileGridScratch();
+  }
+  return TileGridScratch(new (memory) TileGridConfig());
+}
+
 TileGridConfig& TileConfig::activeGrid() const {
   if (!active_grid_) active_grid_ = allocateTileGridStorage("active");
   return *active_grid_;
 }
 
 uint32_t tileDefaultBgColor() {
-  return tile_color::normalize(configManager.getConfig().default_tile_color);
+  // A fixed card per theme (user 2026-10-11: no global tile color): the dark
+  // theme's graphite (tile_color::kDefault), the light theme's white.
+  return ui_theme::card();
 }
 
 static void copyString(const String& src, char* dst, size_t max_len) {
@@ -412,6 +441,10 @@ static void unpackIconDiscOptions(uint16_t packed, Tile& tile) {
   tile.icon_glow = (packed & kIconGlowOffBit) == 0;
 }
 
+// The V7 popup mode byte holds long or short press (0 or 1); b343 kept a
+// tile Design in its top bits, read past them.
+static constexpr uint8_t kPopupModeMask = 0x3Fu;
+
 static uint16_t getNavigateTargetId(const Tile& tile) {
   return static_cast<uint16_t>((static_cast<uint16_t>(tile.key_modifier) << 8) | tile.key_code);
 }
@@ -437,6 +470,8 @@ static const char* kImagePathDir = "/_tile_links";
 static const char* kEntityPathDir = "/_tile_entities";
 static const char* kTitlePathDir = "/_tile_titles";
 static const char* kIconColorPathDir = "/_tile_icon_colors";
+static const char* kWeatherSensorPathDir = "/_tile_weather_sensors";
+static const char* kFlowEntityPathDir = "/_tile_flow_entities";
 static const char* kTileGridDir = "/_tile_grids";
 static const char* kFolderIndexFile = "/_tile_grids/folders.bin";
 static constexpr uint32_t kFolderIndexMagic = 0x54464C44;  // 'TFLD'
@@ -469,12 +504,6 @@ static bool ensureTileGridDir() {
   if (!storageReady()) return false;
   if (storageFS().exists(kTileGridDir)) return true;
   return storageFS().mkdir(kTileGridDir);
-}
-
-static bool ensureIconDir() {
-  if (!storageReady()) return false;
-  if (storageFS().exists("/icons")) return true;
-  return storageFS().mkdir("/icons");
 }
 
 static String tmpPathFor(const String& filePath) {
@@ -574,6 +603,8 @@ static std::vector<uint32_t> g_image_sidecar_keys;
 static std::vector<uint32_t> g_entity_sidecar_keys;
 static std::vector<uint32_t> g_title_sidecar_keys;
 static std::vector<uint32_t> g_icon_color_sidecar_keys;
+static std::vector<uint32_t> g_weather_sensor_sidecar_keys;
+static std::vector<uint32_t> g_flow_entity_sidecar_keys;
 
 static uint32_t sidecarKey(uint16_t folder_id, size_t index) {
   return (static_cast<uint32_t>(folder_id) << 8) | static_cast<uint8_t>(index);
@@ -587,8 +618,81 @@ static void sidecarKeyAdd(std::vector<uint32_t>& keys, uint32_t key) {
   if (!sidecarKeyPresent(keys, key)) keys.push_back(key);
 }
 
+// The text of every sidecar file read or written so far, by key, in PSRAM.
+// All sidecar changes go through the write functions below and
+// sidecarKeyRemove(), so a cached text is the file's content: grid loads and
+// unchanged saves skip the file system, which took about 300 ms per Home grid
+// load or save on the V2, one open per file (user 2026-10-02). The texts are
+// small (titles, icon color records, long entity IDs, image paths).
+struct SidecarText {
+  uint32_t key;
+  PsString text;
+};
+using SidecarTexts = std::vector<SidecarText, PsramAllocator<SidecarText>>;
+static SidecarTexts g_image_sidecar_texts;
+static SidecarTexts g_entity_sidecar_texts;
+static SidecarTexts g_title_sidecar_texts;
+static SidecarTexts g_icon_color_sidecar_texts;
+static SidecarTexts g_weather_sensor_sidecar_texts;
+static SidecarTexts g_flow_entity_sidecar_texts;
+
+static SemaphoreHandle_t sidecarTextsLock() {
+  static SemaphoreHandle_t lock = xSemaphoreCreateMutex();
+  return lock;
+}
+
+class SidecarTextsGuard {
+ public:
+  SidecarTextsGuard() : lock_(sidecarTextsLock()) {
+    if (lock_) xSemaphoreTake(lock_, portMAX_DELAY);
+  }
+  ~SidecarTextsGuard() {
+    if (lock_) xSemaphoreGive(lock_);
+  }
+
+ private:
+  SemaphoreHandle_t lock_;
+};
+
+static bool sidecarTextCached(const SidecarTexts& texts, uint32_t key, String& out) {
+  SidecarTextsGuard guard;
+  for (const SidecarText& entry : texts) {
+    if (entry.key != key) continue;
+    out = entry.text.c_str();
+    return true;
+  }
+  return false;
+}
+
+static void sidecarTextStore(SidecarTexts& texts, uint32_t key, const String& text) {
+  SidecarTextsGuard guard;
+  for (SidecarText& entry : texts) {
+    if (entry.key != key) continue;
+    entry.text.assign(text.c_str(), text.length());
+    return;
+  }
+  texts.push_back(SidecarText{key, PsString(text.c_str(), text.length())});
+}
+
+static void sidecarTextForget(SidecarTexts& texts, uint32_t key) {
+  SidecarTextsGuard guard;
+  texts.erase(std::remove_if(texts.begin(), texts.end(),
+                             [key](const SidecarText& entry) { return entry.key == key; }),
+              texts.end());
+}
+
+static SidecarTexts& sidecarTextsFor(const std::vector<uint32_t>& keys) {
+  if (&keys == &g_image_sidecar_keys) return g_image_sidecar_texts;
+  if (&keys == &g_entity_sidecar_keys) return g_entity_sidecar_texts;
+  if (&keys == &g_title_sidecar_keys) return g_title_sidecar_texts;
+  if (&keys == &g_weather_sensor_sidecar_keys) return g_weather_sensor_sidecar_texts;
+  if (&keys == &g_flow_entity_sidecar_keys) return g_flow_entity_sidecar_texts;
+  return g_icon_color_sidecar_texts;
+}
+
 static void sidecarKeyRemove(std::vector<uint32_t>& keys, uint32_t key) {
   keys.erase(std::remove(keys.begin(), keys.end(), key), keys.end());
+  sidecarTextForget(sidecarTextsFor(keys), key);
 }
 
 static void scanSidecarDir(const char* dir, std::vector<uint32_t>& out) {
@@ -613,6 +717,8 @@ static void ensureSidecarIndexBuilt() {
   scanSidecarDir(kEntityPathDir, g_entity_sidecar_keys);
   scanSidecarDir(kTitlePathDir, g_title_sidecar_keys);
   scanSidecarDir(kIconColorPathDir, g_icon_color_sidecar_keys);
+  scanSidecarDir(kWeatherSensorPathDir, g_weather_sensor_sidecar_keys);
+  scanSidecarDir(kFlowEntityPathDir, g_flow_entity_sidecar_keys);
 }
 
 static String entityPathFileLegacy(const char* prefix, size_t index) {
@@ -727,18 +833,28 @@ static bool readPackedGridFileV7(const String& filePath, PackedQuarterGridV7* pa
   // per grid, now ~half that with just the one open() lookup.
   File f = storageFS().open(filePath, FILE_READ);
   if (!f) return false;
-  const size_t expected = count * sizeof(PackedQuarterGridV7);
-  if (static_cast<size_t>(f.size()) < expected) {
+  // A file from before the storage entries holds only the classic cells: it
+  // reads as it is and the rest of the list stays empty (grid_slots.h).
+  const size_t quarters = grid_slots::readableQuarters(
+      static_cast<size_t>(f.size()), sizeof(PackedQuarterGridV7), count,
+      count == QUARTERS_PER_GRID ? LEGACY_QUARTERS_PER_GRID : count);
+  if (quarters == 0) {
     f.close();
     return false;
   }
+  const size_t expected = quarters * sizeof(PackedQuarterGridV7);
   size_t read = f.read(reinterpret_cast<uint8_t*>(packed), expected);
   f.close();
   if (read != expected) return false;
-  for (size_t q = 0; q < count; ++q) {
+  for (size_t q = 0; q < quarters; ++q) {
     if (packed[q].version != 7 || packed[q].quarter_index != static_cast<uint8_t>(q)) {
       return false;
     }
+  }
+  for (size_t q = quarters; q < count; ++q) {
+    memset(&packed[q], 0, sizeof(packed[q]));
+    packed[q].version = 7;
+    packed[q].quarter_index = static_cast<uint8_t>(q);
   }
   return true;
 }
@@ -820,22 +936,32 @@ static bool writeImagePathSd(uint16_t folder_id, size_t index, const String& pat
   }
 
   if (has_sidecar) {
-    File current_file = storageFS().open(filePath, FILE_READ);
-    if (current_file) {
-      String current = current_file.readString();
-      current_file.close();
-      current.trim();
+    String current;
+    if (sidecarTextCached(g_image_sidecar_texts, key, current)) {
       if (current == path) return true;
+    } else {
+      File current_file = storageFS().open(filePath, FILE_READ);
+      if (current_file) {
+        current = current_file.readString();
+        current_file.close();
+        current.trim();
+        if (current == path) {
+          sidecarTextStore(g_image_sidecar_texts, key, current);
+          return true;
+        }
+      }
     }
   }
 
   if (!ensureImagePathDir()) return false;
+  sidecarTextForget(g_image_sidecar_texts, key);
   if (has_sidecar && storageFS().exists(filePath)) storageFS().remove(filePath);
   File f = storageFS().open(filePath, FILE_WRITE);
   if (!f) return false;
   f.print(path);
   f.close();
   sidecarKeyAdd(g_image_sidecar_keys, key);
+  sidecarTextStore(g_image_sidecar_texts, key, path);
   return true;
 }
 
@@ -843,13 +969,18 @@ static bool readImagePathSd(uint16_t folder_id, size_t index, String& out) {
   out = "";
   if (!storageReady()) return false;
   ensureSidecarIndexBuilt();
-  if (sidecarKeyPresent(g_image_sidecar_keys, sidecarKey(folder_id, index))) {
+  const uint32_t key = sidecarKey(folder_id, index);
+  if (sidecarKeyPresent(g_image_sidecar_keys, key)) {
+    if (sidecarTextCached(g_image_sidecar_texts, key, out)) return out.length() > 0;
     File f = storageFS().open(imagePathFile(folder_id, index), FILE_READ);
     if (f) {
       out = f.readString();
       f.close();
       out.trim();
-      if (out.length() > 0) return true;
+      if (out.length() > 0) {
+        sidecarTextStore(g_image_sidecar_texts, key, out);
+        return true;
+      }
     }
   }
   if (folder_id == 0) {
@@ -881,22 +1012,32 @@ static bool writeLongEntityIdSd(uint16_t folder_id, size_t index, const String& 
   }
 
   if (has_sidecar) {
-    File current_file = storageFS().open(filePath, FILE_READ);
-    if (current_file) {
-      String current = current_file.readString();
-      current_file.close();
-      current.trim();
+    String current;
+    if (sidecarTextCached(g_entity_sidecar_texts, key, current)) {
       if (current == entity) return true;
+    } else {
+      File current_file = storageFS().open(filePath, FILE_READ);
+      if (current_file) {
+        current = current_file.readString();
+        current_file.close();
+        current.trim();
+        if (current == entity) {
+          sidecarTextStore(g_entity_sidecar_texts, key, current);
+          return true;
+        }
+      }
     }
   }
 
   if (!ensureEntityPathDir()) return false;
+  sidecarTextForget(g_entity_sidecar_texts, key);
   if (has_sidecar && storageFS().exists(filePath)) storageFS().remove(filePath);
   File f = storageFS().open(filePath, FILE_WRITE);
   if (!f) return false;
   f.print(entity);
   f.close();
   sidecarKeyAdd(g_entity_sidecar_keys, key);
+  sidecarTextStore(g_entity_sidecar_texts, key, entity);
   return true;
 }
 
@@ -910,7 +1051,9 @@ static String titlePathFile(uint16_t folder_id, size_t index) {
 static bool readLongTitleSd(uint16_t folder_id, size_t index, String& out) {
   if (!storageReady()) return false;
   ensureSidecarIndexBuilt();
-  if (!sidecarKeyPresent(g_title_sidecar_keys, sidecarKey(folder_id, index))) return false;
+  const uint32_t key = sidecarKey(folder_id, index);
+  if (!sidecarKeyPresent(g_title_sidecar_keys, key)) return false;
+  if (sidecarTextCached(g_title_sidecar_texts, key, out)) return true;
   const String path = titlePathFile(folder_id, index);
   for (const String& candidate : {path, tmpPathFor(path), backupPathFor(path)}) {
     File file = storageFS().open(candidate, FILE_READ);
@@ -921,6 +1064,7 @@ static bool readLongTitleSd(uint16_t folder_id, size_t index, String& out) {
     file.close();
     if (value.length() != size) continue;
     out = value;
+    sidecarTextStore(g_title_sidecar_texts, key, value);
     return true;
   }
   return false;
@@ -943,6 +1087,7 @@ static bool writeLongTitleSd(uint16_t folder_id, size_t index, const String& tit
   String current;
   if (readLongTitleSd(folder_id, index, current) && current == title) return true;
   if (!storageFS().exists(kTitlePathDir) && !storageFS().mkdir(kTitlePathDir)) return false;
+  sidecarTextForget(g_title_sidecar_texts, key);
   const String temporary = tmpPathFor(path);
   if (storageFS().exists(temporary)) storageFS().remove(temporary);
   File file = storageFS().open(temporary, FILE_WRITE);
@@ -954,6 +1099,7 @@ static bool writeLongTitleSd(uint16_t folder_id, size_t index, const String& tit
     return false;
   }
   sidecarKeyAdd(g_title_sidecar_keys, key);
+  sidecarTextStore(g_title_sidecar_texts, key, title);
   return true;
 }
 
@@ -982,7 +1128,9 @@ static String iconColorPathFile(uint16_t folder_id, size_t index) {
 static bool readIconColorsSd(uint16_t folder_id, size_t index, String& out) {
   if (!storageReady()) return false;
   ensureSidecarIndexBuilt();
-  if (!sidecarKeyPresent(g_icon_color_sidecar_keys, sidecarKey(folder_id, index))) return false;
+  const uint32_t key = sidecarKey(folder_id, index);
+  if (!sidecarKeyPresent(g_icon_color_sidecar_keys, key)) return false;
+  if (sidecarTextCached(g_icon_color_sidecar_texts, key, out)) return true;
   const String path = iconColorPathFile(folder_id, index);
   for (const String& candidate : {path, tmpPathFor(path), backupPathFor(path)}) {
     File file = storageFS().open(candidate, FILE_READ);
@@ -993,6 +1141,7 @@ static bool readIconColorsSd(uint16_t folder_id, size_t index, String& out) {
     file.close();
     if (value.length() != size) continue;
     out = value;
+    sidecarTextStore(g_icon_color_sidecar_texts, key, value);
     return true;
   }
   return false;
@@ -1015,6 +1164,7 @@ static bool writeIconColorsSd(uint16_t folder_id, size_t index, const String& re
   String current;
   if (readIconColorsSd(folder_id, index, current) && current == record) return true;
   if (!storageFS().exists(kIconColorPathDir) && !storageFS().mkdir(kIconColorPathDir)) return false;
+  sidecarTextForget(g_icon_color_sidecar_texts, key);
   const String temporary = tmpPathFor(path);
   if (storageFS().exists(temporary)) storageFS().remove(temporary);
   File file = storageFS().open(temporary, FILE_WRITE);
@@ -1026,6 +1176,7 @@ static bool writeIconColorsSd(uint16_t folder_id, size_t index, const String& re
     return false;
   }
   sidecarKeyAdd(g_icon_color_sidecar_keys, key);
+  sidecarTextStore(g_icon_color_sidecar_texts, key, record);
   return true;
 }
 
@@ -1036,6 +1187,159 @@ static void applyIconColorsFromSd(uint16_t folder_id, TileGridConfig& grid) {
     if (!tileTypeHasIconColors(tile.type) || !readIconColorsSd(folder_id, index, record)) continue;
     // Normalize again so a damaged or foreign file cannot reach the runtime.
     tile.icon_colors = normalizeTileIconColors(tile.type, record.c_str());
+  }
+}
+
+// Weather temperature/humidity sensors (weatherSensorsRecord) do not fit
+// PackedTileV7 either and follow the same sidecar pattern as icon colors.
+static constexpr size_t kWeatherSensorRecordMax = 2 * kWeatherSensorEntityMax;
+
+static String weatherSensorPathFile(uint16_t folder_id, size_t index) {
+  char path[64];
+  snprintf(path, sizeof(path), "%s/f%u_%02u.txt", kWeatherSensorPathDir,
+           static_cast<unsigned>(folder_id), static_cast<unsigned>(index));
+  return String(path);
+}
+
+static bool readWeatherSensorsSd(uint16_t folder_id, size_t index, String& out) {
+  if (!storageReady()) return false;
+  ensureSidecarIndexBuilt();
+  const uint32_t key = sidecarKey(folder_id, index);
+  if (!sidecarKeyPresent(g_weather_sensor_sidecar_keys, key)) return false;
+  if (sidecarTextCached(g_weather_sensor_sidecar_texts, key, out)) return true;
+  const String path = weatherSensorPathFile(folder_id, index);
+  for (const String& candidate : {path, tmpPathFor(path), backupPathFor(path)}) {
+    File file = storageFS().open(candidate, FILE_READ);
+    if (!file) continue;
+    const size_t size = file.size();
+    if (size == 0 || size > kWeatherSensorRecordMax) { file.close(); continue; }
+    String value = file.readString();
+    file.close();
+    if (value.length() != size) continue;
+    out = value;
+    sidecarTextStore(g_weather_sensor_sidecar_texts, key, value);
+    return true;
+  }
+  return false;
+}
+
+static bool writeWeatherSensorsSd(uint16_t folder_id, size_t index, const String& record) {
+  if (!storageReady()) return false;
+  if (record.length() > kWeatherSensorRecordMax) return false;
+  ensureSidecarIndexBuilt();
+  const uint32_t key = sidecarKey(folder_id, index);
+  const String path = weatherSensorPathFile(folder_id, index);
+  const bool present = sidecarKeyPresent(g_weather_sensor_sidecar_keys, key);
+  if (record.length() == 0) {
+    if (!present) return true;
+    for (const String& candidate : {path, tmpPathFor(path), backupPathFor(path)})
+      if (storageFS().exists(candidate) && !storageFS().remove(candidate)) return false;
+    sidecarKeyRemove(g_weather_sensor_sidecar_keys, key);
+    return true;
+  }
+  String current;
+  if (readWeatherSensorsSd(folder_id, index, current) && current == record) return true;
+  if (!storageFS().exists(kWeatherSensorPathDir) && !storageFS().mkdir(kWeatherSensorPathDir)) return false;
+  sidecarTextForget(g_weather_sensor_sidecar_texts, key);
+  const String temporary = tmpPathFor(path);
+  if (storageFS().exists(temporary)) storageFS().remove(temporary);
+  File file = storageFS().open(temporary, FILE_WRITE);
+  if (!file) return false;
+  const size_t written = file.print(record);
+  file.flush(); file.close();
+  if (written != record.length() || !replaceFileWithPreparedTmp(temporary, path)) {
+    storageFS().remove(temporary);
+    return false;
+  }
+  sidecarKeyAdd(g_weather_sensor_sidecar_keys, key);
+  sidecarTextStore(g_weather_sensor_sidecar_texts, key, record);
+  return true;
+}
+
+static void applyWeatherSensorsFromSd(uint16_t folder_id, TileGridConfig& grid) {
+  for (size_t index = 0; index < TILES_PER_GRID; ++index) {
+    Tile& tile = grid.tiles[index];
+    String record;
+    if (tile.type != TILE_WEATHER || !readWeatherSensorsSd(folder_id, index, record)) continue;
+    // Normalized again so a damaged or foreign file cannot reach the runtime.
+    applyWeatherSensorsRecord(tile, record);
+  }
+}
+
+// Power flow node entities (Tile::flow_entities) follow the same sidecar
+// pattern: one text file per tile, written through a .tmp file.
+static constexpr size_t kFlowEntityRecordMax = kFlowEntityLinesMax * kWeatherSensorEntityMax;
+
+static String flowEntityPathFile(uint16_t folder_id, size_t index) {
+  char path[64];
+  snprintf(path, sizeof(path), "%s/f%u_%02u.txt", kFlowEntityPathDir,
+           static_cast<unsigned>(folder_id), static_cast<unsigned>(index));
+  return String(path);
+}
+
+static bool readFlowEntitiesSd(uint16_t folder_id, size_t index, String& out) {
+  if (!storageReady()) return false;
+  ensureSidecarIndexBuilt();
+  const uint32_t key = sidecarKey(folder_id, index);
+  if (!sidecarKeyPresent(g_flow_entity_sidecar_keys, key)) return false;
+  if (sidecarTextCached(g_flow_entity_sidecar_texts, key, out)) return true;
+  const String path = flowEntityPathFile(folder_id, index);
+  for (const String& candidate : {path, tmpPathFor(path), backupPathFor(path)}) {
+    File file = storageFS().open(candidate, FILE_READ);
+    if (!file) continue;
+    const size_t size = file.size();
+    if (size == 0 || size > kFlowEntityRecordMax) { file.close(); continue; }
+    String value = file.readString();
+    file.close();
+    if (value.length() != size) continue;
+    out = value;
+    sidecarTextStore(g_flow_entity_sidecar_texts, key, value);
+    return true;
+  }
+  return false;
+}
+
+static bool writeFlowEntitiesSd(uint16_t folder_id, size_t index, const String& record) {
+  if (!storageReady()) return false;
+  if (record.length() > kFlowEntityRecordMax) return false;
+  ensureSidecarIndexBuilt();
+  const uint32_t key = sidecarKey(folder_id, index);
+  const String path = flowEntityPathFile(folder_id, index);
+  const bool present = sidecarKeyPresent(g_flow_entity_sidecar_keys, key);
+  if (record.length() == 0) {
+    if (!present) return true;
+    for (const String& candidate : {path, tmpPathFor(path), backupPathFor(path)})
+      if (storageFS().exists(candidate) && !storageFS().remove(candidate)) return false;
+    sidecarKeyRemove(g_flow_entity_sidecar_keys, key);
+    return true;
+  }
+  String current;
+  if (readFlowEntitiesSd(folder_id, index, current) && current == record) return true;
+  if (!storageFS().exists(kFlowEntityPathDir) && !storageFS().mkdir(kFlowEntityPathDir)) return false;
+  sidecarTextForget(g_flow_entity_sidecar_texts, key);
+  const String temporary = tmpPathFor(path);
+  if (storageFS().exists(temporary)) storageFS().remove(temporary);
+  File file = storageFS().open(temporary, FILE_WRITE);
+  if (!file) return false;
+  const size_t written = file.print(record);
+  file.flush(); file.close();
+  if (written != record.length() || !replaceFileWithPreparedTmp(temporary, path)) {
+    storageFS().remove(temporary);
+    return false;
+  }
+  sidecarKeyAdd(g_flow_entity_sidecar_keys, key);
+  sidecarTextStore(g_flow_entity_sidecar_texts, key, record);
+  return true;
+}
+
+static void applyFlowEntitiesFromSd(uint16_t folder_id, TileGridConfig& grid) {
+  for (size_t index = 0; index < TILES_PER_GRID; ++index) {
+    Tile& tile = grid.tiles[index];
+    String record;
+    if (!tileKeepsFlowEntities(tile.type) || !readFlowEntitiesSd(folder_id, index, record)) continue;
+    // Normalized again so a damaged or foreign file cannot reach the runtime.
+    tile.flow_entities = record;
+    normalizeFlowEntities(tile);
   }
 }
 
@@ -1078,6 +1382,17 @@ static bool gridSidecarsMatchStored(uint16_t folder_id,
             ? (!readIconColorsSd(folder_id, index, stored_colors) || stored_colors != tile.icon_colors)
             : sidecarKeyPresent(g_icon_color_sidecar_keys, key)) return false;
 
+    String stored_sensors;
+    const String sensors = weatherSensorsRecord(tile);
+    if (sensors.length()
+            ? (!readWeatherSensorsSd(folder_id, index, stored_sensors) || stored_sensors != sensors)
+            : sidecarKeyPresent(g_weather_sensor_sidecar_keys, key)) return false;
+
+    String stored_flow;
+    if (tile.flow_entities.length()
+            ? (!readFlowEntitiesSd(folder_id, index, stored_flow) || stored_flow != tile.flow_entities)
+            : sidecarKeyPresent(g_flow_entity_sidecar_keys, key)) return false;
+
     const bool entity_required =
         entityTileStoresSensorEntity(tile.type) &&
         tile.sensor_entity.length() >= ENTITY_MAX;
@@ -1096,13 +1411,18 @@ static bool readLongEntityIdSd(uint16_t folder_id, size_t index, String& out) {
   out = "";
   if (!storageReady()) return false;
   ensureSidecarIndexBuilt();
-  if (sidecarKeyPresent(g_entity_sidecar_keys, sidecarKey(folder_id, index))) {
+  const uint32_t key = sidecarKey(folder_id, index);
+  if (sidecarKeyPresent(g_entity_sidecar_keys, key)) {
+    if (sidecarTextCached(g_entity_sidecar_texts, key, out)) return out.length() > 0;
     File f = storageFS().open(entityPathFile(folder_id, index), FILE_READ);
     if (f) {
       out = f.readString();
       f.close();
       out.trim();
-      if (out.length() > 0) return true;
+      if (out.length() > 0) {
+        sidecarTextStore(g_entity_sidecar_texts, key, out);
+        return true;
+      }
     }
   }
   if (folder_id == 0) {
@@ -1146,7 +1466,7 @@ static void packTile(const Tile& in, PackedTileV7& out) {
     out.image_slideshow_sec = static_cast<uint16_t>(
         (out.image_slideshow_sec & kSlideshowValueMask) | packIconDiscOptions(in));
   }
-  out.sensor_gauge_enabled = (in.sensor_display_mode <= 2) ? in.sensor_display_mode : 0;
+  out.sensor_gauge_enabled = (in.sensor_display_mode <= sensor_look::kLastMode) ? in.sensor_display_mode : 0;
   out.sensor_gauge_min = in.sensor_gauge_min;
   out.sensor_gauge_max = in.sensor_gauge_max;
   if (shouldNormalizeGaugeRange(in.type)) {
@@ -1196,6 +1516,9 @@ static void packTile(const Tile& in, PackedTileV7& out) {
     if (graph_h > 200) graph_h = 200;
     out.scene_alias[9] = static_cast<char>(graph_h & 0xFF);
     out.scene_alias[10] = static_cast<char>((graph_h >> 8) & 0xFF);
+    // The decimals of the gauge's bounds (issue #83); 0 in older tiles.
+    out.scene_alias[11] = static_cast<char>(
+        in.sensor_gauge_decimals <= sensor_gauge::kMaxDecimals ? in.sensor_gauge_decimals : 0);
   } else {
     copyString(in.scene_alias, out.scene_alias, sizeof(out.scene_alias));
   }
@@ -1284,12 +1607,13 @@ static void unpackTileV7(const PackedTileV7& in, Tile& out) {
     out.sensor_decimals = 0xFF;
   }
   out.sensor_value_font = clampSensorValueFont(in.sensor_value_font);
-  out.sensor_display_mode = (in.sensor_gauge_enabled <= 2) ? in.sensor_gauge_enabled : 0;
+  out.sensor_display_mode = (in.sensor_gauge_enabled <= sensor_look::kLastMode) ? in.sensor_gauge_enabled : 0;
   out.sensor_gauge_min = in.sensor_gauge_min;
   out.sensor_gauge_max = in.sensor_gauge_max;
   if (shouldNormalizeGaugeRange(out.type)) {
     normalizeGaugeRange(out.sensor_gauge_min, out.sensor_gauge_max);
   }
+  out.sensor_gauge_decimals = 0;
   out.sensor_gauge_arc = 100;
   out.sensor_gauge_size = 350;
   out.sensor_gauge_y_offset = 12;
@@ -1314,9 +1638,11 @@ static void unpackTileV7(const PackedTileV7& in, Tile& out) {
     uint16_t graph_h = static_cast<uint8_t>(in.scene_alias[9]) |
                        (static_cast<uint8_t>(in.scene_alias[10]) << 8);
     if (graph_h >= 20 && graph_h <= 200) out.sensor_graph_height = graph_h;
+    const uint8_t gauge_decimals = static_cast<uint8_t>(in.scene_alias[11]);
+    out.sensor_gauge_decimals = gauge_decimals <= sensor_gauge::kMaxDecimals ? gauge_decimals : 0;
   }
   if (tileTypeStoresPopupMode(out.type) &&
-      in.popup_open_mode == TILE_POPUP_OPEN_SHORT_PRESS) {
+      (in.popup_open_mode & kPopupModeMask) == TILE_POPUP_OPEN_SHORT_PRESS) {
     out.popup_open_mode = TILE_POPUP_OPEN_SHORT_PRESS;
   }
   out.key_code = in.key_code;
@@ -1398,13 +1724,14 @@ static void unpackTileV6(const PackedTileV6& in, Tile& out) {
     out.sensor_decimals = 0xFF;
   }
   out.sensor_value_font = clampSensorValueFont(in.sensor_value_font);
-  out.sensor_display_mode = (in.sensor_gauge_enabled <= 2) ? in.sensor_gauge_enabled : 0;
+  out.sensor_display_mode = (in.sensor_gauge_enabled <= sensor_look::kLastMode) ? in.sensor_gauge_enabled : 0;
   out.sensor_gauge_min = in.sensor_gauge_min;
   out.sensor_gauge_max = in.sensor_gauge_max;
   if (shouldNormalizeGaugeRange(out.type)) {
     normalizeGaugeRange(out.sensor_gauge_min, out.sensor_gauge_max);
   }
   // Read gauge appearance from scene_alias for TILE_SENSOR
+  out.sensor_gauge_decimals = 0;
   out.sensor_gauge_arc = 100;     // Default
   out.sensor_gauge_size = 350;    // Default
   out.sensor_gauge_y_offset = 12; // Default
@@ -1430,6 +1757,8 @@ static void unpackTileV6(const PackedTileV6& in, Tile& out) {
     uint16_t graph_h = static_cast<uint8_t>(in.scene_alias[9]) |
                        (static_cast<uint8_t>(in.scene_alias[10]) << 8);
     if (graph_h >= 20 && graph_h <= 200) out.sensor_graph_height = graph_h;
+    const uint8_t gauge_decimals = static_cast<uint8_t>(in.scene_alias[11]);
+    out.sensor_gauge_decimals = gauge_decimals <= sensor_gauge::kMaxDecimals ? gauge_decimals : 0;
   }
   out.key_code = in.key_code;
   out.key_modifier = in.key_modifier;
@@ -1495,6 +1824,7 @@ static void unpackTileV5(const PackedTileV5& in, Tile& out, uint8_t index) {
   if (shouldNormalizeGaugeRange(out.type)) {
     normalizeGaugeRange(out.sensor_gauge_min, out.sensor_gauge_max);
   }
+  out.sensor_gauge_decimals = 0;
   out.sensor_gauge_arc = 100;
   out.sensor_gauge_size = 350;
   out.sensor_gauge_y_offset = 12;
@@ -1547,6 +1877,7 @@ static void unpackTileV3(const PackedTileV3& in, Tile& out, uint8_t index) {
   out.sensor_display_mode = 0;
   out.sensor_gauge_min = 0;
   out.sensor_gauge_max = 100;
+  out.sensor_gauge_decimals = 0;
   out.sensor_gauge_arc = 100;
   out.sensor_gauge_size = 350;
   out.sensor_gauge_y_offset = 12;
@@ -1599,6 +1930,7 @@ static void unpackTileV2(const PackedTileV2& in, Tile& out, uint8_t index) {
   out.sensor_display_mode = 0;
   out.sensor_gauge_min = 0;
   out.sensor_gauge_max = 100;
+  out.sensor_gauge_decimals = 0;
   out.sensor_gauge_arc = 100;
   out.sensor_gauge_size = 350;
   out.sensor_gauge_y_offset = 12;
@@ -1651,6 +1983,7 @@ static void unpackTileV4(const PackedTileV4& in, Tile& out, uint8_t index) {
   out.sensor_display_mode = 0;
   out.sensor_gauge_min = 0;
   out.sensor_gauge_max = 100;
+  out.sensor_gauge_decimals = 0;
   out.sensor_gauge_arc = 100;
   out.sensor_gauge_size = 350;
   out.sensor_gauge_y_offset = 12;
@@ -1703,6 +2036,7 @@ static void unpackTileV1(const PackedTileV1& in, Tile& out, uint8_t index) {
   out.sensor_display_mode = 0;
   out.sensor_gauge_min = 0;
   out.sensor_gauge_max = 100;
+  out.sensor_gauge_decimals = 0;
   out.sensor_gauge_arc = 100;
   out.sensor_gauge_size = 350;
   out.sensor_gauge_y_offset = 12;
@@ -1735,7 +2069,7 @@ static void unpackTileV1(const PackedTileV1& in, Tile& out, uint8_t index) {
   }
 }
 static bool get_tile_layout_clamped(const Tile& tile, float& col, float& row, float& span_w, float& span_h) {
-  if (tile.col >= GRID_COLS || tile.row >= GRID_ROWS) return false;
+  if (tile.layout_hidden || tile.col >= GRID_COLS || tile.row >= GRID_ROWS) return false;
   col = tile.col;
   row = tile.row;
   span_w = tile.span_w < 0.5f ? 1 : tile.span_w;
@@ -1759,8 +2093,9 @@ static void mark_occupied(bool occupied[GRID_ROWS][GRID_COLS], float col, float 
 static void initGridDefaults(TileGridConfig& grid) {
   for (size_t i = 0; i < TILES_PER_GRID; ++i) {
     grid.tiles[i] = Tile();
-    grid.tiles[i].col = i % GRID_COLS;
-    grid.tiles[i].row = i / GRID_COLS;
+    const size_t cell = grid_slots::defaultCell(i, GRID_CELLS);
+    grid.tiles[i].col = cell % GRID_COLS;
+    grid.tiles[i].row = cell / GRID_COLS;
     grid.tiles[i].span_w = 1;
     grid.tiles[i].span_h = 1;
   }
@@ -1833,6 +2168,22 @@ static bool find_settings_tile_rect_bottom_right(
   return false;
 }
 
+// The same in a grid with the shown bar layout's places: its cells, and the
+// tiles hidden in that layout take no room.
+static bool settings_tile_rect_is_free_shown(const TileGridConfig& grid, float col, float row,
+                                             float span_w, float span_h) {
+  if (!grid_layout::inside(col, row, span_w, span_h) ||
+      !tile_geometry::supported_size(TILE_SETTINGS, col, row, span_w, span_h)) {
+    return false;
+  }
+  for (const auto& tile : grid.tiles) {
+    float c = 0, r = 0, w = 1, h = 1;
+    if (tile.type == TILE_EMPTY || tile.type == TILE_SETTINGS || !shownTileLayout(tile, c, r, w, h)) continue;
+    if (col < c + w && c < col + span_w && row < r + h && r < row + span_h) return false;
+  }
+  return true;
+}
+
 static void collectFolderSubtree(const std::vector<FolderEntry>& entries, uint16_t parent_id, std::vector<uint16_t>& out) {
   for (const auto& entry : entries) {
     if (entry.parent_id != parent_id) continue;
@@ -1843,7 +2194,7 @@ static void collectFolderSubtree(const std::vector<FolderEntry>& entries, uint16
 }
 
 bool TileConfig::ensureSettingsTile(TileGridConfig& grid, float target_col,
-                                    float target_row) {
+                                    float target_row, bool shown_places) {
   for (size_t i = 0; i < TILES_PER_GRID; ++i) {
     const Tile& tile = grid.tiles[i];
     if (tile.type == TILE_SETTINGS) {
@@ -1853,19 +2204,27 @@ bool TileConfig::ensureSettingsTile(TileGridConfig& grid, float target_col,
 
   const SettingsTileSnapshot& snapshot =
       configManager.getConfig().settings_tile_snapshot;
-  float span_w = snapshot.valid && snapshot.span_w >= 1
-                       ? snapshot.span_w
-                       : 1;
-  float span_h = snapshot.valid && snapshot.span_h >= 0.5f
-                       ? snapshot.span_h
-                       : 1;
-  if (span_w > GRID_COLS) span_w = 1;
-  if (span_h > GRID_ROWS) span_h = 1;
+  // Out of its field it is one cell, like a page's folder (user 2026-10-22:
+  // it came back half high in a half cell's size), and no place is kept:
+  // the drop spot, else the first free cell from the bottom right.
+  const float span_w = 1;
+  const float span_h = 1;
 
   float col = 0;
   float row = 0;
+  // A grid with a bar layout's places has that layout's cells (user
+  // 2026-10-13: dropped in the bottom row in the layout window, shown a row
+  // higher).
+  const bool bar_places = shown_places && grid_layout::active() != grid_layout::Layout::kClassic;
   const bool explicit_target = target_col >= 0 || target_row >= 0;
-  if (explicit_target) {
+  if (explicit_target && bar_places) {
+    if (target_col < 0 || target_row < 0 ||
+        !settings_tile_rect_is_free_shown(grid, target_col, target_row, span_w, span_h)) {
+      return false;
+    }
+    col = target_col;
+    row = target_row;
+  } else if (explicit_target) {
     if (target_col < 0 || target_row < 0 || target_col >= GRID_COLS ||
         target_row >= GRID_ROWS ||
         !settings_tile_rect_is_free(grid, target_col, target_row, span_w, span_h)) {
@@ -1873,12 +2232,17 @@ bool TileConfig::ensureSettingsTile(TileGridConfig& grid, float target_col,
     }
     col = target_col;
     row = target_row;
-  } else if (snapshot.valid && snapshot.col < GRID_COLS &&
-             snapshot.row < GRID_ROWS &&
-             settings_tile_rect_is_free(grid, snapshot.col, snapshot.row,
-                                        span_w, span_h)) {
-    col = snapshot.col;
-    row = snapshot.row;
+  } else if (bar_places) {
+    bool found = false;
+    for (float r = grid_layout::shown_rows() - span_h; !found && r >= 0; r -= 0.5f) {
+      for (float c = grid_layout::shown().cols - span_w; !found && c >= 0; c -= 0.5f) {
+        if (!settings_tile_rect_is_free_shown(grid, c, r, span_w, span_h)) continue;
+        col = c;
+        row = r;
+        found = true;
+      }
+    }
+    if (!found) return false;
   } else if (!find_settings_tile_rect_bottom_right(grid, span_w, span_h,
                                                     col, row)) {
     return false;
@@ -1910,6 +2274,9 @@ bool TileConfig::ensureSettingsTile(TileGridConfig& grid, float target_col,
   tile.row = row;
   tile.span_w = span_w;
   tile.span_h = span_h;
+  // Its ID from before it was parked: its places in the layouts stay
+  // (tile_layouts.h, user 2026-10-13: parked per layout).
+  tile.view_id = snapshot.valid ? snapshot.view_id : 0;
   return true;
 }
 
@@ -1925,6 +2292,21 @@ bool TileConfig::removeSettingsTiles(TileGridConfig& grid) {
 
 bool TileConfig::applySettingsTilePolicy(TileGridConfig& grid) {
   if (configManager.getConfig().settings_tile_hidden) {
+    // Parked in this layout, shown in the one before (user 2026-10-13: each
+    // layout decides): its look, place and ID go into the snapshot first.
+    bool in_grid = false;
+    for (const Tile& tile : grid.tiles) {
+      if (tile.type != TILE_SETTINGS) continue;
+      in_grid = true;
+      const SettingsTileSnapshot& kept = configManager.getConfig().settings_tile_snapshot;
+      if (kept.valid && tile.view_id && kept.view_id == tile.view_id) break;
+      std::unique_ptr<DeviceConfig> cfg(new (std::nothrow) DeviceConfig(configManager.getConfig()));
+      if (!cfg) break;
+      snapshotSettingsTile(tile, cfg->settings_tile_snapshot);
+      if (!configManager.save(*cfg)) Serial.println("[TileConfig] Parked Settings tile: snapshot not saved");
+      break;
+    }
+    if (!in_grid) giveParkedSettingsTileId();
     return removeSettingsTiles(grid);
   }
   return ensureSettingsTile(grid);
@@ -2017,6 +2399,7 @@ static bool loadGridLegacy(const char* prefix, TileGridConfig& grid) {
     grid.tiles[i].sensor_display_mode = 0;
     grid.tiles[i].sensor_gauge_min = 0;
     grid.tiles[i].sensor_gauge_max = 100;
+    grid.tiles[i].sensor_gauge_decimals = 0;
     grid.tiles[i].sensor_gauge_arc = 100;
     grid.tiles[i].sensor_gauge_size = 350;
     grid.tiles[i].sensor_gauge_y_offset = 12;
@@ -2228,12 +2611,12 @@ bool TileConfig::loadGrid(const char* prefix, TileGridConfig& grid) {
 
   // Try file-based storage first
   {
-    PackedQuarterGridV6 packed_sd[QUARTERS_PER_GRID]{};
-    if (readGridSd(prefix, packed_sd, QUARTERS_PER_GRID)) {
-      for (size_t q = 0; q < QUARTERS_PER_GRID; ++q) {
+    PackedQuarterGridV6 packed_sd[LEGACY_QUARTERS_PER_GRID]{};
+    if (readGridSd(prefix, packed_sd, LEGACY_QUARTERS_PER_GRID)) {
+      for (size_t q = 0; q < LEGACY_QUARTERS_PER_GRID; ++q) {
         for (size_t i = 0; i < TILES_PER_QUARTER; ++i) {
           size_t grid_idx = quarterGridIndex(q, i);
-          if (grid_idx >= TILES_PER_GRID) {
+          if (grid_idx >= GRID_CELLS) {
             continue;
           }
           unpackTileV6(packed_sd[q].tiles[i], grid.tiles[grid_idx]);
@@ -2247,9 +2630,9 @@ bool TileConfig::loadGrid(const char* prefix, TileGridConfig& grid) {
   }
 
   // Try V6 split format first (four quarter blobs)
-  char quarter_keys[QUARTERS_PER_GRID][16];
+  char quarter_keys[LEGACY_QUARTERS_PER_GRID][16];
   bool have_quarter_keys = true;
-  for (size_t q = 0; q < QUARTERS_PER_GRID; ++q) {
+  for (size_t q = 0; q < LEGACY_QUARTERS_PER_GRID; ++q) {
     if (!buildQuarterBlobKey(prefix, static_cast<uint8_t>(q), quarter_keys[q], sizeof(quarter_keys[q]))) {
       have_quarter_keys = false;
       break;
@@ -2259,10 +2642,10 @@ bool TileConfig::loadGrid(const char* prefix, TileGridConfig& grid) {
   if (have_quarter_keys) {
     Preferences prefs;
     if (prefs.begin(PREF_NAMESPACE, true)) {
-      PackedQuarterGridV6 packed[QUARTERS_PER_GRID]{};
+      PackedQuarterGridV6 packed[LEGACY_QUARTERS_PER_GRID]{};
       bool ok = true;
 
-      for (size_t q = 0; q < QUARTERS_PER_GRID; ++q) {
+      for (size_t q = 0; q < LEGACY_QUARTERS_PER_GRID; ++q) {
         size_t len = prefs.getBytesLength(quarter_keys[q]);
         if (len < sizeof(PackedQuarterGridV6)) {
           ok = false;
@@ -2278,10 +2661,10 @@ bool TileConfig::loadGrid(const char* prefix, TileGridConfig& grid) {
       }
 
       if (ok) {
-        for (size_t q = 0; q < QUARTERS_PER_GRID; ++q) {
+        for (size_t q = 0; q < LEGACY_QUARTERS_PER_GRID; ++q) {
           for (size_t i = 0; i < TILES_PER_QUARTER; ++i) {
             size_t grid_idx = quarterGridIndex(q, i);
-            if (grid_idx >= TILES_PER_GRID) {
+            if (grid_idx >= GRID_CELLS) {
               continue;
             }
             unpackTileV6(packed[q].tiles[i], grid.tiles[grid_idx]);
@@ -2421,20 +2804,20 @@ bool TileConfig::saveGrid(const char* prefix, const TileGridConfig& grid) {
 
   Serial.printf("[TileConfig] Saving grid '%s' (storage, %u x %u bytes)\n",
                 prefix,
-                static_cast<unsigned>(QUARTERS_PER_GRID),
+                static_cast<unsigned>(LEGACY_QUARTERS_PER_GRID),
                 static_cast<unsigned>(sizeof(PackedQuarterGridV6)));
 
   auto packed_storage =
-      allocPackedGridScratch<PackedQuarterGridV6>(QUARTERS_PER_GRID, "Legacy-Save");
+      allocPackedGridScratch<PackedQuarterGridV6>(LEGACY_QUARTERS_PER_GRID, "Legacy-Save");
   PackedQuarterGridV6* packed = packed_storage.get();
   if (!packed) return false;
   ScopedStorageWriteDisplayGuard storage_write_guard;
-  for (size_t q = 0; q < QUARTERS_PER_GRID; ++q) {
+  for (size_t q = 0; q < LEGACY_QUARTERS_PER_GRID; ++q) {
     packed[q].version = PACKED_GRID_VERSION;
     packed[q].quarter_index = static_cast<uint8_t>(q);
     for (size_t i = 0; i < TILES_PER_QUARTER; ++i) {
       size_t grid_idx = quarterGridIndex(q, i);
-      if (grid_idx >= TILES_PER_GRID) {
+      if (grid_idx >= GRID_CELLS) {
         packed[q].tiles[i] = PackedTileV6{};
         continue;
       }
@@ -2449,14 +2832,14 @@ bool TileConfig::saveGrid(const char* prefix, const TileGridConfig& grid) {
     }
   }
 
-  if (!writeGridSd(prefix, packed, QUARTERS_PER_GRID)) {
+  if (!writeGridSd(prefix, packed, LEGACY_QUARTERS_PER_GRID)) {
     Serial.printf("[TileConfig] Error saving grid '%s' (storage write failed)\n", prefix);
     return false;
   }
 
   Serial.printf("[TileConfig] Grid '%s' saved (storage, %u x %u bytes)\n",
                 prefix,
-                static_cast<unsigned>(QUARTERS_PER_GRID),
+                static_cast<unsigned>(LEGACY_QUARTERS_PER_GRID),
                 static_cast<unsigned>(sizeof(PackedQuarterGridV6)));
   return true;
 }
@@ -2559,13 +2942,19 @@ bool TileConfig::saveTabNames() {
 }
 #endif
 
+// The tab, the tile and the panel give it one name (user 2026-10-22: "Ordner"
+// on the panel in every language, "Ordner 17" on the tab, none on the tile).
+String TileConfig::unnamedFolderName(uint16_t folder_id) {
+  return String(i18n::strings(configManager.getConfig().language).folder_prefix) + String(folder_id);
+}
+
 static FolderEntry makeFolderEntry(uint16_t id, uint16_t parent_id, const String& name, const String& icon) {
   FolderEntry entry{};
   entry.id = id;
   entry.parent_id = parent_id;
   String safe_name = name;
   safe_name.trim();
-  if (safe_name.length() == 0) safe_name = "Ordner";
+  if (safe_name.length() == 0) safe_name = TileConfig::unnamedFolderName(id);
   String safe_icon = icon;
   safe_icon.trim();
   copyString(safe_name, entry.name, sizeof(entry.name));
@@ -2574,6 +2963,11 @@ static FolderEntry makeFolderEntry(uint16_t id, uint16_t parent_id, const String
 }
 
 bool TileConfig::load() {
+  // The other layouts' places (tile_layouts.h) before any grid is loaded.
+  // The panel keeps the chosen layout whatever its places (user 2026-10-21:
+  // "Layout bleibt Layout"): an emptied panel switched to the classic one
+  // on its next start. A tile without a place waits in the layout window.
+  tile_layouts::begin();
   folders.clear();
   bool folders_ok = loadFolders();
   bool had_root = folderExists(kRootFolderId);
@@ -2615,12 +3009,16 @@ bool TileConfig::loadFolderGridEntitiesOnly(uint16_t folder_id, TileEntitySlot* 
     // Legacy/older grid version: fall back to the full loader. Rare in
     // practice (grids migrate to v7 on first save) -- correctness over
     // speed for this edge case.
-    TileGridConfig full;
+    TileGridScratch scratch = makeTileGridScratch();
+    if (!scratch) return false;
+    TileGridConfig& full = *scratch;
     if (!loadGrid(folder_id, full)) return false;
     for (size_t i = 0; i < TILES_PER_GRID; ++i) {
       out[i].type = full.tiles[i].type;
       out[i].sensor_entity = full.tiles[i].sensor_entity;
       out[i].rule_entity = tileIconSourceEntity(full.tiles[i].type, full.tiles[i].icon_colors);
+      const String sensors = weatherSensorsRecord(full.tiles[i]);
+      out[i].extra_entities = tileKeepsFlowEntities(full.tiles[i].type) ? full.tiles[i].flow_entities : sensors;
     }
     return true;
   }
@@ -2651,6 +3049,25 @@ bool TileConfig::loadFolderGridEntitiesOnly(uint16_t folder_id, TileEntitySlot* 
     String record;
     if (readIconColorsSd(folder_id, i, record)) out[i].rule_entity = tileIconSourceEntity(out[i].type, record);
   }
+  // Weather sensors subscribe to their own state topics as well.
+  for (size_t i = 0; i < TILES_PER_GRID; ++i) {
+    if (out[i].type != TILE_WEATHER) continue;
+    String record;
+    if (!readWeatherSensorsSd(folder_id, i, record)) continue;
+    Tile sensors;
+    sensors.type = TILE_WEATHER;
+    applyWeatherSensorsRecord(sensors, record);
+    out[i].extra_entities = weatherSensorsRecord(sensors);
+  }
+  // Power flow nodes and a Vacuum's chosen map too, one entity per line.
+  for (size_t i = 0; i < TILES_PER_GRID; ++i) {
+    if (!tileKeepsFlowEntities(out[i].type)) continue;
+    Tile flow;
+    flow.type = out[i].type;
+    if (!readFlowEntitiesSd(folder_id, i, flow.flow_entities)) continue;
+    normalizeFlowEntities(flow);
+    out[i].extra_entities = flow.flow_entities;
+  }
   uint32_t sidecar_ms = millis() - t_sidecar0;
   if (read_ms + unpack_ms + sidecar_ms >= 5) {
     Serial.printf("[Bridge]     loadFolderGridEntitiesOnly(%u) split: read=%ums unpack=%ums sidecar=%ums\n",
@@ -2671,9 +3088,11 @@ struct FolderEntityCacheEntry {
   TileType types[TILES_PER_GRID];
   char* entities[TILES_PER_GRID];  // PSRAM copies; nullptr means empty.
   char* rule_entities[TILES_PER_GRID];  // The rules' other entity, same rules.
+  char* extra_entities[TILES_PER_GRID];  // TileEntitySlot::extra_entities.
 };
 
-// 128 entries x ~184 B = ~24 KB of PSRAM. Beyond 128 live folders,
+// 128 entries of a type byte and three string pointers per tile, all in PSRAM
+// (calloc'd once on first use). Beyond 128 live folders,
 // getFolderEntitiesCached returns false; callers treat this as a failed load.
 static constexpr size_t kFolderEntityCacheMax = 128;
 
@@ -2733,9 +3152,14 @@ FolderEntityCacheEntry* TileConfig::storeFolderEntityCache(uint16_t folder_id,
       heap_caps_free(e->rule_entities[i]);
       e->rule_entities[i] = nullptr;
     }
+    if (e->extra_entities[i]) {
+      heap_caps_free(e->extra_entities[i]);
+      e->extra_entities[i] = nullptr;
+    }
     e->types[i] = slots[i].type;
     e->entities[i] = psramStrdupLocal(slots[i].sensor_entity);
     e->rule_entities[i] = psramStrdupLocal(slots[i].rule_entity);
+    e->extra_entities[i] = psramStrdupLocal(slots[i].extra_entities);
   }
   e->built_gen = built_gen;
   return e;
@@ -2751,9 +3175,11 @@ bool TileConfig::getFolderEntitiesCached(uint16_t folder_id, FolderEntitySlotVie
   const uint32_t gen_now = folder_entity_cache_gen_;
   FolderEntityCacheEntry* e = findFolderEntityCacheEntry(folder_id);
   if (!e || e->built_gen != gen_now) {
-    TileEntitySlot slots[TILES_PER_GRID];
-    if (!loadFolderGridEntitiesOnly(folder_id, slots, TILES_PER_GRID)) return false;
-    e = storeFolderEntityCache(folder_id, slots, gen_now);
+    // On the heap: a list's slots no longer fit the loop task's stack.
+    std::unique_ptr<TileEntitySlot[]> slots(new (std::nothrow) TileEntitySlot[TILES_PER_GRID]);
+    if (!slots) return false;
+    if (!loadFolderGridEntitiesOnly(folder_id, slots.get(), TILES_PER_GRID)) return false;
+    e = storeFolderEntityCache(folder_id, slots.get(), gen_now);
     if (!e) return false;
   }
 
@@ -2761,6 +3187,7 @@ bool TileConfig::getFolderEntitiesCached(uint16_t folder_id, FolderEntitySlotVie
     out[i].type = e->types[i];
     out[i].entity = e->entities[i] ? e->entities[i] : "";
     out[i].rule_entity = e->rule_entities[i] ? e->rule_entities[i] : "";
+    out[i].extra_entities = e->extra_entities[i] ? e->extra_entities[i] : "";
   }
   return true;
 }
@@ -2803,6 +3230,23 @@ static bool ensureNavigationIds(TileGridConfig& grid, bool& changed) {
   return true;
 }
 
+// Parked before tiles kept their ID in the snapshot (b445): it gets one
+// once, so the layout window shows it in its field and its places in the
+// layouts can be kept (user 2026-10-13: "where is Settings?").
+void TileConfig::giveParkedSettingsTileId() {
+  const SettingsTileSnapshot& kept = configManager.getConfig().settings_tile_snapshot;
+  if (!kept.valid || kept.view_id) return;
+  std::unique_ptr<DeviceConfig> cfg(new (std::nothrow) DeviceConfig(configManager.getConfig()));
+  const uint16_t id = cfg ? reserveNavigationId("tile_next", 1) : 0;
+  if (!id) return;
+  cfg->settings_tile_snapshot.view_id = id;
+  if (configManager.save(*cfg)) {
+    Serial.printf("[TileConfig] Parked Settings tile got ID %u\n", static_cast<unsigned>(id));
+  } else {
+    Serial.println("[TileConfig] Parked Settings tile: ID not saved");
+  }
+}
+
 bool TileConfig::saveFolderGrid(uint16_t folder_id, TileGridConfig& grid) {
   if (!folderExists(folder_id)) return false;
   bool ids_changed = false;
@@ -2810,21 +3254,70 @@ bool TileConfig::saveFolderGrid(uint16_t folder_id, TileGridConfig& grid) {
   bool ok = saveGridInPlace(folder_id, grid);
   if (ok && folder_id == active_folder_id) {
     // Keep the runtime cache identical to the policy-normalized grid that was
-    // written. Normalize the existing member in place so this storage call
-    // does not add another full TileGridConfig to the WebServer task stack.
-    activeGrid() = grid;
-    for (size_t i = 0; i < TILES_PER_GRID; ++i) {
-      if (isRetiredTileType(activeGrid().tiles[i].type)) {
-        activeGrid().tiles[i] = Tile{};
-      }
-    }
-    if (folder_id == kRootFolderId) {
-      applySettingsTilePolicy(activeGrid());
-    } else {
-      ensureBackTile(folder_id, activeGrid());
-    }
+    // written.
+    adoptActiveGrid(folder_id, grid);
   }
   return ok;
+}
+
+bool TileConfig::loadFolderGridClassic(uint16_t folder_id, TileGridConfig& out) {
+  if (!folderExists(folder_id)) return false;
+  return loadGrid(folder_id, out, true, false);
+}
+
+unsigned TileConfig::foldersWithoutPlace(grid_layout::Layout layout) {
+  std::unique_ptr<TileGridConfig> grid(new (std::nothrow) TileGridConfig{});
+  if (!grid) return 0;
+  const grid_layout::Shown screen = grid_layout::layout_grid(layout);
+  unsigned missing = 0;
+  const std::vector<FolderEntry> list = folders;
+  for (const FolderEntry& folder : list) {
+    if (!loadFolderGridClassic(folder.id, *grid)) continue;
+    for (const Tile& tile : grid->tiles) {
+      if (tile.type != TILE_FOLDER || !tile.view_id) continue;
+      if (layout == grid_layout::Layout::kClassic) {
+        if (tile_layouts::classic_hidden(folder.id, tile.view_id)) ++missing;
+        continue;
+      }
+      if (folder.id == kRootFolderId && tile_layouts::page_number(getNavigateTargetId(tile)) > 0) continue;
+      tile_layouts::Place place{};
+      if (!tile_layouts::find(layout, folder.id, tile.view_id, place) ||
+          !grid_layout::inside(screen, place.col, place.row, place.span_w, place.span_h)) {
+        ++missing;
+      }
+    }
+  }
+  return missing;
+}
+
+bool TileConfig::saveFolderGridClassic(uint16_t folder_id, TileGridConfig& grid) {
+  if (!folderExists(folder_id)) return false;
+  bool ids_changed = false;
+  if (!ensureNavigationIds(grid, ids_changed)) return false;
+  return saveGridInPlace(folder_id, grid, true, false);
+}
+
+bool TileConfig::previewActiveFolderGrid(uint16_t folder_id,
+                                         const TileGridConfig& grid) {
+  if (folder_id != active_folder_id || !folderExists(folder_id)) return false;
+  adoptActiveGrid(folder_id, grid);
+  return true;
+}
+
+// Normalizes the existing member in place, so no further full TileGridConfig
+// lands on the WebServer/loop task stack.
+void TileConfig::adoptActiveGrid(uint16_t folder_id, const TileGridConfig& grid) {
+  activeGrid() = grid;
+  for (size_t i = 0; i < TILES_PER_GRID; ++i) {
+    if (isRetiredTileType(activeGrid().tiles[i].type)) {
+      activeGrid().tiles[i] = Tile{};
+    }
+  }
+  if (folder_id == kRootFolderId) {
+    applySettingsTilePolicy(activeGrid());
+  } else {
+    ensureBackTile(folder_id, activeGrid());
+  }
 }
 
 bool TileConfig::saveScreensaverGrid(const TileGridConfig& grid) {
@@ -3218,7 +3711,7 @@ bool TileConfig::updateFolder(uint16_t folder_id, const String& name, const Stri
     if (entry.id != folder_id) continue;
     String safe_name = name;
     safe_name.trim();
-    if (!safe_name.length()) safe_name = "Ordner";
+    if (!safe_name.length()) safe_name = unnamedFolderName(folder_id);
     String safe_icon = icon;
     safe_icon.trim();
     copyString(safe_name, entry.name, sizeof(entry.name));
@@ -3298,8 +3791,17 @@ bool TileConfig::getFolderPin(uint16_t folder_id, String& out) const {
 }
 
 bool TileConfig::getSettingsTile(Tile& out) {
-  TileGridConfig grid{};
-  if (!loadGrid(kRootFolderId, grid, false)) return false;
+  // The visible Home grid is the stored one: no flash read, which took about
+  // 350 ms on the V2 before a Settings parking move could show (user
+  // 2026-10-02, "[WebAdmin] Settings tile ... parse=").
+  TileGridScratch scratch = makeTileGridScratch();
+  if (!scratch) return false;
+  TileGridConfig& grid = *scratch;
+  if (active_folder_id == kRootFolderId) {
+    grid = activeGrid();
+  } else if (!loadGrid(kRootFolderId, grid, false)) {
+    return false;
+  }
   for (const auto& tile : grid.tiles) {
     if (tile.type != TILE_SETTINGS) continue;
     out = tile;
@@ -3308,9 +3810,49 @@ bool TileConfig::getSettingsTile(Tile& out) {
   return false;
 }
 
+void TileConfig::snapshotSettingsTile(const Tile& tile, SettingsTileSnapshot& out) {
+  memset(&out, 0, sizeof(out));
+  out.valid = true;
+  strncpy(out.title, tile.title.c_str(), sizeof(out.title) - 1);
+  strncpy(out.icon_name, tile.icon_name.c_str(), sizeof(out.icon_name) - 1);
+  out.bg_color = tile.bg_color;
+  out.col = tile.col;
+  out.row = tile.row;
+  // Parked it is one cell (user 2026-10-22), like a page's folder.
+  out.span_w = 1;
+  out.span_h = 1;
+  out.view_id = tile.view_id;
+}
+
+int TileConfig::settingsTileIndex() {
+  const TileGridConfig* grid = nullptr;
+  TileGridScratch loaded;
+  if (active_folder_id == kRootFolderId) {
+    grid = &activeGrid();
+  } else {
+    loaded = makeTileGridScratch();
+    if (!loaded || !loadGrid(kRootFolderId, *loaded, false)) return -1;
+    grid = loaded.get();
+  }
+  for (size_t i = 0; i < TILES_PER_GRID; ++i) {
+    if (grid->tiles[i].type == TILE_SETTINGS) return static_cast<int>(i);
+  }
+  return -1;
+}
+
+bool TileConfig::previewSettingsTileVisible(bool visible, float target_col,
+                                            float target_row) {
+  if (active_folder_id != kRootFolderId) return false;
+  TileGridConfig& grid = activeGrid();
+  return visible ? ensureSettingsTile(grid, target_col, target_row, true)
+                 : removeSettingsTiles(grid);
+}
+
 SettingsTileVisibilityResult TileConfig::setSettingsTileVisible(
     bool visible, float target_col, float target_row) {
-  TileGridConfig grid{};
+  TileGridScratch scratch = makeTileGridScratch();
+  if (!scratch) return SettingsTileVisibilityResult::StorageError;
+  TileGridConfig& grid = *scratch;
   if (!loadGrid(kRootFolderId, grid, false)) {
     return SettingsTileVisibilityResult::StorageError;
   }
@@ -3325,7 +3867,7 @@ SettingsTileVisibilityResult TileConfig::setSettingsTileVisible(
       }
     }
     if (!already_present) {
-      if (!ensureSettingsTile(grid, target_col, target_row)) {
+      if (!ensureSettingsTile(grid, target_col, target_row, true)) {
         return SettingsTileVisibilityResult::NoFreeCell;
       }
       changed = true;
@@ -3334,6 +3876,11 @@ SettingsTileVisibilityResult TileConfig::setSettingsTileVisible(
     changed = removeSettingsTiles(grid);
   }
 
+  // A restored Settings tile takes its navigation ID in this write; without
+  // it the next grid load assigned one and wrote the whole grid again.
+  if (changed && !ensureNavigationIds(grid, changed)) {
+    return SettingsTileVisibilityResult::StorageError;
+  }
   if (changed && !saveGridInPlace(kRootFolderId, grid, false)) {
     return SettingsTileVisibilityResult::StorageError;
   }
@@ -3343,8 +3890,14 @@ SettingsTileVisibilityResult TileConfig::setSettingsTileVisible(
 
 SettingsTileVisibilityResult TileConfig::validateSettingsTileVisible(
     bool visible, float target_col, float target_row) {
-  TileGridConfig grid{};
-  if (!loadGrid(kRootFolderId, grid, false)) {
+  // Checked against the visible Home grid, which is the stored one (see
+  // getSettingsTile): no flash read before the move shows.
+  TileGridScratch scratch = makeTileGridScratch();
+  if (!scratch) return SettingsTileVisibilityResult::StorageError;
+  TileGridConfig& grid = *scratch;
+  if (active_folder_id == kRootFolderId) {
+    grid = activeGrid();
+  } else if (!loadGrid(kRootFolderId, grid, false)) {
     return SettingsTileVisibilityResult::StorageError;
   }
   if (!visible) return SettingsTileVisibilityResult::Success;
@@ -3354,7 +3907,7 @@ SettingsTileVisibilityResult TileConfig::validateSettingsTileVisible(
       return SettingsTileVisibilityResult::Success;
     }
   }
-  return ensureSettingsTile(grid, target_col, target_row)
+  return ensureSettingsTile(grid, target_col, target_row, true)
              ? SettingsTileVisibilityResult::Success
              : SettingsTileVisibilityResult::NoFreeCell;
 }
@@ -3412,8 +3965,12 @@ bool TileConfig::deleteFolder(uint16_t folder_id) {
       sidecarKeyRemove(g_entity_sidecar_keys, sidecarKey(id, i));
       writeLongTitleSd(id, i, "");
       writeIconColorsSd(id, i, "");
+      writeWeatherSensorsSd(id, i, "");
+      writeFlowEntitiesSd(id, i, "");
     }
+    tile_layouts::drop_folder(id);
   }
+  tile_layouts::commit();
 
   for (uint16_t id : to_delete) {
     if (active_folder_id == id) {
@@ -3426,8 +3983,232 @@ bool TileConfig::deleteFolder(uint16_t folder_id) {
   return true;
 }
 
+// The Settings tile is always to be tapped (user 2026-10-12): parked (the
+// swipe stays on), or on the screen. One without a place in the active
+// layout (stored before the layout window marked it red there, an import)
+// shows at the first free spot from the bottom right, like a new Settings
+// tile, in its own size or 1 x 1. Nothing is stored; a save of the grid
+// keeps that place. Parking and the gear in the head stay independent of it.
+static void showUnplacedSettingsTile(TileGridConfig& grid) {
+  Tile* settings = nullptr;
+  for (auto& tile : grid.tiles) {
+    if (tile.type == TILE_SETTINGS && tile.layout_hidden) settings = &tile;
+  }
+  if (!settings) return;
+  auto free = [&](float col, float row, float span_w, float span_h) {
+    if (!grid_layout::inside(col, row, span_w, span_h) ||
+        !tile_geometry::supported_size(TILE_SETTINGS, col, row, span_w, span_h)) {
+      return false;
+    }
+    for (const auto& tile : grid.tiles) {
+      float c = 0, r = 0, w = 1, h = 1;
+      if (&tile == settings || tile.type == TILE_EMPTY || !shownTileLayout(tile, c, r, w, h)) continue;
+      if (col < c + w && c < col + span_w && row < r + h && r < row + span_h) return false;
+    }
+    return true;
+  };
+  const float sizes[][2] = {{settings->span_w < 1 ? 1.0f : settings->span_w,
+                             settings->span_h < 0.5f ? 1.0f : settings->span_h},
+                            {1.0f, 1.0f}};
+  for (const auto& size : sizes) {
+    for (float row = grid_layout::shown_rows() - size[1]; row >= 0; row -= 0.5f) {
+      for (float col = grid_layout::shown().cols - size[0]; col >= 0; col -= 0.5f) {
+        if (!free(col, row, size[0], size[1])) continue;
+        settings->col = col;
+        settings->row = row;
+        settings->span_w = size[0];
+        settings->span_h = size[1];
+        settings->layout_hidden = false;
+        Serial.printf("[TileConfig] Settings tile had no place in the %s layout: shown at %.1f,%.1f\n",
+                      grid_layout::key(grid_layout::active()), col, row);
+        return;
+      }
+    }
+  }
+}
+
+// The active layout's places (tile_layouts.h) over the stored classic ones.
+// A tile without a place there is hidden: not drawn, no room taken.
+static void applyLayoutPlaces(uint16_t folder_id, TileGridConfig& grid) {
+  using grid_layout::Layout;
+  const Layout active = grid_layout::active();
+  for (auto& tile : grid.tiles) {
+    tile.layout_hidden = false;
+    if (tile.type == TILE_EMPTY || !tile.view_id) continue;
+    if (active == Layout::kClassic) {
+      tile.layout_hidden = tile_layouts::classic_hidden(folder_id, tile.view_id);
+      continue;
+    }
+    // A page's folder tile stays off Home: the page sits beside it.
+    if (folder_id == TileConfig::rootFolderId() && tile.type == TILE_FOLDER &&
+        tile_layouts::page_number(getNavigateTargetId(tile)) > 0) {
+      tile.layout_hidden = true;
+      continue;
+    }
+    tile_layouts::Place place{};
+    // Inside the shown grid (an upright one has more rows than the profile).
+    const bool placed = tile.type != TILE_BACK &&
+                        tile_layouts::find(active, folder_id, tile.view_id, place) &&
+                        grid_layout::inside(place.col, place.row, place.span_w, place.span_h) &&
+                        tile_geometry::supported_size(tile.type, place.col, place.row, place.span_w, place.span_h);
+    if (!placed) {
+      tile.layout_hidden = true;
+      continue;
+    }
+    tile.col = place.col;
+    tile.row = place.row;
+    tile.span_w = place.span_w;
+    tile.span_h = place.span_h;
+  }
+  showUnplacedSettingsTile(grid);
+}
+
+// A free place in the classic layout for a tile made under a bar layout: its
+// own size first, then the smallest its type allows; whole cells before half
+// steps.
+static bool fitsFreeClassicPlace(const std::vector<uint8_t>& occupied, const Tile& tile, float col, float row,
+                                 float w, float h) {
+  const int cols2 = GRID_COLS * 2;
+  if (col < 0 || row < 0 || col + w > GRID_COLS || row + h > GRID_ROWS) return false;
+  if (!tile_geometry::supported(tile.type, col, row, w, h)) return false;
+  for (int r = static_cast<int>(row * 2); r < static_cast<int>((row + h) * 2); ++r) {
+    for (int c = static_cast<int>(col * 2); c < static_cast<int>((col + w) * 2); ++c) {
+      if (occupied[r * cols2 + c]) return false;
+    }
+  }
+  return true;
+}
+
+static bool findFreeClassicPlace(const std::vector<uint8_t>& occupied, const Tile& tile,
+                                 tile_layouts::Place& out) {
+  auto fits = [&](float col, float row, float w, float h) { return fitsFreeClassicPlace(occupied, tile, col, row, w, h); };
+  const float sizes[][2] = {{tile.span_w, tile.span_h}, {1, 1}, {1, 0.5f}};
+  for (const auto& size : sizes) {
+    for (float step : {1.0f, 0.5f}) {
+      for (float row = 0; row + size[1] <= GRID_ROWS; row += step) {
+        for (float col = 0; col + size[0] <= GRID_COLS; col += step) {
+          if (!fits(col, row, size[0], size[1])) continue;
+          out = {col, row, size[0], size[1]};
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+// Before a grid is written: the active layout's places of its tiles go to the
+// layout file, and `classic` gets the classic place of every slot (what the
+// tile data stores). With the classic layout shown (or classic_only) the grid
+// holds them already; a tile hidden there keeps the stored one. A tile whose
+// slot got a new ID (its type changed) keeps the places of the tile before.
+static void resolveLayoutPlaces(uint16_t folder_id, TileGridConfig& grid, bool classic_only,
+                                tile_layouts::Place* classic) {
+  using grid_layout::Layout;
+  const Layout active = classic_only ? Layout::kClassic : grid_layout::active();
+  std::vector<uint16_t> views;
+  for (size_t i = 0; i < TILES_PER_GRID; ++i) {
+    const Tile& tile = grid.tiles[i];
+    classic[i] = {tile.col, tile.row, tile.span_w, tile.span_h};
+    if (tile.type != TILE_EMPTY && tile.view_id) views.push_back(tile.view_id);
+  }
+  // The Settings tile parked off Home keeps its places in the layouts that
+  // show it (user 2026-10-13: parked per layout), and no new tile in its
+  // slot takes them over.
+  if (folder_id == TileConfig::rootFolderId() &&
+      std::none_of(grid.tiles, grid.tiles + TILES_PER_GRID, [](const Tile& tile) { return tile.type == TILE_SETTINGS; })) {
+    const SettingsTileSnapshot& kept = configManager.getConfig().settings_tile_snapshot;
+    if (kept.valid && kept.view_id) views.push_back(kept.view_id);
+  }
+  if (active == Layout::kClassic && !tile_layouts::has_any(folder_id)) return;
+
+  // What the file holds now: each slot's tile and its classic place.
+  struct Stored {
+    uint16_t view;
+    tile_layouts::Place place;
+  };
+  std::vector<Stored> stored(TILES_PER_GRID, Stored{0, {0, 0, 1, 1}});
+  {
+    auto packed_storage = allocPackedGridScratch<PackedQuarterGridV7>(QUARTERS_PER_GRID, "Grid-Layouts");
+    if (packed_storage && readGridSd(folder_id, packed_storage.get(), QUARTERS_PER_GRID)) {
+      std::unique_ptr<Tile> tile(new (std::nothrow) Tile());
+      for (size_t q = 0; tile && q < QUARTERS_PER_GRID; ++q) {
+        for (size_t i = 0; i < TILES_PER_QUARTER; ++i) {
+          const size_t index = quarterGridIndex(q, i);
+          if (index >= TILES_PER_GRID) continue;
+          *tile = Tile();
+          unpackTileV7(packed_storage.get()[q].tiles[i], *tile);
+          unpackGeometry(packed_storage.get()[q], i, *tile);
+          if (tile->type == TILE_EMPTY) continue;
+          stored[index] = {tile->view_id, {tile->col, tile->row, tile->span_w, tile->span_h}};
+        }
+      }
+    }
+  }
+  auto stored_slot = [&](uint16_t view) -> int {
+    for (size_t j = 0; j < TILES_PER_GRID; ++j) {
+      if (view && stored[j].view == view) return static_cast<int>(j);
+    }
+    return -1;
+  };
+  auto present = [&](uint16_t view) { return std::find(views.begin(), views.end(), view) != views.end(); };
+
+  std::vector<int> source(TILES_PER_GRID, -1);
+  for (size_t i = 0; i < TILES_PER_GRID; ++i) {
+    const Tile& tile = grid.tiles[i];
+    if (tile.type == TILE_EMPTY || !tile.view_id) continue;
+    source[i] = stored_slot(tile.view_id);
+    if (source[i] < 0 && stored[i].view && !present(stored[i].view)) {
+      tile_layouts::rekey(folder_id, stored[i].view, tile.view_id);
+      source[i] = static_cast<int>(i);
+    }
+  }
+
+  const int cols2 = GRID_COLS * 2;
+  std::vector<uint8_t> occupied(static_cast<size_t>(GRID_ROWS * 2 * cols2), 0);
+  auto occupy = [&](const tile_layouts::Place& place) {
+    for (int r = static_cast<int>(place.row * 2); r < static_cast<int>((place.row + place.span_h) * 2); ++r) {
+      for (int c = static_cast<int>(place.col * 2); c < static_cast<int>((place.col + place.span_w) * 2); ++c) {
+        if (r >= 0 && c >= 0 && r < GRID_ROWS * 2 && c < cols2) occupied[r * cols2 + c] = 1;
+      }
+    }
+  };
+  for (size_t i = 0; i < TILES_PER_GRID; ++i) {
+    Tile& tile = grid.tiles[i];
+    if (tile.type == TILE_EMPTY || !tile.view_id) continue;
+    if (active == Layout::kClassic) {
+      if (tile.layout_hidden && source[i] >= 0) classic[i] = stored[source[i]].place;
+      continue;
+    }
+    if (!tile.layout_hidden && tile.type != TILE_BACK) {
+      tile_layouts::set(active, folder_id, tile.view_id, {tile.col, tile.row, tile.span_w, tile.span_h});
+    }
+    if (source[i] < 0) continue;
+    classic[i] = stored[source[i]].place;
+    if (!tile_layouts::classic_hidden(folder_id, tile.view_id)) occupy(classic[i]);
+  }
+  // Made under a bar layout: the first free classic place, else none (the
+  // Layout window shows it red there).
+  const SettingsTileSnapshot& parked = configManager.getConfig().settings_tile_snapshot;
+  for (size_t i = 0; active != Layout::kClassic && i < TILES_PER_GRID; ++i) {
+    const Tile& tile = grid.tiles[i];
+    if (tile.type == TILE_EMPTY || !tile.view_id || source[i] >= 0) continue;
+    tile_layouts::Place place{};
+    // Settings back from parking keeps its classic place from before (its
+    // snapshot) while that is free.
+    const bool own = tile.type == TILE_SETTINGS && parked.valid && parked.view_id == tile.view_id &&
+                     fitsFreeClassicPlace(occupied, tile, parked.col, parked.row, parked.span_w, parked.span_h);
+    if (own) place = {parked.col, parked.row, parked.span_w, parked.span_h};
+    const bool free = own || findFreeClassicPlace(occupied, tile, place);
+    tile_layouts::set_classic_hidden(folder_id, tile.view_id, !free);
+    classic[i] = free ? place : tile_layouts::Place{0, 0, 1, 1};
+    if (free) occupy(place);
+  }
+  tile_layouts::retain(folder_id, views);
+}
+
 bool TileConfig::loadGrid(uint16_t folder_id, TileGridConfig& grid,
-                          bool ensure_navigation_tile) {
+                          bool ensure_navigation_tile, bool layout_places) {
   initGridDefaults(grid);
 
   bool ok = false;
@@ -3463,18 +4244,18 @@ bool TileConfig::loadGrid(uint16_t folder_id, TileGridConfig& grid,
   } else {
     packed_v7_storage.reset();
     auto packed_v6_storage =
-        allocPackedGridScratch<PackedQuarterGridV6>(QUARTERS_PER_GRID, "Grid-Load-v6");
+        allocPackedGridScratch<PackedQuarterGridV6>(LEGACY_QUARTERS_PER_GRID, "Grid-Load-v6");
     PackedQuarterGridV6* packed_v6 = packed_v6_storage.get();
     if (!packed_v6) return false;
-    if (readGridSdV6(folder_id, packed_v6, QUARTERS_PER_GRID) ||
+    if (readGridSdV6(folder_id, packed_v6, LEGACY_QUARTERS_PER_GRID) ||
         (folder_id == kRootFolderId && storageReady() &&
-         readPackedGridFileV6(tileGridFileLegacy("tab0"), packed_v6, QUARTERS_PER_GRID))) {
+         readPackedGridFileV6(tileGridFileLegacy("tab0"), packed_v6, LEGACY_QUARTERS_PER_GRID))) {
       ok = true;
       needs_migration_save = true;
-      for (size_t q = 0; q < QUARTERS_PER_GRID; ++q) {
+      for (size_t q = 0; q < LEGACY_QUARTERS_PER_GRID; ++q) {
         for (size_t i = 0; i < TILES_PER_QUARTER; ++i) {
           size_t grid_idx = quarterGridIndex(q, i);
-          if (grid_idx >= TILES_PER_GRID) {
+          if (grid_idx >= GRID_CELLS) {
             continue;
           }
           unpackTileV6(packed_v6[q].tiles[i], grid.tiles[grid_idx]);
@@ -3517,20 +4298,28 @@ bool TileConfig::loadGrid(uint16_t folder_id, TileGridConfig& grid,
   applyLongEntityIdsFromSd(folder_id, grid);
   applyLongTitlesFromSd(folder_id, grid);
   applyIconColorsFromSd(folder_id, grid);
+  applyWeatherSensorsFromSd(folder_id, grid);
+  applyFlowEntitiesFromSd(folder_id, grid);
 
   // Retired tile types become empty without renumbering the persisted enum.
+  // Empty tiles saved before deletion cleared them still carry the deleted
+  // tile's entity and options; they are dropped here, the file keeps them
+  // until the grid is saved again.
   for (size_t i = 0; i < TILES_PER_GRID; ++i) {
     if (isRetiredTileType(grid.tiles[i].type)) {
       grid.tiles[i] = Tile{};
       changed = true;
+    } else if (grid.tiles[i].type == TILE_EMPTY) {
+      clearEmptyTileFields(grid.tiles[i]);
     }
   }
 
   if (folder_id != kScreensaverGridStorageId &&
       !ensureNavigationIds(grid, changed)) return false;
   if (needs_migration_save || changed) {
-    if (!saveGridInPlace(folder_id, grid, ensure_navigation_tile)) return false;
+    if (!saveGridInPlace(folder_id, grid, ensure_navigation_tile, false)) return false;
   }
+  if (layout_places && folder_id != kScreensaverGridStorageId) applyLayoutPlaces(folder_id, grid);
   return true;
 }
 
@@ -3550,7 +4339,7 @@ bool TileConfig::saveGrid(uint16_t folder_id, const TileGridConfig& grid,
 // navigation tile) and writes it. No second full grid copy: two copies on the
 // loop task stack overflowed it when the Web Admin saved a folder (b39).
 bool TileConfig::saveGridInPlace(uint16_t folder_id, TileGridConfig& grid,
-                                 bool ensure_navigation_tile) {
+                                 bool ensure_navigation_tile, bool layout_places) {
   if (!storageReady()) {
     Serial.println("[TileConfig] WARN: Storage unavailable, grid cannot be saved");
     return false;
@@ -3561,9 +4350,13 @@ bool TileConfig::saveGridInPlace(uint16_t folder_id, TileGridConfig& grid,
     working.tiles[i].title = hometiles_title::normalize(working.tiles[i].title.c_str()).c_str();
     if (isRetiredTileType(working.tiles[i].type)) {
       working.tiles[i] = Tile{};
+    } else if (working.tiles[i].type == TILE_EMPTY) {
+      clearEmptyTileFields(working.tiles[i]);
     }
     working.tiles[i].icon_colors = normalizeTileIconColors(
         working.tiles[i].type, working.tiles[i].icon_colors.c_str());
+    normalizeWeatherSensors(working.tiles[i]);
+    normalizeFlowEntities(working.tiles[i]);
   }
   if (ensure_navigation_tile) {
     if (folder_id == kRootFolderId) {
@@ -3578,6 +4371,14 @@ bool TileConfig::saveGridInPlace(uint16_t folder_id, TileGridConfig& grid,
                 static_cast<unsigned>(QUARTERS_PER_GRID),
                 static_cast<unsigned>(sizeof(PackedQuarterGridV7)));
 
+  // The tile data keeps the classic layout's places (tile_layouts.h).
+  std::unique_ptr<tile_layouts::Place[]> classic;
+  if (folder_id != kScreensaverGridStorageId) {
+    classic.reset(new (std::nothrow) tile_layouts::Place[TILES_PER_GRID]);
+    if (!classic) return false;
+    resolveLayoutPlaces(folder_id, working, !layout_places, classic.get());
+  }
+
   auto packed_storage =
       allocPackedGridScratch<PackedQuarterGridV7>(QUARTERS_PER_GRID, "Grid-Save");
   PackedQuarterGridV7* packed = packed_storage.get();
@@ -3591,10 +4392,25 @@ bool TileConfig::saveGridInPlace(uint16_t folder_id, TileGridConfig& grid,
         packed[q].tiles[i] = PackedTileV7{};
         continue;
       }
-      packTile(working.tiles[grid_idx], packed[q].tiles[i]);
-      packGeometry(working.tiles[grid_idx], packed[q], i);
+      Tile& tile = working.tiles[grid_idx];
+      const tile_layouts::Place shown{tile.col, tile.row, tile.span_w, tile.span_h};
+      if (classic) {
+        tile.col = classic[grid_idx].col;
+        tile.row = classic[grid_idx].row;
+        tile.span_w = classic[grid_idx].span_w;
+        tile.span_h = classic[grid_idx].span_h;
+      }
+      packTile(tile, packed[q].tiles[i]);
+      packGeometry(tile, packed[q], i);
+      tile.col = shown.col;
+      tile.row = shown.row;
+      tile.span_w = shown.span_w;
+      tile.span_h = shown.span_h;
     }
   }
+  // The layout file before the tiles: a place is never lost to a failed
+  // grid write, an unused one is dropped on the next save.
+  tile_layouts::commit();
 
 #if defined(DEVICE_ESP32_S3_RGB_480)
   const bool legacy_v6_present =
@@ -3612,6 +4428,8 @@ bool TileConfig::saveGridInPlace(uint16_t folder_id, TileGridConfig& grid,
 #endif
 
   ScopedStorageWriteDisplayGuard storage_write_guard;
+  // Save timing (one log line per save) shows where a reorder spends time.
+  const uint32_t sidecars_started_ms = millis();
   for (size_t grid_idx = 0; grid_idx < TILES_PER_GRID; ++grid_idx) {
     const Tile& tile = working.tiles[grid_idx];
     if (!writeLongTitleSd(folder_id, grid_idx, tile.type == TILE_EMPTY ? String() : tile.title)) {
@@ -3621,6 +4439,16 @@ bool TileConfig::saveGridInPlace(uint16_t folder_id, TileGridConfig& grid,
     }
     if (!writeIconColorsSd(folder_id, grid_idx, tile.icon_colors)) {
       Serial.println("[TileConfig] Error saving tile icon colors");
+      invalidateFolderEntityCache();
+      return false;
+    }
+    if (!writeWeatherSensorsSd(folder_id, grid_idx, weatherSensorsRecord(tile))) {
+      Serial.println("[TileConfig] Error saving weather sensors");
+      invalidateFolderEntityCache();
+      return false;
+    }
+    if (!writeFlowEntitiesSd(folder_id, grid_idx, tile.flow_entities)) {
+      Serial.println("[TileConfig] Error saving power flow or vacuum map entities");
       invalidateFolderEntityCache();
       return false;
     }
@@ -3643,6 +4471,8 @@ bool TileConfig::saveGridInPlace(uint16_t folder_id, TileGridConfig& grid,
     }
   }
 
+  const uint32_t grid_started_ms = millis();
+  const uint32_t sidecars_ms = grid_started_ms - sidecars_started_ms;
   if (!writeGridSd(folder_id, packed, QUARTERS_PER_GRID)) {
     Serial.printf("[TileConfig] Error saving grid %u (storage write failed)\n",
                   static_cast<unsigned>(folder_id));
@@ -3666,9 +4496,12 @@ bool TileConfig::saveGridInPlace(uint16_t folder_id, TileGridConfig& grid,
     }
   }
 
-  Serial.printf("[TileConfig] Grid %u saved (storage, %u x %u bytes)\n",
+  Serial.printf("[TileConfig] Grid %u saved (storage, %u x %u bytes) "
+                "sidecars=%lu ms grid=%lu ms\n",
                 static_cast<unsigned>(folder_id),
                 static_cast<unsigned>(QUARTERS_PER_GRID),
-                static_cast<unsigned>(sizeof(PackedQuarterGridV7)));
+                static_cast<unsigned>(sizeof(PackedQuarterGridV7)),
+                static_cast<unsigned long>(sidecars_ms),
+                static_cast<unsigned long>(millis() - grid_started_ms));
   return true;
 }

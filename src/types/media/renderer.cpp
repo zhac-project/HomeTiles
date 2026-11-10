@@ -2,6 +2,10 @@
 #include "src/tiles/runtime/tile_icon_source.h"
 #include "src/types/media/renderer.h"
 #include "src/types/media/content_layout.h"
+#include "src/types/media/playing_bars.h"
+#include "src/types/media/tile_layout.h"
+#include "src/core/power/power_manager.h"
+#include "src/ui/popups/popup_shell.h"
 
 #include <Arduino.h>
 
@@ -14,6 +18,7 @@
 #include "src/tiles/runtime/tile_icon_disc.h"
 #include "src/tiles/runtime/tile_renderer_fonts.h"
 #include "src/tiles/runtime/tile_renderer_shared.h"
+#include "src/ui/shared/tone_color.h"
 #include "src/ui/popups/media/media_popup.h"
 
 #include <stdlib.h>
@@ -22,27 +27,13 @@
 // LVGL 9.5 no longer exports lv_image_cache_drop() through lvgl.h;
 // its declaration is only in the instance header.
 #include <misc/cache/instance/lv_image_cache.h>
+#include "src/ui/shared/ui_theme.h"
 
 namespace {
 
-#if defined(DEVICE_WAVESHARE_4B)
-static constexpr lv_coord_t kMediaControlButtonSize = 76;
-static constexpr lv_coord_t kMediaControlSideOffset = 96;
-static constexpr lv_coord_t kMediaControlBottomOffset = -8;
-static constexpr lv_coord_t kMediaContentYOffset = 8;
-#elif defined(DEVICE_LAYOUT_480X480)
-static constexpr lv_coord_t kMediaControlButtonSize = 51;
-static constexpr lv_coord_t kMediaControlSideOffset = 64;
-static constexpr lv_coord_t kMediaControlBottomOffset = -5;
-static constexpr lv_coord_t kMediaContentYOffset = 5;
-#else
-static constexpr lv_coord_t kMediaControlButtonSize =
-    tile_layout::scale(56);
-static constexpr lv_coord_t kMediaControlSideOffset =
-    tile_layout::scale(76);
-static constexpr lv_coord_t kMediaControlBottomOffset = 0;
-static constexpr lv_coord_t kMediaContentYOffset = 0;
-#endif
+static constexpr lv_coord_t kMediaControlButtonSize = media_tile::kControlButtonSize;
+static constexpr lv_coord_t kMediaControlSideOffset = media_tile::kControlSideOffset;
+static constexpr lv_coord_t kMediaControlBottomOffset = media_tile::kControlBottomOffset;
 
 struct MediaEventData {
   String entity_id;
@@ -56,10 +47,10 @@ struct MediaEventData {
 struct MediaPopupEventData {
   String entity_id;
   String title;
-  String icon_name;
-  uint32_t bg_color = 0x2A2A2A;
+  uint32_t bg_color = 0;  // 0: the popup takes its default card
   GridType grid_type = GridType::TAB0;
   uint8_t grid_index = 0;
+  bool cover_centered = false;  // the popup's layout (mediaPopupCoverCentered)
 };
 
 static void free_cover_dsc(MediaCoverRef* ref) {
@@ -120,6 +111,7 @@ static void media_command_event_cb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_SHORT_CLICKED) return;
   MediaEventData* data = static_cast<MediaEventData*>(lv_event_get_user_data(e));
   if (!data || !data->entity_id.length()) return;
+  if (lv_obj_has_state(static_cast<lv_obj_t*>(lv_event_get_current_target(e)), LV_STATE_DISABLED)) return;
   if (data->reset_text_scroll) {
     reset_media_label_scroll(data->media_title_label);
     reset_media_label_scroll(data->media_subtitle_label);
@@ -168,7 +160,12 @@ static void show_media_popup_event_cb(lv_event_t* e) {
   MediaPopupInit init;
   init.entity_id = data->entity_id;
   init.title = data->title;
-  init.icon_name = data->icon_name;
+  // The icon's name now, not when the tile was built: a name kept from
+  // before the Bridge's icons arrived ("television") no longer matched the
+  // tile's icon, and the popup's head lost its state form until the next
+  // report (user 2026-10-23: plain icon after reopening a paused player).
+  const Tile* tile = tile_renderer_get_tile_config(data->grid_type, data->grid_index);
+  if (tile && tile->type == TILE_MEDIA) init.icon_name = media_tile_icon_name(*tile);
   init.icon_char = media_label_text(widgets.icon_label);
   init.bg_color = tile_icon_source::popup_background(widgets.icon_label, data->bg_color);
   if (widgets.icon_label) {
@@ -184,6 +181,8 @@ static void show_media_popup_event_cb(lv_event_t* e) {
   init.has_volume = widgets.has_media_volume;
   init.volume_level = widgets.media_volume_level;
   init.is_muted = widgets.media_is_muted;
+  init.available = widgets.available;
+  init.cover_centered = data->cover_centered;
   const bool cover_visible = widgets.cover_ref &&
                              widgets.cover_ref->dsc &&
                              widgets.cover_clip &&
@@ -241,10 +240,20 @@ static lv_obj_t* create_media_control_button(lv_obj_t* parent,
   if (!btn) return nullptr;
   lv_obj_set_size(btn, kMediaControlButtonSize, kMediaControlButtonSize);
   lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, x_ofs, kMediaControlBottomOffset);
-  lv_obj_set_style_bg_color(btn, primary ? lv_color_white() : lv_color_black(), LV_PART_MAIN | LV_STATE_DEFAULT);
+  // An unavailable player disables the controls; they dim like the Cover
+  // popup's disabled sliders.
+  lv_obj_set_style_opa(btn, LV_OPA_30, LV_PART_MAIN | LV_STATE_DISABLED);
+  lv_obj_set_style_bg_color(btn, primary ? lv_color_hex(ui_theme::icon()) : lv_color_black(), LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_set_style_bg_opa(btn, primary ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_set_style_bg_color(btn, primary ? lv_color_hex(0xD8D8D8) : lv_color_white(), LV_PART_MAIN | LV_STATE_PRESSED);
-  lv_obj_set_style_bg_opa(btn, primary ? LV_OPA_COVER : LV_OPA_30, LV_PART_MAIN | LV_STATE_PRESSED);
+  if (primary) {
+    // Play keeps its white circle.
+    lv_obj_set_style_bg_color(btn, lv_color_hex(ui_theme::text_soft()), LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_PRESSED);
+  } else {
+    // Previous and next press like the popup controls
+    // (tile_icon_source::refresh_controls, called once the card is built).
+    tile_icon_disc::mark_control(btn);
+  }
   lv_obj_set_style_radius(btn, LV_RADIUS_CIRCLE, 0);
   lv_obj_set_style_border_width(btn, 0, 0);
   lv_obj_set_style_shadow_width(btn, 0, 0);
@@ -255,7 +264,10 @@ static lv_obj_t* create_media_control_button(lv_obj_t* parent,
 
   lv_obj_t* label = lv_label_create(btn);
   if (label) {
-    set_label_style(label, primary ? lv_color_hex(tile_bg_color) : lv_color_white(), FONT_MDI_ICONS);
+    set_label_style(label, primary ? lv_color_hex(tile_bg_color) : lv_color_hex(ui_theme::icon()), FONT_MDI_ICONS);
+    // Play is cut out of its circle in the card's color, also after a tint
+    // (tile_icon_source::refresh_discs).
+    if (primary) tile_icon_disc::mark_cutout(label);
     String icon_char = getMdiChar(icon_name);
     lv_label_set_text(label, icon_char.length() ? icon_char.c_str() : "");
     lv_obj_align(label, LV_ALIGN_CENTER, 0, primary ? 0 : 0);
@@ -290,7 +302,60 @@ static String media_friendly_name_from_entity(const String& entity_id) {
   return name;
 }
 
+// The playing bars over the title (playing_bars.h) in the tile icon's color.
+void media_bars_draw_cb(lv_event_t* e) {
+  lv_obj_t* bars = static_cast<lv_obj_t*>(lv_event_get_current_target(e));
+  lv_layer_t* layer = lv_event_get_layer(e);
+  if (!bars || !layer) return;
+  lv_obj_t* icon = static_cast<lv_obj_t*>(lv_event_get_user_data(e));
+  lv_area_t area;
+  lv_obj_get_coords(bars, &area);
+  media_bars::draw(layer, area, media_tile::kBarWidth, media_tile::kBarGap,
+                   icon ? lv_obj_get_style_text_color(icon, LV_PART_MAIN) : lv_color_white(),
+                   lv_obj_has_state(bars, LV_STATE_CHECKED));
+}
+
+// One frame while the player plays. lv_obj_invalidate skips hidden pages and
+// other screens itself; a popup over the tiles or a sleeping display would
+// redraw for nothing.
+void media_bars_timer_cb(lv_timer_t* timer) {
+  lv_obj_t* bars = static_cast<lv_obj_t*>(lv_timer_get_user_data(timer));
+  if (!bars || !lv_obj_has_state(bars, LV_STATE_CHECKED) || lv_obj_has_flag(bars, LV_OBJ_FLAG_HIDDEN)) return;
+  if (popup_shell_active() || powerManager.isInSleep()) return;
+  lv_obj_invalidate(bars);
+}
+
+void media_bars_delete_cb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_DELETE) return;
+  lv_timer_t* timer = static_cast<lv_timer_t*>(lv_event_get_user_data(e));
+  if (timer) lv_timer_delete(timer);
+}
+
+// The bars and their timer, which goes with them (like the Pixel animation
+// tile's); update_media_tile_state shows them and marks the playing.
+lv_obj_t* create_media_bars(lv_obj_t* card, lv_obj_t* icon_label) {
+  lv_obj_t* bars = lv_obj_create(card);
+  lv_obj_remove_style_all(bars);
+  lv_obj_remove_flag(bars, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_remove_flag(bars, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_size(bars, 4 * media_tile::kBarWidth + 3 * media_tile::kBarGap, media_tile::kBarsHeight);
+  lv_obj_add_flag(bars, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_event_cb(bars, media_bars_draw_cb, LV_EVENT_DRAW_MAIN, icon_label);
+  lv_timer_t* timer = lv_timer_create(media_bars_timer_cb, media_tile::kBarsPeriodMs, bars);
+  lv_obj_add_event_cb(bars, media_bars_delete_cb, LV_EVENT_DELETE, timer);
+  return bars;
+}
+
 }  // namespace
+
+String media_tile_icon_name(const Tile& tile) {
+  String icon_name = normalizeMdiIconName(tile.icon_name);
+  if (!icon_name.length() && tile.sensor_entity.length()) {
+    icon_name = normalizeMdiIconName(haBridgeConfig.findEntityIcon(tile.sensor_entity));
+  }
+  if (!icon_name.length()) icon_name = "television";
+  return icon_name;
+}
 
 lv_obj_t* render_media_tile(lv_obj_t* parent,
                             int col,
@@ -311,7 +376,7 @@ lv_obj_t* render_media_tile(lv_obj_t* parent,
   lv_obj_set_style_bg_grad_color(card, lv_color_hex(card_color), LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_set_style_bg_grad_dir(card, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_DEFAULT);
 
-  uint32_t pressed_color = brighten_rgb_color(card_color, 0x10);
+  uint32_t pressed_color = tone_color::pressed_card(card_color);
   lv_obj_set_style_bg_color(card, lv_color_hex(pressed_color), LV_PART_MAIN | LV_STATE_PRESSED);
   lv_obj_set_style_bg_grad_color(card, lv_color_hex(pressed_color), LV_PART_MAIN | LV_STATE_PRESSED);
   lv_obj_set_style_bg_grad_dir(card, LV_GRAD_DIR_NONE, LV_PART_MAIN | LV_STATE_PRESSED);
@@ -340,15 +405,13 @@ lv_obj_t* render_media_tile(lv_obj_t* parent,
     lv_obj_set_size(cover_clip, cover_size, cover_size);
     lv_obj_align(cover_clip,
                  LV_ALIGN_TOP_LEFT,
-                 tile_layout::scale(-2),
-                 tile_layout::scale(
-                     (tile.span_w > 1 || tile.span_h > 1) ? 58 : 42) +
-                     kMediaContentYOffset);
+                 media_tile::kCoverLeft,
+                 media_tile::cover_top(tile.span_w > 1 || tile.span_h > 1));
     lv_obj_set_style_bg_opa(cover_clip, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(cover_clip, 0, 0);
     lv_obj_set_style_shadow_width(cover_clip, 0, 0);
     lv_obj_set_style_pad_all(cover_clip, 0, 0);
-    ui_surface_style::apply_radius(cover_clip, tile_layout::scale(12), 0);
+    ui_surface_style::apply_radius(cover_clip, media_tile::kCoverRadius, 0);
     lv_obj_set_style_clip_corner(cover_clip, true, 0);
     lv_obj_remove_flag(cover_clip, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_clear_flag(cover_clip, LV_OBJ_FLAG_CLICKABLE);
@@ -374,15 +437,11 @@ lv_obj_t* render_media_tile(lv_obj_t* parent,
   lv_obj_t* play_pause_label = nullptr;
   lv_obj_t* next_label = nullptr;
 
-  String icon_name = normalizeMdiIconName(tile.icon_name);
-  if (!icon_name.length() && tile.sensor_entity.length()) {
-    icon_name = normalizeMdiIconName(haBridgeConfig.findEntityIcon(tile.sensor_entity));
-  }
-  if (!icon_name.length()) icon_name = "television";
+  const String icon_name = media_tile_icon_name(tile);
 
   lv_obj_t* icon_label = lv_label_create(card);
   if (icon_label) {
-    set_label_style(icon_label, lv_color_white(), FONT_MDI_ICONS);
+    set_label_style(icon_label, lv_color_hex(ui_theme::icon()), FONT_MDI_ICONS);
     String icon_char = icon_name.length() ? getMdiChar(icon_name) : "";
     if (icon_char.length()) {
       lv_label_set_text(icon_label, icon_char.c_str());
@@ -409,7 +468,7 @@ lv_obj_t* render_media_tile(lv_obj_t* parent,
 
   lv_obj_t* title_label = lv_label_create(card);
   if (title_label) {
-    set_label_style(title_label, lv_color_white(),
+    set_label_style(title_label, lv_color_hex(ui_theme::text()),
                     tile_layout::header_title_font());
     lv_label_set_long_mode(title_label, LV_LABEL_LONG_DOT);
     lv_obj_set_width(title_label, LV_PCT(70));
@@ -423,24 +482,12 @@ lv_obj_t* render_media_tile(lv_obj_t* parent,
   // After the title exists, so the disc can lift the whole header.
   if (icon_label) tile_icon_disc::add_round(card, icon_label);
 
-#if defined(DEVICE_WAVESHARE_4B)
-  const lv_font_t* media_font = (tile.span_w > 1 || tile.span_h > 1) ? &ui_font_28 : &ui_font_24;
-  const lv_font_t* media_subtitle_font = &ui_font_20;
-#elif defined(DEVICE_LAYOUT_480X480)
-  const lv_font_t* media_font =
-      (tile.span_w > 1 || tile.span_h > 1) ? &ui_font_20 : &ui_font_16;
-  const lv_font_t* media_subtitle_font = &ui_font_14;
-#else
-  const lv_font_t* media_font =
-      (tile.span_w > 1 || tile.span_h > 1)
-          ? tile_layout::content_font_24()
-          : tile_layout::content_font_20();
-  const lv_font_t* media_subtitle_font = FONT_SMALL;
-#endif
+  const lv_font_t* media_font = media_tile::title_font(tile.span_w > 1 || tile.span_h > 1);
+  const lv_font_t* media_subtitle_font = media_tile::subtitle_font();
 
   lv_obj_t* media_title = lv_label_create(card);
   if (media_title) {
-    set_label_style(media_title, lv_color_white(), media_font);
+    set_label_style(media_title, lv_color_hex(ui_theme::text()), media_font);
     lv_label_set_long_mode(media_title, LV_LABEL_LONG_SCROLL);
     apply_media_text_scroll_style(media_title);
     lv_obj_set_width(media_title, LV_PCT(82));
@@ -449,23 +496,25 @@ lv_obj_t* render_media_tile(lv_obj_t* parent,
         media_title,
         i18n::strings(configManager.getConfig().language).media_no_playback);
     lv_obj_align(media_title, LV_ALIGN_TOP_LEFT, tile_layout::scale(20),
-                 tile_layout::scale(108) + kMediaContentYOffset);
+                 tile_layout::scale(108) + media_tile::kContentYOffset);
     enable_event_bubble(media_title);
   }
 
   lv_obj_t* subtitle = lv_label_create(card);
   if (subtitle) {
-    set_label_style(subtitle, lv_color_hex(0xD8DEE9), media_subtitle_font);
+    set_label_style(subtitle, lv_color_hex(ui_theme::text_secondary()), media_subtitle_font);
     lv_label_set_long_mode(subtitle, LV_LABEL_LONG_SCROLL);
     apply_media_text_scroll_style(subtitle);
     lv_obj_set_width(subtitle, LV_PCT(82));
     lv_obj_set_style_text_align(subtitle, LV_TEXT_ALIGN_LEFT, 0);
     lv_label_set_text(subtitle, "");
     lv_obj_align(subtitle, LV_ALIGN_LEFT_MID, tile_layout::scale(20),
-                 tile_layout::scale(34) + kMediaContentYOffset);
+                 tile_layout::scale(34) + media_tile::kContentYOffset);
     lv_obj_add_flag(subtitle, LV_OBJ_FLAG_HIDDEN);
     enable_event_bubble(subtitle);
   }
+
+  lv_obj_t* bars = create_media_bars(card, icon_label);
 
   lv_obj_t* state_label = lv_label_create(card);
   if (state_label) {
@@ -503,6 +552,7 @@ lv_obj_t* render_media_tile(lv_obj_t* parent,
                                              media_title,
                                              subtitle,
                                              false);
+    tile_icon_source::refresh_controls(card);
   }
 
   MediaTileWidgets* target = tile_renderer_get_media_widgets(grid_type);
@@ -518,8 +568,10 @@ lv_obj_t* render_media_tile(lv_obj_t* parent,
     target[index].media_title_label = media_title;
     target[index].media_subtitle_label = subtitle;
     target[index].state_label = state_label;
+    target[index].bars = bars;
     target[index].last_payload_hash = 0;
     target[index].dynamic_icon = false;
+    target[index].icon_form = 0;  // media_state_icon::Form::Plain
     target[index].has_media_volume = false;
     target[index].media_volume_level = 0.0f;
     target[index].media_is_muted = false;
@@ -535,10 +587,10 @@ lv_obj_t* render_media_tile(lv_obj_t* parent,
       MediaPopupEventData* popup_data = new MediaPopupEventData{
         tile.sensor_entity,
         title_text,
-        icon_name,
         card_color,
         grid_type,
-        index
+        index,
+        mediaPopupCoverCentered(tile)
       };
       lv_obj_add_event_cb(card, show_media_popup_event_cb, LV_EVENT_SHORT_CLICKED, popup_data);
       lv_obj_add_event_cb(card, media_popup_event_data_delete_cb, LV_EVENT_DELETE, popup_data);

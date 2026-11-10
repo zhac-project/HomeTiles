@@ -43,6 +43,26 @@ jobs:
         with:
           python-version: "3.x"
       - run: pip install mkdocs-material ghp-import
+      # The browser tests use one fixed Chrome for Testing build instead of the
+      # runner's own Chrome, which changes with every runner image: on image
+      # ubuntu24/20261012.334 (Chrome 154.0.8037.97) the first page load got no
+      # answer, on 20261004.327 (Chrome 154.0.8037.57) the tests passed.
+      - name: Install the pinned test browser
+        env:
+          CHROME_VERSION: "154.0.8037.57"
+          CHROME_MD5: "0feaa732dbd1c6b075afd6cc55e0c8af"
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/chrome.zip" \
+            "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/linux64/chrome-linux64.zip"
+          echo "$CHROME_MD5  $RUNNER_TEMP/chrome.zip" | md5sum -c -
+          unzip -q "$RUNNER_TEMP/chrome.zip" -d "$RUNNER_TEMP"
+          # Ubuntu 24.04 lets only profiled binaries use user namespaces; this
+          # Chrome has no AppArmor profile and needs them for its sandbox.
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          echo "CHROME_PATH=$RUNNER_TEMP/chrome-linux64/chrome" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/chrome-linux64/chrome" --version
       - run: node tools/tests/build/test-installer-otadata.mjs
       - run: node tools/tests/build/test-web-installer.mjs
       - run: node tools/tests/web/test-docs-device-status.mjs

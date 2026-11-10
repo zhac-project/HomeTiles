@@ -26,7 +26,13 @@
 
   function createDragPreview(tile) {
     const clone = tile.cloneNode(true);
+    // No second element with the tile's id (getElementById, selection).
+    clone.removeAttribute('id');
     const rect = tile.getBoundingClientRect();
+    // The tile's own display: a forced block dropped the flex centering of
+    // Folder, Settings and Switch tiles, so the drag image showed icon and
+    // disc at the top left (user 2026-10-02).
+    const display = getComputedStyle(tile).display;
     clone.style.position = 'absolute';
     clone.style.top = '-9999px';
     clone.style.left = '-9999px';
@@ -37,7 +43,7 @@
     clone.style.boxShadow = '0 10px 30px rgba(0,0,0,0.35)';
     clone.style.backgroundClip = 'padding-box';
     clone.style.clipPath = 'inset(0 round 11px)';
-    clone.style.display = 'block';
+    clone.style.display = display === 'none' ? 'block' : display;
     document.body.appendChild(clone);
     return clone;
   }
@@ -120,7 +126,7 @@
 
   function getTileGridMetrics(tab) {
     const grid = getTileGrid(tab);
-    return getGridElementMetrics(grid, GRID_COLS, GRID_ROWS);
+    return getGridElementMetrics(grid, placeCols(tab), placeRows(tab));
   }
 
   function getRawGridCellFromPointer(tab, clientX, clientY, sizeStep = null) {
@@ -141,17 +147,35 @@
     if (col < 0) col = 0;
     const firstRow = firstAllowedGridRow(tab);
     if (row < firstRow) row = firstRow;
-    if (col >= GRID_COLS) col = GRID_COLS - unit;
-    if (row >= GRID_ROWS) row = GRID_ROWS - unit;
+    if (col >= placeCols(tab)) col = placeCols(tab) - unit;
+    if (row >= placeRows(tab)) row = placeRows(tab) - unit;
     return { col, row };
   }
 
   function getGridCellFromPointer(tab, clientX, clientY) {
+    if (dragSource && dragSource.tab === tab && dragSource.dropOffset) {
+      // The drop spot is the half cell nearest to the drag image's top-left
+      // corner, so it always lies under the dragged tile; the half cell under
+      // the pointer put it up to a half cell off (user 2026-10-02).
+      const metrics = getTileGridMetrics(tab);
+      if (!metrics) return null;
+      const halfX = (metrics.cellW + metrics.gapX) / 2;
+      const halfY = (metrics.cellH + metrics.gapY) / 2;
+      const left = clientX - dragSource.dropOffset.x - metrics.rect.left - metrics.padLeft;
+      const top = clientY - dragSource.dropOffset.y - metrics.rect.top - metrics.padTop;
+      if (!isFinite(left) || !isFinite(top) || !(halfX > 0) || !(halfY > 0)) return null;
+      const layout = getDragSourceLayout();
+      return {
+        col: Math.max(0, Math.min(placeCols(tab) - (layout?.span_w || 0.5), Math.round(left / halfX) / 2)),
+        row: Math.max(firstAllowedGridRow(tab),
+                      Math.min(placeRows(tab) - (layout?.span_h || 0.5), Math.round(top / halfY) / 2))
+      };
+    }
     const rawCell = getRawGridCellFromPointer(tab, clientX, clientY);
     if (!rawCell) return null;
     if (!dragSource || dragSource.tab !== tab) return rawCell;
-    const anchorCol = clampHalf(dragSource.grabCellCol, 0, GRID_COLS - 1, 0);
-    const anchorRow = clampHalf(dragSource.grabCellRow, 0, GRID_ROWS - 1, 0);
+    const anchorCol = clampHalf(dragSource.grabCellCol, 0, placeCols(tab) - 1, 0);
+    const anchorRow = clampHalf(dragSource.grabCellRow, 0, placeRows(tab) - 1, 0);
     return {
       col: rawCell.col - anchorCol,
       row: rawCell.row - anchorRow
@@ -171,6 +195,17 @@
       getTileLayoutFromData(dragSource.tab, dragSource.index);
   }
 
+  // The pointer's offset from the tile's grid corner, measured in the grid
+  // frame (getTileGridMetrics) that the drop spot is snapped in.
+  function getDragLayoutOffset(tab, layout, clientX, clientY) {
+    const metrics = getTileGridMetrics(tab);
+    if (!metrics || !layout) return null;
+    return {
+      x: clientX - metrics.rect.left - metrics.padLeft - layout.col * (metrics.cellW + metrics.gapX),
+      y: clientY - metrics.rect.top - metrics.padTop - layout.row * (metrics.cellH + metrics.gapY)
+    };
+  }
+
   function getDragAnchorCell(tab, layout, clientX, clientY) {
     const rawCell = getRawGridCellFromPointer(tab, clientX, clientY);
     if (!layout || !rawCell) return { col: 0, row: 0 };
@@ -180,23 +215,14 @@
     return { col, row };
   }
 
-  function getDragAnchorOffset(tab, layout, grabCellCol, grabCellRow, tileRect) {
-    const metrics = getTileGridMetrics(tab);
-    const rect = tileRect || { width: 0, height: 0 };
-    if (!layout || !metrics) {
-      return {
-        x: Math.max(0, (rect.width / 2) || 0),
-        y: Math.max(0, (rect.height / 2) || 0)
-      };
-    }
-    const unit = 0.5;
-    const x = (grabCellCol * (metrics.cellW + metrics.gapX)) + ((metrics.cellW + metrics.gapX) * unit - metrics.gapX) / 2;
-    const y = (grabCellRow * (metrics.cellH + metrics.gapY)) + ((metrics.cellH + metrics.gapY) * unit - metrics.gapY) / 2;
-    const maxX = Math.max(0, rect.width - 1);
-    const maxY = Math.max(0, rect.height - 1);
+  // Where the pointer took the tile: the drag image stays exactly under the
+  // pointer. Centering it on the grabbed half cell moved it by up to a quarter
+  // tile (user 2026-10-02: a dragged tile sat slightly off).
+  function getDragGrabOffset(tileRect, clientX, clientY) {
+    const rect = tileRect || { left: 0, top: 0, width: 0, height: 0 };
     return {
-      x: Math.max(0, Math.min(maxX, x)),
-      y: Math.max(0, Math.min(maxY, y))
+      x: Math.max(0, Math.min(Math.max(0, rect.width - 1), clientX - rect.left)),
+      y: Math.max(0, Math.min(Math.max(0, rect.height - 1), clientY - rect.top))
     };
   }
 
@@ -212,7 +238,7 @@
 
   function captureLayoutSnapshot(tab) {
     const tiles = getTilesData(tab);
-    const count = Math.max(Array.isArray(tiles) ? tiles.length : 0, GRID_COLS * GRID_ROWS);
+    const count = Math.max(Array.isArray(tiles) ? tiles.length : 0, TILES_PER_GRID);
     const snapshot = [];
     for (let i = 0; i < count; i++) {
       const layout = getTileElementLayout(tab, i) || getTileLayoutFromData(tab, i);
@@ -246,7 +272,7 @@
     dragSource.previewKey = '';
     for (let i = 0; i < dragSource.baseLayouts.length; i++) {
       const tile = Array.isArray(tiles) ? tiles[i] : null;
-      if (!tile || Number(tile.type || 0) === 0) continue;
+      if (!tileTakesRoom(tile)) continue;
       const el = document.getElementById(tab + '-tile-' + i);
       const layout = dragSource.baseLayouts[i];
       if (!el || !layout) continue;
@@ -260,7 +286,7 @@
     const tiles = getTilesData(tab);
     for (let i = 0; i < previewResult.layouts.length; i++) {
       const tile = Array.isArray(tiles) ? tiles[i] : null;
-      if (!tile || Number(tile.type || 0) === 0) continue;
+      if (!tileTakesRoom(tile)) continue;
       const el = document.getElementById(tab + '-tile-' + i);
       if (!el) continue;
 

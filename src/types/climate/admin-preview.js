@@ -125,15 +125,18 @@
   function climatePreviewColor(state) {
     const action = String(state?.action || '').toLowerCase();
     const mode = String(state?.mode || '').toLowerCase();
+    // Unavailable: the light theme's faint grey (climate_visual_color);
+    // unknown and the dark theme the inactive grey (climate_visuals).
     if (state?.available === false || mode === 'unavailable') {
-      return '#9e9e9e';
+      return panelLight() ? panelRoleHex('icon-unavailable', '#bdbdbd') : panelRoleHex('icon-rest', '#9e9e9e');
     }
+    if (mode === 'unknown') return panelRoleHex('icon-rest', '#9e9e9e');
     if (action === 'heating' || action === 'preheating') return '#ff8a3d';
     if (action === 'cooling') return '#4fc3f7';
     if (action === 'drying') return '#ffd54f';
     if (action === 'fan') return '#4db6ac';
     if (action === 'defrosting') return '#81d4fa';
-    if (mode === 'off' || action === 'idle' || action === 'off') return '#9e9e9e';
+    if (mode === 'off' || action === 'idle' || action === 'off') return panelRoleHex('icon-rest', '#9e9e9e');
     if (!action && mode === 'heat') return '#ff8a3d';
     if (!action && mode === 'cool') return '#4fc3f7';
     if (!action && mode === 'dry') return '#ffd54f';
@@ -141,9 +144,27 @@
     return '#ffffff';
   }
 
+  // The header value pair of the Layout "with value" and half height
+  // (climate_header_text): the action or mode and the current temperature.
+  function climatePreviewHeaderText(state) {
+    if (!state?.valid) return '--';
+    const actions = {
+      heating: CLIMATE_I18N.heating, preheating: CLIMATE_I18N.preheating, cooling: CLIMATE_I18N.cooling,
+      drying: CLIMATE_I18N.drying, fan: CLIMATE_I18N.fan, defrosting: CLIMATE_I18N.defrosting,
+      idle: CLIMATE_I18N.idle
+    };
+    const action = String(state.action || '').toLowerCase();
+    const label = state.available !== false && actions[action] ? actions[action] : climateModeText(state);
+    if (state.available === false || state.current === '--') return label;
+    return label + ' \u00B7 ' + state.current + ' ' + state.unit;
+  }
+
+  // `header`: the Layout "with value" shows the current temperature in the
+  // header, so the automatic fields start with the target
+  // (build_automatic_slot_kinds).
   function climatePreviewSlots(
       state, spanW, spanH, slotConfig = null,
-      targetLayoutConfig = null, geometryConfig = null) {
+      targetLayoutConfig = null, geometryConfig = null, header = false) {
     // Layout variants follow whole cells in width and mini-grid rows in
     // height (half steps add a row), like build_automatic_slot_kinds.
     const w = Math.max(1, Math.floor(Number(spanW) || 1));
@@ -197,18 +218,18 @@
         entityState === 'unknown') {
       addAutomatic(CLIMATE_TILE_CONTENT.HVAC_MODE);
     } else if (w === 1 && rows === 1) {
-      if (!state.valid || state.current !== '--') {
+      if (!header && (!state.valid || state.current !== '--')) {
         addAutomatic(CLIMATE_TILE_CONTENT.CURRENT_TEMPERATURE);
       } else {
         addPrimaryTarget();
       }
     } else if (w >= 2 && rows === 1) {
-      if (!state.valid || state.current !== '--') {
+      if (!header && (!state.valid || state.current !== '--')) {
         addAutomatic(CLIMATE_TILE_CONTENT.CURRENT_TEMPERATURE);
       }
       addPrimaryTarget();
     } else if (w === 1) {
-      if (!state.valid || state.current !== '--') {
+      if (!header && (!state.valid || state.current !== '--')) {
         addAutomatic(CLIMATE_TILE_CONTENT.CURRENT_TEMPERATURE);
       }
       addPrimaryTarget();
@@ -220,7 +241,7 @@
         addAutomatic(CLIMATE_TILE_CONTENT.TARGET_HUMIDITY);
       }
     } else {
-      if (!state.valid || state.current !== '--') {
+      if (!header && (!state.valid || state.current !== '--')) {
         addAutomatic(CLIMATE_TILE_CONTENT.CURRENT_TEMPERATURE);
       }
       if (state.currentHumidity !== null) {

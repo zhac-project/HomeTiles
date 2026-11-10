@@ -1,0 +1,176 @@
+#pragma once
+
+#include <lvgl.h>
+#include <stdint.h>
+
+#include "src/ui/tabs/settings/settings_style.h"
+
+// Building blocks of the Settings pages and the first-start setup, as in the
+// approved mockup (settings-menu.html): section headings, groups of rows with
+// hairline separators, rows (grey icon, title, optional grey sub line, a
+// control on the right), sliders like the tiles' brightness bars, segment
+// switches. Every part takes its colors from settings_style::Colors.
+namespace settings_parts {
+
+// A transparent container without padding, border or scrolling.
+lv_obj_t* plain(lv_obj_t* parent);
+
+// Grey heading of the group that follows: group() takes it in as the group's
+// first line (headings in the groups, mockup secin). `first` is unused.
+lv_obj_t* section(lv_obj_t* parent, const char* text, bool first);
+// Makes `heading` (a label or a row of them) such a heading: the rows' side
+// padding; the caller sets the space above it (kHeadingInsideTop).
+void mark_heading(lv_obj_t* heading);
+
+// The Settings page: its groups are surfaces like tiles (below).
+void mark_surface_page(lv_obj_t* page);
+bool is_surface_page(lv_obj_t* page);
+// A group of rows in the group color. On a surface page a surface like a
+// tile (the tile radius and the global tile border) that takes in a heading
+// made just before it; elsewhere (the setup's card) concentric with the card.
+lv_obj_t* group(lv_obj_t* parent, const settings_style::Colors& colors);
+
+struct Row {
+  lv_obj_t* row = nullptr;
+  lv_obj_t* icon = nullptr;
+  lv_obj_t* title = nullptr;
+  lv_obj_t* sub = nullptr;
+  // Holds the title and the sub line; takes the free width.
+  lv_obj_t* text = nullptr;
+};
+
+// One row of a group: grey icon, title (one line, ellipsis) and an optional
+// grey sub line. Controls added afterwards sit on the right. A row after the
+// first one gets the hairline separator.
+Row row(lv_obj_t* group, const char* icon_name, const char* title, const char* sub = nullptr);
+
+// Right-aligned value text of a slider row (fixed column width).
+lv_obj_t* value_label(lv_obj_t* row, const char* text);
+
+// A row that reacts to a tap: `pressed` fills it while the finger is down,
+// with the group's rounding where it touches the group's edge.
+void make_tap(lv_obj_t* row, uint32_t pressed, lv_event_cb_t on_click, void* user_data);
+// A grey value on the right of a row, at most `max_width` wide (ellipsis).
+lv_obj_t* trailing_text(lv_obj_t* row, const char* text, int max_width);
+// A grey icon on the right of a row (chevrons).
+lv_obj_t* trailing_icon(lv_obj_t* row, const char* icon_name);
+
+// The option list of a dropdown row (mockup .ddl, like the Select popup's
+// list): the row's width, a small gap below the row, the card color with the
+// tile hairline, option text aligned with the row labels, the selected option
+// inset in `selected_color`. It opens below the row when it fits there, else
+// above; when neither side holds it whole, on the larger side, and it scrolls
+// in itself. It never leaves `bounds`. One list at a time; a tap beside it
+// only closes it.
+struct OptionHandler {
+  const char* (*text)(uint8_t tag, uint8_t index);
+  void (*picked)(uint8_t tag, uint8_t index);
+  // After a tap closed the list: `tapped` is where a tap beside the list
+  // landed, nullptr after a pick.
+  void (*closed)(uint8_t tag, const lv_point_t* tapped);
+};
+struct OptionList {
+  lv_obj_t* host;  // covered while the list is open (taps beside it close it)
+  lv_obj_t* row;
+  lv_area_t bounds;
+  uint8_t tag;
+  uint8_t count;
+  uint8_t selected;
+  uint32_t card;
+  uint32_t selected_color;
+  int text_x;  // the row labels' x from the row's left edge
+  OptionHandler handler;
+};
+void open_options(const OptionList& list);
+// Closes an open list without calling its handler.
+void close_options();
+// Whether an option list shows (the edge swipes wait while it does).
+bool options_open();
+
+// Pill button (mockup .pb): an optional icon and the text (the row font when
+// `large_text`, else the small font). Normal sits in the button color, Accent
+// in `accent` with dark text, Danger in red.
+enum class ButtonKind : uint8_t { Normal, Accent, Danger };
+lv_obj_t* button(lv_obj_t* parent, const char* text, const char* icon_name, ButtonKind kind, uint32_t accent,
+                 const settings_style::Colors& colors, int height, bool large_text, lv_event_cb_t on_click,
+                 void* user_data);
+// Dimmed and without touches while disabled.
+void button_set_enabled(lv_obj_t* button, bool enabled);
+
+// A dialog (mockup .dlg) with the popups' shadow, over a transparent layer
+// that covers `host` for taps only: returns the card, a centered column with
+// the title; the caller adds its text, extras and dialog_buttons(), then
+// calls reveal(). A tap beside the card calls `on_outside` (nullptr:
+// ignored). The dialog's root is lv_obj_get_parent(card).
+lv_obj_t* dialog(lv_obj_t* host, uint32_t card, const char* title, lv_event_cb_t on_outside);
+// Shows or hides such a full-host layer like the popup shell does: only its
+// visible part (`shown`, with its shadow) is repainted, never the whole
+// screen behind the transparent layer. Delete the root after conceal().
+void reveal(lv_obj_t* root, lv_obj_t* shown);
+void conceal(lv_obj_t* root, lv_obj_t* shown);
+// Toggle (mockup .tg): the track in `track` (off) or `accent` (on), a grey
+// or white knob. Dimmed and without touches while `enabled` is false.
+lv_obj_t* toggle(lv_obj_t* row, bool on, uint32_t accent, uint32_t track, bool enabled, lv_event_cb_t on_click,
+                 void* user_data);
+
+// The row's sub line in two parts: `first` in `color`, then grey `rest`
+// ("Connected" in green, " · 192.168.1.50" in grey).
+void two_tone_sub(Row& row, const char* first, uint32_t color, const char* rest);
+
+// A QR code on white with rounded corners (mockup qr(): size / 12); nullptr
+// without QR support.
+lv_obj_t* qr_code(lv_obj_t* parent, int size, const char* text);
+
+// The popups' X (popup_layout::createCloseButton) at a given place on a card
+// without padding.
+lv_obj_t* close_button(lv_obj_t* card, int x, int y, int size, lv_event_cb_t on_click, void* user_data);
+// Where the popups put their X on a card `card_w` wide.
+int popup_close_x(int card_w);
+int popup_close_y();
+// The setup's step head (mockup wzCard): a circle in the step's color where
+// the popups' header circle sits, the title and a grey line under it,
+// centered together on the circle; `right` is what it leaves free on the
+// card's right (the X). Returns the title.
+lv_obj_t* step_head(lv_obj_t* card, int card_w, const char* icon_name, uint32_t color, uint32_t card_color,
+                    const char* title, const char* line, int right);
+// Grey, centered, wrapping text under the title.
+lv_obj_t* dialog_text(lv_obj_t* card, const char* text);
+// The row of buttons at the dialog's bottom; buttons share it evenly.
+lv_obj_t* dialog_buttons(lv_obj_t* card);
+
+// Slider like the tiles' brightness bars: the track in `track`, the fill in
+// `accent` (at least a circle wide), a short line in `thumb` near the fill's
+// end. `on_change` runs while dragging (final = false) and once on release
+// (final = true).
+using SliderCallback = void (*)(lv_obj_t* slider, int32_t value, bool final);
+lv_obj_t* slider(lv_obj_t* row, int width, int32_t min, int32_t max, int32_t value, uint32_t accent,
+                 uint32_t track, uint32_t thumb, SliderCallback on_change);
+void slider_set_value(lv_obj_t* slider, int32_t value);
+int32_t slider_value(lv_obj_t* slider);
+
+// Segment switch: a track in the card color with the selected option on a
+// light pill. `on_select` gets the option index.
+using SegmentCallback = void (*)(lv_obj_t* segment, uint8_t index);
+lv_obj_t* segment(lv_obj_t* row, const char* const* labels, uint8_t count, uint8_t selected,
+                  uint32_t track, SegmentCallback on_select, int min_width = settings_style::kSegmentMinWidth,
+                  int pad = settings_style::kSegmentPad);
+void segment_select(lv_obj_t* segment, uint8_t index);
+
+// Text where a browser draws it (the mockup is the reference). The firmware's
+// Inter fonts have taller line boxes than a browser's (20 px: 27 instead of
+// 24.2) with the baseline lower in them, so stacked and centered labels moved
+// down. A label in a flex layout gets margins that give it the browser's
+// line height and baseline; `px` is its font size.
+void browser_line(lv_obj_t* label, int px, int margin_top = 0, int margin_bottom = 0);
+// The browser's line height of an Inter font size ("normal", 1.21 em).
+float browser_line_height(int px);
+// The y of a label placed by hand: its baseline where a browser puts it in a
+// line box `box` px high whose top is at `box_top`.
+int browser_label_y(const lv_font_t* font, int px, float box_top, float box);
+
+// The width of `text` in `font`.
+int text_width(const lv_font_t* font, const char* text);
+// The width of the device's MDI icon glyphs.
+int icon_width();
+
+}  // namespace settings_parts

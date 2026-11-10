@@ -9,8 +9,10 @@
 // WAITING for the next byte -- once a whole TCP segment is already buffered,
 // they can walk through thousands of bytes with zero scheduling points. See
 // src/network/vendor/pubsubclient/PubSubClient.cpp for details.
-#include "src/network/topic_client.h"
-#include "src/network/cloud/cloud_topic_client.h"
+#include "src/network/vendor/pubsubclient/PubSubClient.h"
+// MQTT, ZHAC Cloud or the direct Bridge link behind the same calls
+// (docs-dev/bridge-link.md, docs-dev/zhac-fork.md).
+#include "src/network/link/bridge_transport_client.h"
 
 struct DeviceConfig;
 
@@ -85,6 +87,7 @@ public:
                                          uint32_t hold_ms,
                                          bool priority = false);
   bool mqttEnqueueSubscribe(const char* topic);
+  bool mqttControlIdle() const;
   bool mqttEnqueueUnsubscribe(const char* topic);
 
   // Streams one binary payload that exceeds the client buffer (the local
@@ -182,21 +185,94 @@ public:
   // only triggered by update() on the existing connect edge.
   void stopMdns();
 
+  // --- Direct Bridge link (docs-dev/bridge-link.md) ---
+  // A stored Bridge address (link_config) replaces MQTT. linkConfigured()
+  // follows switchToLink()/leaveLink() at once; the worker moves its client
+  // on its next pass, after the queued messages have left.
+  bool linkConfigured() const { return link_configured_; }
+  // Log name of the way to Home Assistant: "Link" on the direct link, "MQTT"
+  // otherwise. A panel on the link never logs MQTT.
+  const char* bridgeLogName() const { return link_configured_ ? "Link" : "MQTT"; }
+  // Loop task: use the direct link to this Bridge from now on, without a restart.
+  void switchToLink(const char* host, uint16_t port);
+  // Loop task: stop using the link (pairing removed); MQTT again if it is set
+  // up, otherwise nothing until Pair is pressed.
+  void leaveLink();
+  // Loop task: true once when the Bridge repeatedly refused the stored key
+  // because it no longer knows this panel (its entry was deleted).
+  bool consumeLinkForgotten();
+  // Loop task: the pairing key K and its key id for session mode, or nullptr
+  // after unpairing. Called by command_channel whenever the pairing changes.
+  void setLinkPairing(const uint8_t* pairing_key, const char* key_id);
+  // Loop task: connect in pair mode while no key exists (Pair on the display,
+  // or the first start after the Bridge sent its address).
+  void requestLinkPairing(bool requested);
+  // True while connected to the Bridge in pair mode: only the pairing topics
+  // travel, and the post-connect setup is skipped.
+  bool linkPairMode() const { return link_pair_mode_flag; }
+  // Loop task: Pair was pressed on a panel without a link; mDNS announces it
+  // with TXT pair=1 (also when MQTT is set up) until the window closes.
+  void setPairingAdvertised(bool advertised) { pairing_advertised_ = advertised; }
+
 private:
   NetworkClient net_client;
-  PubSubClientAdapter mqtt_transport;  // MQTT broker (upstream behaviour).
-  CloudTopicClient cloud_transport;    // ZHAC Cloud over WebSocket.
-  // The selected topic transport. It keeps the name mqtt_client so the
-  // single-owner call sites stay unchanged. After init(), worker only.
-  SelectedTopicClient mqtt_client{mqtt_transport};
+  // MQTT, ZHAC Cloud or the direct link; after init(), accessed only by the
+  // worker task.
+  BridgeTransportClient mqtt_client;
   volatile uint8_t cloud_status_ = 0;  // CloudStatus, worker-written.
 
-  // Worker only (or init() before the worker starts): picks the transport
-  // from the configuration, and turns a cloud refusal into the long retry
-  // and the Web Admin status.
+  // Worker only (or init() before the worker starts): picks the broker or
+  // ZHAC Cloud from the configuration, and turns a cloud refusal into the
+  // long retry and the Web Admin status.
   void selectTopicTransport(const DeviceConfig& cfg);
   bool cloudRefused();
   void updateCloudStatus();
+
+  // Direct link settings. link_credentials_ is written by the loop task and
+  // copied by the worker, both under link_mux_; link_changed_ asks the worker
+  // to reconnect with them.
+  struct LinkCredentials {
+    bool has_key;
+    uint8_t key[32];
+    char key_id[17];
+    bool pair_requested;
+  };
+  volatile bool link_configured_ = false;  // Written by the loop task only.
+  // A transport change for the worker (switchToLink/leaveLink), under link_mux_.
+  struct LinkTransportRequest {
+    bool pending;
+    bool enable;
+    char host[64];
+    uint16_t port;
+  };
+  LinkTransportRequest link_request_{};
+  // Worker: consecutive refusals with reason "unknown" in session mode.
+  uint8_t link_unknown_refusals_ = 0;
+  volatile bool link_forgotten_flag_ = false;  // Worker sets, loop consumes.
+  // Loop task: Pair window open, and the pair flag of the running mDNS service.
+  bool pairing_advertised_ = false;
+  bool mdns_pair_flag_ = false;
+  // Changes with every TXT update (random start per boot), see applyMdnsTxt().
+  uint32_t mdns_txt_seq_ = 0;
+  char link_host_[64] = {};
+  uint16_t link_port_ = 0;
+  portMUX_TYPE link_mux_ = portMUX_INITIALIZER_UNLOCKED;
+  LinkCredentials link_credentials_{};
+  volatile bool link_changed_ = false;
+  volatile bool link_pair_mode_flag = false;  // Written by the worker only.
+  // A connection is worth trying: MQTT, or the link with a key or a pairing request.
+  bool bridgeConnectionWanted();
+  // Worker only: the two transports' connects and the shared steps after them.
+  bool connectLink();
+  bool connectMqttBroker(const char* stat_topic);
+  void finishMqttConnect(const char* stat_topic);
+  // Worker only: hands the client its socket and the message callback.
+  void installMessageCallback();
+  void applyLinkTransport(const LinkTransportRequest& request);
+  // Worker only: deletes this panel's retained identity on the MQTT broker.
+  void clearMqttLeftovers();
+  // tab5_lvgl/config/<device id>/bridge, where the panel announces itself.
+  String bridgeConfigTopic() const;
 
   uint32_t wifi_retry_at = 0;
   uint32_t wired_ip_wait_until = 0;
@@ -302,6 +378,10 @@ private:
   // neither MQTT nor Web Admin, and on failure it is skipped silently instead of
   // blocking anything else.
   void startMdns();
+  // Loop task: sets or removes TXT pair=1 on the running advertisement.
+  void updateMdnsPairFlag();
+  // Loop task: replaces the advertisement's TXT set; false if mDNS refused it.
+  bool applyMdnsTxt();
 };
 
 // Shared instance.

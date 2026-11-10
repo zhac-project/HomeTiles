@@ -2,34 +2,46 @@
 
 ## Connection & pairing
 
+<a id="the-display-is-missing-in-home-assistant-i-deleted-it-there"></a>
+<a id="display-not-discovered"></a>
+
+**Display not found after Pair**
+
+1. Tap **Pair** again under **Settings → System → Security**; Home Assistant can find the display for two minutes.
+2. Display and Home Assistant must be in the same network: Home Assistant finds the display by mDNS (zeroconf). VLANs, guest networks and Docker without host networking often block it. Then add the display by its IP address: tap **Pair**, then **Add integration → HomeTiles Bridge → Panel by IP address (direct connection)** (Bridge v0.9.4).
+3. Check that the HomeTiles Bridge v0.9.0 is installed and Home Assistant was restarted afterwards.
+4. Look under **Settings → Devices & services** for an existing HomeTiles Bridge entry of this display: a display that already has one shows **Connect the panel** instead of **Panel found**.
+
 <a id="tiles-show-no-data"></a>
 
-**No tile data**
+**Paired, but no tile data**
 
-1. Check the display's MQTT host, port, and credentials in the Web Admin.
-2. Match its **Device topic base** and **Home Assistant prefix** to the Bridge entry.
-3. Select the entity under **HomeTiles Bridge → Configure → Entity Configuration**, then assign it to a tile.
-4. Check that the panel appears under the Bridge in Home Assistant. If missing, tap **Settings → System → Pairing** on the display.
+1. **Settings → System** on the display should show **Home Assistant: Connected**. If not, allow TCP ports `8140`–`8147` from the display to the Home Assistant host.
+2. Without a [Web Admin password](web-admin.md#web-admin-password), only the entities selected under **HomeTiles Bridge → Configure → Entity configuration** reach the display.
+3. A display on MQTT needs matching **Device topic base** and **Home Assistant prefix** on the display and in its Bridge entry.
 
-See the [setup guide](home-assistant-setup.md) for first-time installation.
-
-<a id="the-display-is-missing-in-home-assistant-i-deleted-it-there"></a>
-
-**Display not discovered**
-
-Initial network discovery runs only before MQTT credentials are saved. Otherwise, enter the [MQTT settings manually](home-assistant-setup.md#step-5-pair-the-display), then use **Pairing** to announce the panel again. Home Assistant may already know the device, so check the existing Bridge entries first.
+See the [Installation](installer.md) for first-time installation.
 
 <a id="ap-mode-basics"></a>
 
 **AP mode**
 
-The hotspot password is `12345678`, also shown with a QR code. It switches off after 10 minutes without a saved configuration. MQTT and the Web Admin are unavailable while AP mode is active.
+The hotspot password is `12345678`, also shown with a QR code. It switches off after 10 minutes without a saved configuration. The connection to Home Assistant and the Web Admin are unavailable while AP mode is active.
 
 <a id="what-happens-if-home-assistant-or-the-mqtt-broker-is-offline"></a>
 
 **Home Assistant or MQTT is offline**
 
-The display keeps running and reconnects automatically when the broker returns. Entity states resync after reconnection.
+The display keeps running and reconnects automatically when Home Assistant or the broker returns. Entity states resync after reconnection.
+
+<a id="states-arrive-but-commands-or-updates-fail"></a>
+
+**States arrive, but commands or updates fail**
+
+New values still appear, but lights do not react, the Web Admin does not load, or an OTA update stops partway. The Wi-Fi connection is stuck, and a restart from the menu may not clear it:
+
+1. Unplug the display for 10 seconds, then power it on again.
+2. If that does not help, restart the Wi-Fi router.
 
 ## Tiles & camera
 
@@ -57,6 +69,12 @@ Save the assignment in the panel's **I/O** tab. It should become selectable by t
 Configure Home Assistant's Energy Dashboard and enable the matching electricity, gas, or water category in the [Bridge options](bridge.md#energy-dashboard).
 
 ## Display behavior
+
+<a id="forgot-the-settings-or-folder-pin"></a>
+
+**Forgot the Settings or folder PIN**
+
+Enter the factory PIN **466384537** (HOMETILES on a phone keypad). It unlocks Settings and every protected folder; then change the PIN in the Web Admin. See [Settings access](web-admin.md#settings-tile-and-access).
 
 <a id="the-esp32-s3-screen-briefly-goes-black-while-saving"></a>
 

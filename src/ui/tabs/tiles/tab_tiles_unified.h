@@ -13,6 +13,9 @@ bool tiles_is_loaded(GridType grid_type);
 void tiles_request_reload(GridType grid_type);
 void tiles_request_reload_if_loaded(GridType grid_type);
 void tiles_request_reload_all();
+// The theme changed (UIManager::processThemeChange): the tabs and their grids
+// take the new screen color; the tiles rebuild through the reload requests.
+void tiles_apply_screen_color();
 void tiles_request_icon_refresh();
 void tiles_refresh_image_previews_for_key(GridType grid_type, const String& raw_key);
 void tiles_request_release(GridType grid_type);
@@ -42,5 +45,34 @@ bool tiles_folder_switch_pending();
 void tiles_switch_to_folder(uint16_t folder_id);
 void tiles_cancel_folder_switch(uint16_t folder_id);
 void tiles_invalidate_folder(uint16_t folder_id);
+// Only this folder's grid changed (a reorder): its hidden page caches are
+// dropped, every other prepared folder stays. The visible folder is refreshed
+// by the caller (tiles_show_active_layout_now() or a reload request).
+void tiles_invalidate_folder_only(uint16_t folder_id);
+// Rebuilds the visible folder from the active grid right away instead of
+// waiting for the deferred reload (which waits for a quiet Web Admin). Loop
+// task only, outside LVGL callbacks. False when nothing is shown.
+bool tiles_show_active_layout_now();
+// The pages changed (Web Admin): every prepared grid's head shows its new
+// dots, gear or X; the grids stay. With draw_now the visible head is drawn
+// at once. Loop task only, outside LVGL callbacks.
+void tiles_rebuild_heads(bool draw_now);
+// The tiles tab's visible grid (its head's line leads a page turn).
+lv_obj_t* tiles_visible_grid();
+
+// One tile of a page's picture (page_preview.h): its shown place in cells
+// and its card's color.
+struct PageTileRect {
+  float col;
+  float row;
+  float span_w;
+  float span_h;
+  uint32_t color;
+};
+// A folder's shown tiles: from its built grid when it is cached (the card
+// colors as drawn), else its kept picture (a page's, made when its grid was
+// shown or let go, or while the panel rested), else from its stored grid in
+// the theme's card color. Transparent cards are left out. Loop task only.
+size_t tiles_page_schematic(uint16_t folder_id, PageTileRect* out, size_t max);
 
 #endif // TAB_TILES_UNIFIED_H

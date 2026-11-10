@@ -5,6 +5,7 @@ import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {cppFunctionDefinitions} from '../../lib/cpp-source.mjs';
 import {lvglHost} from '../../lib/lvgl-host.mjs';
+import {ruleIconSource} from '../../lib/rule-icon-source.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const read = p => fs.readFileSync(path.join(root, p), 'utf8').replace(/\r\n/g, '\n');
@@ -30,6 +31,7 @@ const cpp = String.raw`
 #include "src/core/json_scan.h"
 #include "src/types/media/update_schedule.h"
 #include "src/types/media/cover_geometry.h"
+#include "src/types/media/cover_color.h"
 extern "C" { LV_FONT_DECLARE(ui_font_12);LV_FONT_DECLARE(ui_font_14);LV_FONT_DECLARE(ui_font_16);LV_FONT_DECLARE(ui_font_20);LV_FONT_DECLARE(ui_font_24);LV_FONT_DECLARE(ui_font_28);LV_FONT_DECLARE(ui_font_32);LV_FONT_DECLARE(ui_font_40); }
 ${read('src/tiles/runtime/tile_renderer_fonts.h').replace(/^#include.*$/gm,'').replace('#pragma once','')}
 class String : public std::string {public:
@@ -46,6 +48,13 @@ class String : public std::string {public:
 };
 ${read('src/types/media/widgets.h').replace(/^#.*$/gm,'')}
 ${read('src/types/media/artwork_payload.h').replace(/^#.*$/gm,'')}
+${read('src/types/media/media_position.h').replace(/^#.*$/gm,'')}
+// The position's clock: not set yet, like a panel before its first time
+// sync, so a state's position counts as reported (test-media-position.mjs).
+struct media_test_timeval { long tv_sec; long tv_usec; };
+static int media_test_gettimeofday(media_test_timeval* tv, void*) { tv->tv_sec = 0; tv->tv_usec = 0; return 0; }
+#define timeval media_test_timeval
+#define gettimeofday media_test_gettimeofday
 uint32_t ticks=100;uint32_t millis(){return ticks;}
 struct Logger{void println(const char*){}template<class...T>void printf(const char*,T...){}}Serial;
 std::map<void*,size_t> allocations;bool fail_pixels=false,fail_descriptor=false;size_t pixel_peak=0;
@@ -63,15 +72,25 @@ enum class GridType{TAB0,TAB1,TAB2,SCREENSAVER};constexpr int TILES_PER_GRID=4;
 MediaTileWidgets g_tab0_media[4],g_tab1_media[4],g_tab2_media[4],g_screensaver_media[4];
 MediaTileWidgets* tile_renderer_get_media_widgets(GridType grid){return grid==GridType::TAB0?g_tab0_media:grid==GridType::TAB1?g_tab1_media:grid==GridType::TAB2?g_tab2_media:g_screensaver_media;}
 ${fn('find_decoded_media_cover_sibling')}
+// "From cover": every cover change reports its color to the card.
+namespace tile_icon_source{int cover_reports=0;void set_cover_color(lv_obj_t*,bool,uint32_t){++cover_reports;}}
+${fn('report_media_cover_color')}
 ${fn('set_media_cover_visible')}
 ${fn('media_cover_has_hidden_ancestor')}
 // Only decoding/network I/O are injected. Use actual layout and the exact
 // profile's HTTPS policy so state_fast/full updates expose cover flicker.
+${read('src/types/media/tile_layout.h').replace(/^#include.*$/gm,'').replace('#pragma once','')}
 ${read('src/types/media/content_layout.cpp').replace(/^#include.*$/gm,'')}
 uint32_t fnv1a_hash(const char*s){uint32_t h=2166136261u;while(*s){h^=uint8_t(*s++);h*=16777619u;}return h;}
 lv_image_dsc_t* source_image(int w=240,int h=240,int stride=0){if(!stride)stride=w*2;auto*d=static_cast<lv_image_dsc_t*>(tracked_malloc(sizeof(lv_image_dsc_t)));assert(d);*d={};d->header.magic=LV_IMAGE_HEADER_MAGIC;d->header.cf=LV_COLOR_FORMAT_RGB565_SWAPPED;d->header.w=w;d->header.h=h;d->header.stride=stride;d->data_size=stride*h;d->data=static_cast<uint8_t*>(heap_caps_malloc(d->data_size,3));assert(d->data);for(int y=0;y<h;++y)for(int x=0;x<w;++x){uint16_t v=y*w+x;memcpy(const_cast<uint8_t*>(d->data)+y*stride+2*x,&v,2);}return d;}
 int decode_count=0;bool fail_decode=false;
 lv_image_dsc_t* make_media_cover_dsc_from_base64(const String&){++decode_count;return fail_decode?nullptr:source_image();}
+lv_image_dsc_t* make_media_cover_dsc_from_bytes(const uint8_t*,size_t){++decode_count;return fail_decode?nullptr:source_image();}
+size_t test_strlcpy(char*d,const char*s,size_t n){size_t l=strlen(s);if(n){size_t c=l<n-1?l:n-1;memcpy(d,s,c);d[c]=0;}return l;}
+#define strlcpy test_strlcpy
+${runtime.match(/struct MediaCoverSource \{[\s\S]*?\n};/)[0]}
+${fn('decode_media_cover_source')}
+${fn('show_media_cover_pixels')}
 ${fn('update_media_cover_from_base64')}
 constexpr bool kMediaCoverDownloadsEnabled=true;constexpr uint32_t kMediaCoverRetryCooldownMs=1000;
 int request_count=0;bool request_queue_full=false;
@@ -88,10 +107,29 @@ String media_entity_for_grid_index(GridType,uint8_t){return "media_player.test";
 ${fn('tile_renderer_find_media_cover')}
 const lv_image_dsc_t* popup_received=nullptr;
 void update_media_popup_cover(const char*,const lv_image_dsc_t*d,uint32_t){popup_received=d;}
+void media_popup_note_state(const String&,const char*){}
 ${fn('process_media_cover_results')}
 ${['extract_json_string_field_cstr','extract_json_number_field_cstr','extract_json_bool_field_cstr','decode_basic_json_escapes','media_first_non_empty','media_text_same','sanitize_media_display_text','set_label_text_if_changed','set_label_long_mode_if_changed','restart_visible_media_text_scroll','media_icon_for_state'].map(fn).join('\n')}
 String media_empty_title_label(const String&){return "No playback";}String getMdiChar(const String&s){return s;}
-void update_media_popup_from_widgets(GridType,uint8_t,MediaTileWidgets&,const String&){}
+int popup_refreshes=0;
+void update_media_popup_from_widgets(GridType,uint8_t,MediaTileWidgets&,const String& =String()){++popup_refreshes;}
+// The Bridge's pictures (bridge_images.h) and the link switch.
+namespace bridge_images{struct Picture{char entity_id[72]="";char key[17]="";uint8_t*jpeg=nullptr;size_t length=0;uint16_t width=0,height=0;uint32_t used=0;};Picture stored;bool has=false;const Picture* find(const char*){return has?&stored:nullptr;}}
+bool link_configured=false;struct{bool linkConfigured()const{return link_configured;}}networkManager;
+${['bridge_pictures_enabled','show_media_picture','update_media_cover_from_picture','tile_renderer_media_picture_arrived'].map(fn).join('\n')}
+// The tile's surface (tile_icon_disc.h) does not change what updates.
+namespace ui_theme{struct SurfaceScope{explicit SurfaceScope(int){}};}
+namespace tile_surface{inline ui_theme::SurfaceScope scope(lv_obj_t*){return ui_theme::SurfaceScope(-1);}}
+// The dark design while playing (light theme) has its own tests.
+static void media_follow_playback(GridType,uint8_t,MediaTileWidgets&,bool){}
+// The tile's icon in its state form (state_icon.h, test-media-state-icon.mjs):
+// no MDI table here, so every icon keeps its plain form.
+uint32_t mdiUnknownIconCodepoint(){return 0;}uint32_t getMdiCodepoint(const String&){return 0;}
+${read('src/types/media/state_icon.h').replace(/^#.*$/gm,'')}
+using TileType=int;constexpr int TILE_MEDIA=7;struct Tile{TileType type=TILE_MEDIA;};Tile test_tile;
+const Tile* tile_renderer_get_tile_config(GridType,uint8_t){return &test_tile;}String media_tile_icon_name(const Tile&){return "speaker";}
+#include "src/tiles/config/tile_icon_colors.h"
+${ruleIconSource(root)}
 ${fn('update_media_tile_state')}
 ${runtime.match(/struct MediaUpdate \{[\s\S]*?\n};/)[0]}
 constexpr int MEDIA_QUEUE_SIZE=24;MediaUpdate g_media_queue[24];uint8_t g_media_head=0,g_media_tail=0;
@@ -170,6 +208,27 @@ int main(){
  for(int i=0;i<3;++i)g_media_queue[i]={GridType::TAB0,0,"paused",true};g_media_head=3;
  refs[3].requested_url_hash=125;results.push_back(result(125));process_idle_media_updates();assert(results.empty()&&g_media_tail==0&&refs[3].url_hash==125);
  ticks=1099;process_idle_media_updates();assert(g_media_tail==0);ticks=1100;process_idle_media_updates();assert(g_media_tail==1&&retry_scans==0);ticks=1200;process_idle_media_updates();assert(g_media_tail==2);ticks=1300;process_idle_media_updates();assert(g_media_tail==3&&retry_scans==0);
+ // Panels on the link show the Bridge's picture named by the state's
+ // image_key: never the embedded copy, the old cover until the picture
+ // arrives, then on every tile of that song and in the open popup.
+ link_configured=true;const int decodes_before=decode_count;auto*kept=refs[0].dsc;
+ update_media_tile_state(GridType::TAB0,0,R"({"state":"playing","media_title":"Pic","entity_picture":"https://test/pic.jpg","entity_picture_data":"art-z","image_key":"0123456789abcdef"})");
+ assert(!strcmp(refs[0].image_key,"0123456789abcdef")&&decode_count==decodes_before&&refs[0].dsc==kept&&"No embedded copy and no early change on the link");
+ strcpy(bridge_images::stored.entity_id,"media_player.test");strcpy(bridge_images::stored.key,"0123456789abcdef");
+ static uint8_t jpeg[4]={0xFF,0xD8,0xFF,0xD9};bridge_images::stored.jpeg=jpeg;bridge_images::stored.length=4;bridge_images::has=true;
+ const int refreshes=popup_refreshes;tile_renderer_media_picture_arrived("media_player.test");
+ assert(refs[0].source_url=="image"&&refs[0].url_hash==fnv1a_hash("0123456789abcdef")&&decode_count==decodes_before+1);
+ assert(popup_refreshes==refreshes+1&&"Only the tile of that song and its popup take it");
+ update_media_tile_state(GridType::TAB0,0,R"({"state":"playing","media_title":"Pic again","entity_picture":"https://test/pic.jpg","image_key":"0123456789abcdef"})");
+ assert(decode_count==decodes_before+1&&"The same song keeps its pixels");
+ strcpy(bridge_images::stored.key,"fedcba9876543210");
+ update_media_tile_state(GridType::TAB0,0,R"({"state":"playing","media_title":"Next pic","entity_picture":"https://test/next.jpg","image_key":"fedcba9876543210"})");
+ assert(refs[0].url_hash==fnv1a_hash("fedcba9876543210")&&!lv_obj_has_flag(g_tab0_media[0].cover_clip,LV_OBJ_FLAG_HIDDEN)&&"A picture already here shows at once");
+ update_media_tile_state(GridType::TAB0,0,R"({"state":"playing","media_title":"No pic","entity_picture":"","image_key":""})");
+ assert(lv_obj_has_flag(g_tab0_media[0].cover_clip,LV_OBJ_FLAG_HIDDEN)&&refs[0].image_key[0]==0&&"An empty key clears the cover");
+ link_configured=false;
+ update_media_tile_state(GridType::TAB0,0,R"({"state":"playing","media_title":"MQTT again","entity_picture":"https://test/m.jpg","entity_picture_data":"art-m","image_key":"0123456789abcdef"})");
+ assert(refs[0].source_url=="mqtt"&&refs[0].url_hash==fnv1a_hash("art-m")&&"Without the link the embedded copy stays the cover");
  uint32_t resolved_hash=0;auto*resolved=tile_renderer_find_media_cover("media_player.test",resolved_hash);assert(resolved&&resolved_hash);assert(!tile_renderer_find_media_cover("media_player.other",resolved_hash)&&resolved_hash==0);
  for(auto&r:refs){free_media_cover_dsc(r.dsc);free_media_cover_dsc(r.popup_dsc);}
  assert(!tile_renderer_find_media_cover("media_player.test",resolved_hash)&&resolved_hash==0);assert(allocations.empty());assert(pixel_peak<=240*240*2);

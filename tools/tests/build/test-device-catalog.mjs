@@ -4,7 +4,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { releaseProfiles, validateCatalog, getBuildProfile, getReleaseProfile,
-  installerProfiles, releaseFileVersion, releaseAssetNames, verifyReleaseAssets } from '../../device-catalog.js';
+  installerProfiles, releaseFileVersion, releaseAssetNames, iconFileNames, verifyReleaseAssets } from '../../device-catalog.js';
 import { DEVICE_PROFILES } from '../../../docs/assets/javascripts/installer-contract.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -51,7 +51,15 @@ rejects((value) => value.profiles.push(value.profiles[0]), /duplicate key/);
 rejects((value) => { value.profiles[1].buildProfile = value.profiles[0].buildProfile; }, /duplicate build/);
 rejects((value) => { value.profiles[1].metadataDeviceKey = 'a'.repeat(32); }, /too long/);
 rejects((value) => { value.profiles[0].maximumRevision = 399; }, /unsafe revision/);
-rejects((value) => { value.profiles.find((entry) => entry.key.endsWith('7b_rev3_1')).maximumRevision = 302; }, /unsafe revision/);
+rejects((value) => { value.profiles.find((entry) => entry.key.endsWith('7b_rev3')).maximumRevision = 302; }, /unsafe revision/);
+rejects((value) => { value.profiles.find((entry) => entry.key.endsWith('7b_rev3')).siliconVariant = 'rev3_1'; }, /invalid silicon variant/);
+// v3 images only for profiles whose device code selects the v3 DSI clock.
+rejects((value) => {
+  const tab5 = value.profiles.find((entry) => entry.key === 'm5stacks_tab5');
+  Object.assign(tab5, { siliconVariant: 'post_v3', minimumRevision: 301, maximumRevision: 399 });
+  tab5.installer.acceptsLegacyDescriptor = false;
+}, /unsupported v3\.x target/);
+rejects((value) => { value.profiles.find((entry) => entry.key === 'guition_jc8012p4a1_v3').metadataDeviceKey = 'guition_jc8012p4a1'; }, /unsupported v3\.x target/);
 rejects((value) => { value.profiles.find((entry) => entry.key === 'guition_jc8012p4a1_v2').rxVariant = 'repo-guition-jc8012-rx-single-block'; }, /unsafe transport/);
 rejects((value) => { value.profiles.find((entry) => entry.chipFamily === 'ESP32-S3').rxVariant = 'repo-a8204'; }, /unsafe transport/);
 rejects((value) => { value.profiles[1].elfFlags = '-Wl,--wrap=esp_hosted_get_default_sdio_config'; }, /unsafe linker/);
@@ -59,10 +67,10 @@ rejects((value) => { value.profiles[1].ciOrder = value.profiles[0].ciOrder; }, /
 rejects((value) => { value.profiles[0].installer.acceptsLegacyDescriptor = false; }, /legacy descriptor/);
 rejects((value) => { value.profiles.find((entry) => !entry.publish).installer = value.profiles[0].installer; }, /non-release/);
 
-const cli = spawnSync(process.execPath, ['tools/device-catalog.js', '--profile', 'waveshare_7b_rev3_1'], { cwd: root, encoding: 'utf8' });
+const cli = spawnSync(process.execPath, ['tools/device-catalog.js', '--profile', 'waveshare_7b_rev3'], { cwd: root, encoding: 'utf8' });
 assert.equal(cli.status, 0, cli.stderr);
 assert.equal(JSON.parse(cli.stdout).metadataDeviceKey, 'waveshare_touch_lcd_7b');
-assert.equal(JSON.parse(cli.stdout).key, 'waveshare_touch_lcd_7b_rev3_1');
+assert.equal(JSON.parse(cli.stdout).key, 'waveshare_touch_lcd_7b_rev3');
 const invalidCli = spawnSync(process.execPath, ['tools/device-catalog.js', '--profile', 'missing'], { cwd: root, encoding: 'utf8' });
 assert.notEqual(invalidCli.status, 0);
 
@@ -86,6 +94,9 @@ try {
   const names = releaseAssetNames('v0.6.9');
   assert.equal(names.length, releaseProfiles.length * 2);
   for (const name of names) fs.writeFileSync(path.join(directory, name), 'fixture');
+  // The icon files of the release are required too.
+  assert.throws(() => verifyReleaseAssets(directory, 'v0.6.9'), /missing: hometiles-icons-32.bin/);
+  for (const name of iconFileNames) fs.writeFileSync(path.join(directory, name), 'fixture');
   verifyReleaseAssets(directory, 'v0.6.9');
   fs.renameSync(path.join(directory, names[0]), path.join(directory, 'unexpected.bin'));
   assert.throws(() => verifyReleaseAssets(directory, 'v0.6.9'), /release asset set mismatch/);

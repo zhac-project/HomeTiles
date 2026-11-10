@@ -3,13 +3,23 @@ function maybeFillTitleFromWeather(tab) {
     maybeFillTitleFromEntity(tab, '_weather_entity');
   }
 
+  const WEATHER_SENSOR_FIELDS = Object.freeze(['weather_temperature_sensor', 'weather_humidity_sensor']);
+
   function loadWeatherFields(tab, data) {
     loadIconColorFields(tab, data);
     const prefix = tab;
     const el = document.getElementById(prefix + '_weather_entity');
     if (el) el.value = data.sensor_entity || data.weather_entity || '';
+    // Optional temperature/humidity sensors (entity pickers, which show a
+    // configured entity also while it is missing from the list).
+    for (const field of WEATHER_SENSOR_FIELDS) {
+      const input = document.getElementById(prefix + '_' + field);
+      if (input) input.value = String(data[field] || '');
+    }
     const popupModeEl = document.getElementById(prefix + '_weather_popup_open_mode');
     if (popupModeEl) popupModeEl.value = (data.popup_open_mode !== undefined) ? String(data.popup_open_mode) : '1';
+    const colored = document.getElementById(prefix + '_weather_colored_icons');
+    if (colored) colored.checked = data?.weather_colored_icons !== undefined ? !['0', 'false'].includes(String(data.weather_colored_icons)) : Number(data?.sensor_display_mode) !== 1;
     maybeFillTitleFromWeather(tab);
   }
 
@@ -17,7 +27,12 @@ function maybeFillTitleFromWeather(tab) {
     saveIconColorFields(tab, formData);
     const prefix = tab;
     formData.append('weather_entity', document.getElementById(prefix + '_weather_entity')?.value || '');
+    for (const field of WEATHER_SENSOR_FIELDS) {
+      formData.append(field, document.getElementById(prefix + '_' + field)?.value || '');
+    }
     formData.append('popup_open_mode', document.getElementById(prefix + '_weather_popup_open_mode')?.value || '1');
+    const colored = document.getElementById(prefix + '_weather_colored_icons');
+    if (colored) formData.append('weather_colored_icons', colored.checked ? '1' : '0');
   }
 
   function resetWeatherFields(tab) {
@@ -25,6 +40,419 @@ function maybeFillTitleFromWeather(tab) {
     const prefix = tab;
     const el = document.getElementById(prefix + '_weather_entity');
     if (el) el.value = '';
+    for (const field of WEATHER_SENSOR_FIELDS) {
+      const input = document.getElementById(prefix + '_' + field);
+      if (input) input.value = '';
+    }
     const popupModeEl = document.getElementById(prefix + '_weather_popup_open_mode');
     if (popupModeEl) popupModeEl.value = '1';
+    const colored = document.getElementById(prefix + '_weather_colored_icons');
+    if (colored) colored.checked = true;
   }
+
+  // --- Tile preview -------------------------------------------------------
+  // What types/weather/renderer.cpp builds and update_weather_tile_state()
+  // (tiles/runtime/tile_renderer.cpp) fills from the cached payload, at the
+  // device positions (WEATHER_TILE_LAYOUT, display pixels).
+  const WEATHER_CONDITION_ICONS = Object.freeze({
+    'clear-night': 'weather-night', cloudy: 'weather-cloudy', exceptional: 'alert-circle-outline',
+    fog: 'weather-fog', hail: 'weather-hail', lightning: 'weather-lightning',
+    'lightning-rainy': 'weather-lightning-rainy', partlycloudy: 'weather-partly-cloudy',
+    pouring: 'weather-pouring', rainy: 'weather-rainy', snowy: 'weather-snowy',
+    'snowy-rainy': 'weather-snowy-rainy', sunny: 'weather-sunny', windy: 'weather-windy',
+    'windy-variant': 'weather-windy-variant'
+  });
+
+  // A number or a numeric string (extract_json_number_or_string_field).
+  function weatherPreviewNumber(value) {
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    const text = String(value ?? '').trim().replace(',', '.');
+    const number = text ? parseFloat(text) : NaN;
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function weatherPreviewString(value) {
+    return typeof value === 'string' ? value : '';
+  }
+
+  function weatherIsoParts(iso) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ''));
+    if (!match) return null;
+    const [y, m, d] = match.slice(1).map(Number);
+    return y > 0 && m >= 1 && m <= 12 && d >= 1 && d <= 31 ? Date.UTC(y, m - 1, d) : null;
+  }
+
+  function weatherIsoDate(utcMs) {
+    const date = new Date(utcMs);
+    return date.getUTCFullYear() + '-' + String(date.getUTCMonth() + 1).padStart(2, '0') + '-' +
+      String(date.getUTCDate()).padStart(2, '0');
+  }
+
+  function weatherLocalToday(now) {
+    return now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' +
+      String(now.getDate()).padStart(2, '0');
+  }
+
+  // i18n::weather_weekday_short: the first ten characters as a date.
+  function weatherWeekdayShort(iso) {
+    const day = weatherIsoParts(iso);
+    return day === null ? '' : (WEATHER_I18N.weekdaysShort[new Date(day).getUTCDay()] || '');
+  }
+
+  // i18n::weather_condition_label.
+  function weatherConditionLabel(condition) {
+    const key = String(condition || '').trim().toLowerCase();
+    if (!key) return '--';
+    if (WEATHER_I18N.conditions[key]) return WEATHER_I18N.conditions[key];
+    const text = String(condition).replaceAll('-', ' ').replaceAll('_', ' ').trim();
+    return text || '--';
+  }
+
+  // weather_icons::for_now: partly cloudy and sunny turn into their night
+  // icons between the bridge's sunset and sunrise of today.
+  function weatherIconForNow(name, sun, now) {
+    if (!Array.isArray(sun)) return name;
+    const today = weatherLocalToday(now);
+    const minute = now.getHours() * 60 + now.getMinutes();
+    const days = sun.filter(day => day && typeof day.d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(day.d) &&
+      (day.up !== undefined || (Number.isInteger(day.r) && Number.isInteger(day.s) &&
+                                day.r >= 0 && day.r < day.s && day.s <= 1440))).slice(0, 8);
+    const day = days.find(entry => entry.d === today);
+    if (!day) return name;
+    const night = day.up !== undefined ? day.up !== true : (minute < day.r || minute >= day.s);
+    if (!night) return name;
+    if (name === 'weather-partly-cloudy') return 'weather-night-partly-cloudy';
+    if (name === 'weather-sunny') return 'weather-night';
+    return name;
+  }
+
+  function parseWeatherPreviewPayload(raw) {
+    let data = raw;
+    if (typeof raw === 'string') {
+      if (!raw.trim()) return null;
+      try { data = JSON.parse(raw); } catch (_) { return null; }
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+    // An empty state falls back to the condition (extract_json_string_field).
+    const condition = weatherPreviewString(data.state).trim() || weatherPreviewString(data.condition).trim();
+    let icon = normalizeMdiIconName(weatherPreviewString(data.icon));
+    if (!icon) icon = WEATHER_CONDITION_ICONS[condition.trim().toLowerCase()] || '';
+    const units = data.units && typeof data.units === 'object' ? data.units : null;
+    return {
+      condition,
+      icon: icon ? weatherIconForNow(icon, data.sun, new Date()) : '',
+      temperature: weatherPreviewNumber(data.temperature),
+      unit: units ? weatherPreviewString(units.temperature) : weatherPreviewString(data.temperature_unit),
+      forecast: Array.isArray(data.forecast) ? data.forecast.filter(entry => entry && typeof entry === 'object') : []
+    };
+  }
+
+  // temperature_units.h: 'C', 'F', 'K', or '' for an empty or unknown unit.
+  function temperatureUnitOf(text) {
+    const unit = String(text || '').trim();
+    if (unit === '℃') return 'C';
+    if (unit === '℉') return 'F';
+    const letter = unit.replace(/^°/, '').trim();
+    if (letter === 'C' || letter === 'c') return 'C';
+    if (letter === 'F' || letter === 'f') return 'F';
+    return letter === 'K' ? 'K' : '';
+  }
+
+  // A value from one temperature unit in another; unchanged when either is
+  // unknown (temperature_units.h convert).
+  function convertTemperature(value, from, to) {
+    if (value === null || !from || !to || from === to) return value;
+    const celsius = from === 'F' ? (value - 32) * 5 / 9 : from === 'K' ? value - 273.15 : value;
+    return to === 'F' ? celsius * 9 / 5 + 32 : to === 'K' ? celsius + 273.15 : celsius;
+  }
+
+  // Mirrors weather_sensors.h: a configured temperature sensor replaces the
+  // weather entity's current temperature, in the weather entity's unit (a
+  // sensor in another unit is converted), a humidity sensor adds a humidity
+  // value; without a numeric sensor state the value shows "--". The forecast
+  // stays the weather entity's.
+  function applyWeatherSensorOverrides(state, temperatureEntity, humidityEntity, values, units) {
+    if (!state) return state;
+    if (temperatureEntity) {
+      state.temperature = convertTemperature(weatherPreviewNumber(values?.[temperatureEntity] ?? ''),
+        temperatureUnitOf(units?.[temperatureEntity]), temperatureUnitOf(state.unit));
+    }
+    if (humidityEntity) {
+      const humidity = weatherPreviewNumber(values?.[humidityEntity] ?? '');
+      state.humidity = humidity === null ? '--' : formatLocalizedNumber(humidity, 0, true) + ' %';
+    }
+    return state;
+  }
+
+  function weatherPreviewTemp(value) {
+    return formatLocalizedNumber(value, 1, true);
+  }
+
+  // The device's filled weather icon as SVG layers (admin-icons.js); single
+  // draws every layer in the label color (an icon color the user chose).
+  function weatherIconSvg(name, single) {
+    const entry = WEATHER_ICONS[name];
+    if (!entry) return '';
+    return '<svg class="weather-icon-svg" viewBox="0 0 24 24" aria-hidden="true">' +
+      entry.layers.map(([color, index]) => '<g fill="' + (single ? 'currentColor' : color) + '">' +
+        WEATHER_ICON_LAYER_PATHS[index] + '</g>').join('') + '</svg>';
+  }
+
+  // weather_forecast_gap()/weather_forecast_count() (widgets.h): as many days
+  // as fit the card's real width with even room between and around their
+  // widest text (textW, measured by the device in its language).
+  function weatherForecastGap(textW) {
+    return Math.trunc(textW * 50 / 100);
+  }
+  function weatherForecastCount(cardW, textW) {
+    const gap = weatherForecastGap(textW);
+    const days = textW + gap > 0 ? Math.trunc((cardW - gap) / (textW + gap)) : 1;
+    return Math.max(1, Math.min(8, days));
+  }
+
+  // tile_geometry::extent in display pixels.
+  function weatherExtent(position, span, cell, gap) {
+    const edge = value => Math.round(value * (cell + gap));
+    return edge(position + span) - edge(position) - gap;
+  }
+
+  // Fills a rendered weather preview tile: the header icon, condition |
+  // temperature and the forecast columns. iconName is the tile's initial icon
+  // (before a state arrives), forcedColor an icon color of the user or a rule.
+  // A text's width in display pixels as LVGL lays it out: whole-pixel glyph
+  // advances plus kerning (WEATHER_TILE_LAYOUT adv/kern, lv_text_get_size);
+  // null when the table lacks a glyph.
+  function weatherDeviceTextWidth(text, font) {
+    if (!font?.adv) return null;
+    const chars = [...String(text)];
+    let width = 0;
+    for (let i = 0; i < chars.length; ++i) {
+      const advance = font.adv[chars[i]];
+      if (advance === undefined) return null;
+      width += advance + ((i + 1 < chars.length && font.kern?.[chars[i] + chars[i + 1]]) || 0);
+    }
+    return width;
+  }
+
+  function applyWeatherPreview(el, state, tile, iconName, forcedColor) {
+    if (!el || typeof WEATHER_TILE_LAYOUT === 'undefined') return;
+    const L = WEATHER_TILE_LAYOUT;
+    // The tile's own grid sizes (inherited variables), not the page's.
+    const rootStyle = getComputedStyle(el.isConnected ? el : document.documentElement);
+    const scale = parseFloat(rootStyle.getPropertyValue('--radius-preview-scale')) || 0.5;
+    const colored = Number(tile?.sensor_display_mode) !== 1;
+    const now = new Date();
+
+    // Header icon: the current weather icon, colored in its layers with the
+    // weather color as the label color (disc and Tile color From icon).
+    let icon = el.querySelector(':scope > .tile-icon');
+    const name = state ? state.icon : normalizeMdiIconName(iconName);
+    // A state shows its icon even when the tile's own icon is off.
+    if (!icon && name) {
+      el.insertAdjacentHTML('afterbegin', '<i class="mdi tile-icon"></i>');
+      icon = el.querySelector(':scope > .tile-icon');
+    }
+    if (icon && !name) icon.remove();
+    else if (icon) {
+      const entry = WEATHER_ICONS[name];
+      if (colored && entry) {
+        icon.className = 'mdi tile-icon tile-weather-icon';
+        icon.innerHTML = weatherIconSvg(name, !!forcedColor);
+        icon.style.color = forcedColor || entry.tint;
+      } else {
+        icon.className = 'mdi mdi-' + name + ' tile-icon';
+        icon.innerHTML = '';
+        icon.style.color = forcedColor || '';
+      }
+    }
+
+    // Display pixels of the card and the preview's (border box) size.
+    const col = Number(tile?.col) || 0;
+    const row = Number(tile?.row) || 0;
+    const spanW = Math.max(1, Number(tile?.span_w) || 1);
+    const spanH = Math.max(1, Number(tile?.span_h) || 1);
+    const cellW = parseFloat(rootStyle.getPropertyValue('--preview-cell-w'));
+    const cellH = parseFloat(rootStyle.getPropertyValue('--preview-cell-h'));
+    const previewGap = parseFloat(rootStyle.getPropertyValue('--preview-gap')) || 0;
+    // The tile's own grid in display pixels: the layout window shows other
+    // layouts' cells than this boot's (WEATHER_TILE_LAYOUT).
+    const gridCellW = cellW > 0 ? Math.round(cellW / scale) : L.cellW;
+    const gridCellH = cellH > 0 ? Math.round(cellH / scale) : L.cellH;
+    const gridGap = previewGap > 0 ? Math.round(previewGap / scale) : L.gap;
+    const cardW = weatherExtent(col, spanW, gridCellW, gridGap);
+    const cardH = weatherExtent(row, spanH, gridCellH, gridGap);
+    // The tile's size like the grid gives it (.fractional-tile), never
+    // measured: a re-rendered tile at a half position is placed only after
+    // it is filled.
+    const width = cellW > 0 ? spanW * (cellW + previewGap) - previewGap : el.offsetWidth;
+    const height = cellH > 0 ? Math.max(1, Number(tile?.span_h) || 1) * (cellH + previewGap) - previewGap
+      : el.offsetHeight;
+    const px = value => (value * scale).toFixed(2) + 'px';
+    // Unrounded sizes, the glyphs on the LVGL baseline as this browser draws
+    // them (text-baseline.js).
+    const font = f => {
+      const size = Math.max(6, f.px * scale);
+      const line = f.line * scale;
+      return {size, line, shift: typeof previewBaselineShift === 'function'
+        ? previewBaselineShift(size, line, (f.line - f.base) * scale)
+        : (f.line / 2 - f.base - 0.364 * f.px) * scale};
+    };
+    const fontCss = f => 'font-size:' + f.size.toFixed(2) + 'px;line-height:' + f.line.toFixed(2) + 'px;';
+    const family = getComputedStyle(el).fontFamily || 'sans-serif';
+    const measure = (text, f) => {
+      const context = (weatherPreviewMeasure.context ||= document.createElement('canvas').getContext('2d'));
+      if (!context) return 0;
+      context.font = '400 ' + f.size + 'px ' + family;
+      return context.measureText(text).width;
+    };
+    // Positions below are in the border box; absolute children start inside
+    // the 3 px editor border.
+    const at = (left, top) => 'left:' + (left - 3).toFixed(2) + 'px;top:' + (top - 3).toFixed(2) + 'px;';
+
+    // Condition | temperature.
+    const valueFont = font(L.value);
+    const hasTemp = !!state && state.temperature !== null;
+    let tempText = hasTemp ? weatherPreviewTemp(state.temperature) + (state.unit ? ' ' + state.unit : '') : '--';
+    if (state?.humidity) tempText += ' \u00B7 ' + state.humidity;
+    const conditionText = state ? weatherConditionLabel(state.condition) : '--';
+    // The card's real size decides (widgets.h): the condition whenever it
+    // fits, below the narrow width only completely; the forecast row from
+    // the device's two-row height.
+    let showCondition = conditionText !== '--';
+    let room = 0;
+    if (showCondition) {
+      const gap = L.valueGap * scale;
+      room = width - 2 * L.padH * scale - measure(tempText, valueFont) - measure('|', valueFont) - 2 * gap;
+      const conditionWidth = measure(conditionText, valueFont);
+      if (cardW < L.conditionNarrowW ? conditionWidth > room : room < L.minConditionRoom * scale) showCondition = false;
+    }
+    const showForecast = cardH >= L.forecastMinH;
+    const rowCenter = showForecast ? (gridCellH / 2 + L.valueDy) * scale : height / 2 + L.valueDy * scale;
+    const htmlSpan = (cls, inner, f, extra = '') => '<span class="' + cls + '" style="' + fontCss(f) +
+      'top:' + f.shift.toFixed(2) + 'px;' + extra + '">' + inner + '</span>';
+    const textSpan = (cls, text, f, extra = '') => htmlSpan(cls, escapeHtml(text), f, extra);
+    // The temperature's unit a step smaller after it, as on the panel
+    // (value_unit.h); with the humidity behind it one size for both.
+    const tempHtml = hasTemp && state.unit && !state.humidity
+      ? escapeHtml(weatherPreviewTemp(state.temperature)) + '<span class="tile-unit" style="' + valueUnitStyle(L.value.px) +
+        '">' + escapeHtml(state.unit) + '</span>'
+      : escapeHtml(tempText);
+    let html = '<div class="weather-preview-row" style="top:' + (rowCenter - valueFont.line / 2 - 3).toFixed(2) +
+      'px;height:' + valueFont.line.toFixed(2) + 'px;gap:' + px(L.valueGap) + '">';
+    if (showCondition) {
+      html += textSpan('weather-preview-condition', conditionText, valueFont, 'max-width:' + Math.max(0, room).toFixed(2) + 'px;');
+      if (tempText !== '--') html += textSpan('weather-preview-separator', '|', valueFont);
+    }
+    html += htmlSpan('weather-preview-temp', tempHtml, valueFont) + '</div>';
+
+    // Forecast columns, spread evenly over the card, the row anchored to the
+    // card's bottom like on the device.
+    const count = showForecast ? weatherForecastCount(cardW, L.forecastTextW) : 0;
+    if (count > 0) {
+      const today = weatherLocalToday(now);
+      const slots = Array.from({length: count}, () => null);
+      let base = today;
+      let fallback = 0;
+      for (const entry of state ? state.forecast : []) {
+        const datetime = weatherPreviewString(entry.datetime);
+        let dateLocal = weatherPreviewString(entry.date_local);
+        if (!dateLocal && datetime.length >= 10) dateLocal = datetime.slice(0, 10);
+        const low = ['templow', 'temperature_low', 'temp_low', 'low']
+          .map(key => weatherPreviewNumber(entry[key])).find(value => value !== null) ?? null;
+        const conditionIcon = WEATHER_CONDITION_ICONS[weatherPreviewString(entry.condition).trim().toLowerCase()] || '';
+        const slot = {
+          dateLocal,
+          day: datetime ? weatherWeekdayShort(datetime) : '',
+          icon: normalizeMdiIconName(weatherPreviewString(entry.icon)) || conditionIcon,
+          high: weatherPreviewNumber(entry.temperature),
+          low
+        };
+        let index = -1;
+        const baseDay = weatherIsoParts(base);
+        const day = weatherIsoParts(dateLocal);
+        if (baseDay !== null && day !== null) {
+          const offset = Math.round((day - baseDay) / 86400000);
+          if (offset >= 0 && offset < count) index = offset;
+        }
+        if (index < 0) {
+          while (fallback < count && slots[fallback]) ++fallback;
+          if (fallback < count) index = fallback++;
+        }
+        if (index >= 0) slots[index] = slot;
+      }
+
+      // Even room around the days' widest text, each column centred on its
+      // day (renderer.cpp), in display pixels with the device's integer
+      // division so the columns do not drift apart from the device's.
+      const textW = L.forecastTextW;
+      const spacing = Math.trunc((cardW - count * textW) / (count + 1));
+      const columnLeft = i => (spacing + Math.trunc(textW / 2) + i * (textW + spacing) - Math.trunc(L.colW / 2)) * scale;
+      const rowTop = height - (gridCellH + L.headroom - L.yOffset) * scale;
+      const contentTop = rowTop + L.padV * scale;
+      const contentW = (L.colW - 2 * L.padH) * scale;
+      const dayFont = font(L.day);
+      const tempFont = font(L.temp);
+      const unitFont = font(L.unit);
+      const unitText = L.unitGap + (state?.unit || '°C');
+      const baseDay = weatherIsoParts(base);
+      for (let i = 0; i < count; ++i) {
+        const slot = slots[i];
+        const left = columnLeft(i) + L.padH * scale;
+        const displayDate = slot?.dateLocal || (baseDay !== null ? weatherIsoDate(baseDay + i * 86400000) : '');
+        let dayText = slot?.day || '';
+        if ((i === 0 && (slot || displayDate)) || displayDate === today) dayText = WEATHER_I18N.today;
+        else if (!dayText && displayDate) dayText = weatherWeekdayShort(displayDate);
+        // Until a first state arrives the device shows white placeholders.
+        if (!state) dayText = '';
+        html += '<div class="weather-preview-day" style="' + at(left, contentTop + L.dayTop * scale + dayFont.shift) +
+          'width:' + contentW.toFixed(2) + 'px;' + fontCss(dayFont) +
+          // The text role through CSS: a tile on its own surface (the dark
+          // design) carries its role values, also when a live edit draws the
+          // days outside that tile's surface (they turned black, 2026-10-10).
+          'color:' + (slot || !state ? 'var(--pv-text, #FFFFFF)' : '#7F8BAA') + '">' + escapeHtml(dayText || '--') + '</div>';
+        if (!slot) continue;
+        if (slot.icon) {
+          const svg = colored ? weatherIconSvg(slot.icon, false) : '';
+          html += '<div class="weather-preview-icon" style="' +
+            at(left, contentTop + (L.iconTop + L.iconEmDy) * scale) + 'width:' + contentW.toFixed(2) + 'px;">' +
+            (svg || '<i class="mdi mdi-' + escapeHtml(slot.icon) + '"></i>') + '</div>';
+        }
+        for (const [value, top] of [[slot.high, L.tempTop], [slot.low, L.lowTop]]) {
+          if (value === null) continue;
+          const text = weatherPreviewTemp(value);
+          let valueWidth = measure(text, tempFont);
+          let x;
+          const valueDevice = weatherDeviceTextWidth(text, L.temp);
+          const unitDevice = weatherDeviceTextWidth(unitText, L.unit);
+          if (valueDevice !== null && unitDevice !== null) {
+            // The device's whole-pixel layout (position_tile_value_unit_centered).
+            const contentDevice = L.colW - 2 * L.padH;
+            const total = valueDevice + unitDevice;
+            let xDevice = Math.trunc(contentDevice / 2) - Math.trunc(total / 2);
+            if (xDevice < 0) xDevice = 0;
+            if (xDevice + total > contentDevice) xDevice = contentDevice - total;
+            x = xDevice * scale;
+            valueWidth = valueDevice * scale;
+          } else {
+            const total = valueWidth + measure(unitText, unitFont);
+            x = contentW / 2 - total / 2;
+            if (x < 0) x = 0;
+            if (x + total > contentW) x = contentW - total;
+          }
+          const y = contentTop + top * scale;
+          html += '<div class="weather-preview-temp-value" style="' + at(left + x, y + tempFont.shift) + fontCss(tempFont) + '">' +
+            escapeHtml(text) + '</div>';
+          html += '<div class="weather-preview-temp-unit" style="' +
+            at(left + x + valueWidth, y + L.unitDy * scale + unitFont.shift) + fontCss(unitFont) + '">' +
+            escapeHtml(unitText) + '</div>';
+        }
+      }
+    }
+    el.querySelectorAll(':scope > .weather-preview-row, :scope > .weather-preview-day, ' +
+      ':scope > .weather-preview-icon, :scope > .weather-preview-temp-value, ' +
+      ':scope > .weather-preview-temp-unit').forEach(node => node.remove());
+    const handles = el.querySelector(':scope > .tile-resize-handle');
+    if (handles) handles.insertAdjacentHTML('beforebegin', html);
+    else el.insertAdjacentHTML('beforeend', html);
+  }
+  const weatherPreviewMeasure = {context: null};

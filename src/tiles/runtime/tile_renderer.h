@@ -2,6 +2,7 @@
 #define TILE_RENDERER_H
 
 #include <lvgl.h>
+#include <type_traits>
 #include "src/tiles/config/tile_config.h"
 #include "src/types/sensor/widgets.h"
 #include "src/types/switch/state.h"
@@ -34,6 +35,9 @@ struct TileWidgetCache {
   WeatherTileWidgets weather[TILES_PER_GRID];
   MediaTileWidgets media[TILES_PER_GRID];
 };
+// Allocated with heap_caps_calloc, copied with memcpy and cleared in place.
+static_assert(std::is_trivially_copyable<TileWidgetCache>::value,
+              "TileWidgetCache is copied with memcpy");
 
 // Allocate the per-slot renderer bookkeeping of every grid (Sensor, Switch,
 // Cover, Climate, Weather, Media and Binary Sensor widgets and states) in
@@ -70,6 +74,8 @@ void reset_sensor_widgets(GridType grid_type);
 // Thread-safe sensor update queue (MQTT callback -> main loop).
 void queue_sensor_tile_update(GridType grid_type, uint8_t grid_index, const char* value, const char* unit = nullptr);
 void process_sensor_update_queue(uint8_t max_updates = 0);  // 0 drains the queue
+// True once after the sensor queue overwrote an update that was not applied.
+bool tile_renderer_take_sensor_queue_overflow();
 
 // Switch widget reset functions
 void reset_switch_widget(GridType grid_type, uint8_t grid_index);
@@ -97,6 +103,8 @@ uint32_t climate_visual_color(const ClimateState& state);
 // show them; false while the payload has no available state. `active` (when
 // given) tells whether the entity is on or running rather than off.
 bool switch_payload_icon_color(const char* payload, uint32_t& rgb, bool* active = nullptr);
+// The Switch tile's icon color for a state (grey while off or unavailable).
+uint32_t switch_state_icon_color(const SwitchState& state);
 bool climate_payload_icon_color(const char* payload, uint32_t& rgb, bool* active = nullptr);
 
 CoverTileWidgets* tile_renderer_get_cover_widgets(GridType grid_type);
@@ -123,12 +131,18 @@ void process_binary_sensor_update_queue(uint8_t max_updates = 0);
 
 void reset_weather_widget(GridType grid_type, uint8_t grid_index);
 void reset_weather_widgets(GridType grid_type);
-void tile_renderer_invalidate_weather_payload(GridType grid_type);
+// The Bridge stored a new picture of this player (bridge_images.h): tiles
+// whose song it belongs to show it, and an open Media popup with them.
+void tile_renderer_media_picture_arrived(const char* entity_id);
 void queue_weather_tile_update(GridType grid_type, uint8_t grid_index, const char* payload);
 void process_weather_update_queue(uint8_t max_updates = 0);  // 0 drains the queue
 
 // UI-thread lookup for the deferred popup body; the caller copies pixels immediately.
 const lv_image_dsc_t* tile_renderer_find_media_cover(const String& entity_id, uint32_t& hash);
+// The "From cover" color a shown media card of the entity sampled from its
+// cover (media/cover_color.h); false without a shown cover or a clear color.
+// For the Web Admin preview, on the UI thread.
+bool tile_renderer_media_cover_color(const String& entity_id, uint32_t& rgb);
 void reset_media_widget(GridType grid_type, uint8_t grid_index);
 void reset_media_widgets(GridType grid_type);
 void queue_media_tile_update(GridType grid_type, uint8_t grid_index, const char* payload);
@@ -137,6 +151,11 @@ void process_media_update_queue(uint8_t max_updates = 0);  // 0 drains the queue
 // Thread-safe tile graph history queue (MQTT callback -> main loop).
 void queue_tile_graph_history(const char* entity_id, const char* payload, size_t len);
 void process_tile_graph_queue();  // Call from the main loop before lv_timer_handler().
+// Graph tiles of the shown grid ask for their day again once the connection
+// is up and every five minutes; call from the main loop.
+void tile_graph_service_periodic();
+// A page was shown: its graph tiles without a day ask at once.
+void tile_graph_request_soon();
 void request_tile_graph_history(const char* entity_id);  // Request history for an entity.
 
 void tile_renderer_snapshot_tab0(TileWidgetCache* out);

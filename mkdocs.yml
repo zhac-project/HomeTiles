@@ -30,9 +30,9 @@ theme:
 
 nav:
   - Overview: index.md
-  - Installation:
-      - Flash firmware: installer.md
-      - Home Assistant: home-assistant-setup.md
+  - Getting started:
+      - Installation: installer.md
+      - Advanced setup: advanced-setup.md
       - Bridge Integration: bridge.md
   - Dashboard:
       - Web Admin Panel: web-admin.md
@@ -47,7 +47,7 @@ nav:
       - Release Notes: releases/index.md
 
 extra_css:
-  - stylesheets/extra.css?v=installer-ui-5
+  - stylesheets/extra.css?v=installer-ui-16
   - stylesheets/readability.css?v=20260927-toc1
 
   - stylesheets/device-status.css?v=2

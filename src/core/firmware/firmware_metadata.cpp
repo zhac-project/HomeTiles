@@ -12,7 +12,12 @@
 #define FW_META_TARGET_DISPLAY_NAME "Guition JC8012P4A1"
 #elif defined(DEVICE_GUITION_JC8012P4A1_V2)
 #define FW_META_TARGET_DEVICE_KEY "guition_jc8012p4a1_v2"
+// The V3 is the V2 board with ESP32-P4 v3 silicon; it keeps the V2 device key.
+#if CONFIG_ESP_REV_MIN_FULL >= 300
+#define FW_META_TARGET_DISPLAY_NAME "Guition JC8012P4A1 V3"
+#else
 #define FW_META_TARGET_DISPLAY_NAME "Guition JC8012P4A1 V2"
+#endif
 #elif defined(DEVICE_GUITION_JC1060P470C)
 #define FW_META_TARGET_DEVICE_KEY "guition_jc1060p470c"
 #define FW_META_TARGET_DISPLAY_NAME "Guition JC1060P470C"
@@ -25,6 +30,9 @@
 #elif defined(DEVICE_GUITION_ESP32_4848S040)
 #define FW_META_TARGET_DEVICE_KEY "guition_esp32_4848s040"
 #define FW_META_TARGET_DISPLAY_NAME "GUITION ESP32-4848S040"
+#elif defined(DEVICE_GOLDEN_SECURITY_GS_T3E_V2)
+#define FW_META_TARGET_DEVICE_KEY "golden_security_gs_t3e_v2"
+#define FW_META_TARGET_DISPLAY_NAME "Golden Security GS-T3E v2"
 #elif defined(DEVICE_SUNTON_ESP32_8048S070C)
 #define FW_META_TARGET_DEVICE_KEY "sunton_esp32_8048s070c"
 #define FW_META_TARGET_DISPLAY_NAME "Sunton ESP32-8048S070C"
@@ -37,6 +45,9 @@
 #elif defined(DEVICE_WAVESHARE_TOUCH_LCD_4_3)
 #define FW_META_TARGET_DEVICE_KEY "waveshare_touch_lcd_4_3"
 #define FW_META_TARGET_DISPLAY_NAME "Waveshare Touch LCD 4.3"
+#elif defined(DEVICE_WAVESHARE_TOUCH_LCD_5)
+#define FW_META_TARGET_DEVICE_KEY "waveshare_touch_lcd_5"
+#define FW_META_TARGET_DISPLAY_NAME "Waveshare Touch LCD 5"
 #elif defined(DEVICE_WAVESHARE_TOUCH_LCD_7)
 #define FW_META_TARGET_DEVICE_KEY "waveshare_touch_lcd_7"
 #define FW_META_TARGET_DISPLAY_NAME "Waveshare Touch LCD 7"
@@ -76,24 +87,27 @@
 
 #define FW_META_PROJECT_KEY "esp32_p4_homeassistant_display"
 
+// Only these profiles select the MIPI DSI clock that v3 silicon accepts;
+// the shared Waveshare P4 DSI driver does for every board it runs.
+#if defined(DEVICE_WAVESHARE_TOUCH_LCD_7B) || defined(DEVICE_WAVESHARE_TOUCH_LCD_10_1) || \
+    defined(DEVICE_WAVESHARE_TOUCH_LCD_4_3) || defined(DEVICE_WAVESHARE_TOUCH_LCD_8) || \
+    defined(DEVICE_GUITION_JC8012P4A1_V2) || defined(DEVICE_WAVESHARE_P4_DSI_BOARD)
+#define FW_META_V3_PROFILE 1
+#else
+#define FW_META_V3_PROFILE 0
+#endif
+
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
 #if CONFIG_ESP_REV_MAX_FULL < 300
 #define FW_META_SILICON_VARIANT "pre_v3"
 #define FW_META_SILICON_MIN_REV CONFIG_ESP_REV_MIN_FULL
 #define FW_META_SILICON_MAX_REV CONFIG_ESP_REV_MAX_FULL
-#elif CONFIG_ESP_REV_MIN_FULL >= 300 && defined(DEVICE_WAVESHARE_TOUCH_LCD_7B)
-#if CONFIG_ESP_REV_MIN_FULL > 301 || CONFIG_ESP_REV_MAX_FULL < 301
-#error "The experimental Waveshare 7B build must include ESP32-P4 revision 3.1"
-#endif
-#define FW_META_SILICON_VARIANT "rev3_1"
-#define FW_META_SILICON_MIN_REV 301
-#define FW_META_SILICON_MAX_REV 301
-#elif CONFIG_ESP_REV_MIN_FULL >= 300 && defined(DEVICE_WAVESHARE_TOUCH_LCD_10_1)
+#elif CONFIG_ESP_REV_MIN_FULL >= 300 && FW_META_V3_PROFILE
 // Arduino-ESP32 3.3.7 "v3.00 or newer" builds boot ESP32-P4 v3.1 to v3.99.
 // Keep the HomeTiles contract identical to that image header so an installed
 // v3 panel can still accept a later image through the subset range check.
 #if CONFIG_ESP_REV_MIN_FULL != 301 || CONFIG_ESP_REV_MAX_FULL != 399
-#error "The Waveshare 10.1 v3 build must target ESP32-P4 revisions 3.1 to 3.99"
+#error "ESP32-P4 v3 builds must target revisions 3.1 to 3.99"
 #endif
 #define FW_META_SILICON_VARIANT "post_v3"
 #define FW_META_SILICON_MIN_REV 301

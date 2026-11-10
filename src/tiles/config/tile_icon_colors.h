@@ -19,6 +19,11 @@
 //            color its icon shows (the fixed color or the entity's own
 //            color); the "Tint tile" option of the icon color, below an
 //            active rule tint (tile_icon_source.cpp)
+//   then, on Media tiles only, optionally "cover [icon] [tile=NN]": "From
+//            cover" takes the color of the album cover (media/cover_color.h)
+//            for the icon ("icon") and/or tints the tile at NN percent
+//            ("tile=NN"), below an active rule; without a cover color the
+//            icon keeps its default and the tile its own color
 //   then at most one rule layer ("Rules" in the Web Admin):
 //            "src <auto|rules> <self|entity_id> [tile=NN] [noicon] [off]"
 //            auto takes the entity's own icon color (light color, on/off,
@@ -35,7 +40,15 @@
 //            thousandths (0..1000), min < max are plain decimal numbers
 //   then up to six state lines for text states:
 //            "is RRGGBB <text>" (equals) or "has RRGGBB <text>" (contains),
-//            compared case-insensitively, first match wins
+//            compared case-insensitively, first match wins. "is+"/"has+"
+//            fill the tile while the line matches, "is-"/"has-" keep it
+//            unfilled (user 2026-10-11: "Fuellen" per rule row); a plain
+//            "is"/"has" follows the tile's "fill" line (records before b382)
+//   A stop's or state line's color may carry an MDI icon name,
+//            "RRGGBB,<icon>" (user 2026-10-28: an icon per rule): the icon
+//            replaces the tile's own icon while the stop or line applies
+//            (tile_rule_icon.h); a stop's icon holds from its position up,
+//            on smooth bars too.
 //
 // A state with a leading decimal number takes the bar color when there is a
 // bar. Smooth bars interpolate linearly in 8-bit RGB between neighbouring
@@ -64,10 +77,13 @@ inline constexpr size_t kMaxNumberBytes = 12;
 inline constexpr unsigned kPositionScale = 1000;
 inline constexpr size_t kLegacyMaxRules = 3;
 inline constexpr size_t kMaxEntityBytes = 128;
-// "\nbar smooth <min> <max>" plus " PPPP:RRGGBB" per stop.
-inline constexpr size_t kMaxBarBytes = 5 + 6 + 1 + kMaxNumberBytes + 1 + kMaxNumberBytes + kMaxStops * 12;
-// "\nhas RRGGBB <text>".
-inline constexpr size_t kMaxRowBytes = 1 + 3 + 1 + 6 + 1 + kMaxValueBytes;
+// A rule's icon name (the longest MDI name has 42 characters).
+inline constexpr size_t kMaxIconBytes = 48;
+// "\nbar smooth <min> <max>" plus " PPPP:RRGGBB,<icon>" per stop.
+inline constexpr size_t kMaxBarBytes =
+    5 + 6 + 1 + kMaxNumberBytes + 1 + kMaxNumberBytes + kMaxStops * (12 + 1 + kMaxIconBytes);
+// "\nhas+ RRGGBB,<icon> <text>".
+inline constexpr size_t kMaxRowBytes = 1 + 4 + 1 + 6 + 1 + kMaxIconBytes + 1 + kMaxValueBytes;
 // Tile tint strength of the rule layer in percent.
 inline constexpr uint8_t kTintMinimum = 10;
 inline constexpr uint8_t kTintMaximum = 50;
@@ -76,9 +92,11 @@ inline constexpr uint8_t kTintDefault = 20;
 inline constexpr size_t kMaxSourceBytes = 1 + 3 + 1 + 5 + 1 + kMaxEntityBytes + 8 + 7 + 4;
 // "\nfill 50".
 inline constexpr size_t kMaxFillBytes = 8;
-// "v2\nRRGGBB", the fill, the source, the bar and the state lines.
-inline constexpr size_t kMaxRecordBytes =
-    2 + 1 + 6 + kMaxFillBytes + kMaxSourceBytes + kMaxBarBytes + kMaxRows * kMaxRowBytes;
+// "\ncover icon tile=50".
+inline constexpr size_t kMaxCoverBytes = 19;
+// "v2\nRRGGBB", the fill, the cover, the source, the bar and the state lines.
+inline constexpr size_t kMaxRecordBytes = 2 + 1 + 6 + kMaxFillBytes + kMaxCoverBytes + kMaxSourceBytes +
+                                          kMaxBarBytes + kMaxRows * kMaxRowBytes;
 
 enum class Op : uint8_t { None, Ge, Le, Eq, Is, Has };
 enum class BarMode : uint8_t { Smooth, Steps };
@@ -117,6 +135,38 @@ inline bool parse_color(const char* begin, const char* end, uint32_t& rgb) {
   }
   rgb = value;
   return true;
+}
+
+// An MDI icon name: lowercase letters, digits and dashes, at most
+// kMaxIconBytes.
+inline bool valid_icon(const char* begin, size_t length) {
+  if (length == 0 || length > kMaxIconBytes) return false;
+  for (size_t i = 0; i < length; ++i) {
+    const char c = begin[i];
+    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return false;
+  }
+  return true;
+}
+
+// The icon of a stop or state line, pointing into the record; empty without
+// one.
+struct Icon {
+  const char* name = nullptr;
+  size_t length = 0;
+};
+
+// Parses "RRGGBB" or "RRGGBB,<icon>" spanning exactly [begin, end).
+inline bool parse_color_icon(const char* begin, const char* end, uint32_t& rgb, Icon& icon) {
+  const char* comma = begin;
+  while (comma < end && *comma != ',') ++comma;
+  icon = Icon{};
+  if (comma < end) {
+    const size_t length = static_cast<size_t>(end - comma - 1);
+    if (!valid_icon(comma + 1, length)) return false;
+    icon.name = comma + 1;
+    icon.length = length;
+  }
+  return parse_color(begin, comma, rgb);
 }
 
 inline void trim(const char*& begin, const char*& end) {
@@ -260,10 +310,17 @@ inline bool text_matches(Op op, const char* value, size_t value_len, const char*
                       : fold_contains(begin, len, value, value_len);
 }
 
-// One parsed "<op> RRGGBB <value>" line; value points into the record.
+// The fill of a state line: "is+" fills the tile while it matches, "is-"
+// keeps it unfilled, a plain "is" follows the tile's "fill" line.
+enum class RowFill : int8_t { Inherit = -1, Off = 0, On = 1 };
+
+// One parsed "<op>[+|-] RRGGBB[,<icon>] <value>" line; value and icon point
+// into the record.
 struct Rule {
   Op op = Op::None;
+  RowFill fill = RowFill::Inherit;
   uint32_t color = 0;
+  Icon icon;
   const char* value = nullptr;
   size_t value_len = 0;
 };
@@ -272,12 +329,20 @@ inline bool parse_rule(const char* begin, const char* end, Rule& rule) {
   trim(begin, end);
   const char* space = begin;
   while (space < end && *space != ' ') ++space;
-  rule.op = parse_op(begin, space);
+  // Only state lines carry a fill mark.
+  const char* op_end = space;
+  rule.fill = RowFill::Inherit;
+  if (op_end - begin >= 3 && (op_end[-1] == '+' || op_end[-1] == '-')) {
+    rule.fill = op_end[-1] == '+' ? RowFill::On : RowFill::Off;
+    --op_end;
+  }
+  rule.op = parse_op(begin, op_end);
   if (rule.op == Op::None || space >= end) return false;
+  if (rule.fill != RowFill::Inherit && !text_op(rule.op)) return false;
   const char* color = space + 1;
   const char* color_end = color;
   while (color_end < end && *color_end != ' ') ++color_end;
-  if (!parse_color(color, color_end, rule.color)) return false;
+  if (!parse_color_icon(color, color_end, rule.color, rule.icon)) return false;
   const char* value = color_end;
   trim(value, end);
   rule.value = value;
@@ -288,6 +353,7 @@ inline bool parse_rule(const char* begin, const char* end, Rule& rule) {
 struct Stop {
   uint16_t position = 0;
   uint32_t color = 0;
+  Icon icon;
 };
 
 struct Bar {
@@ -313,7 +379,7 @@ inline void sort_stops(Bar& bar) {
   }
 }
 
-// "P:RRGGBB" with P as 1-4 digits, clamped to 0..1000.
+// "P:RRGGBB[,<icon>]" with P as 1-4 digits, clamped to 0..1000.
 inline bool parse_stop(const char* begin, const char* end, Stop& stop) {
   const char* colon = begin;
   while (colon < end && *colon != ':') ++colon;
@@ -324,7 +390,7 @@ inline bool parse_stop(const char* begin, const char* end, Stop& stop) {
     if (*p < '0' || *p > '9') return false;
     position = position * 10 + static_cast<unsigned>(*p - '0');
   }
-  if (!parse_color(colon + 1, end, stop.color)) return false;
+  if (!parse_color_icon(colon + 1, end, stop.color, stop.icon)) return false;
   stop.position = static_cast<uint16_t>(position > kPositionScale ? kPositionScale : position);
   return true;
 }
@@ -385,6 +451,19 @@ inline uint32_t bar_color_at(const Bar& bar, double t) {
 
 inline uint32_t bar_color(const Bar& bar, double value) {
   return bar_color_at(bar, (value - bar.min) / (bar.max - bar.min));
+}
+
+// The icon of the last stop at or below the value (the first stop below
+// it), on smooth bars too: an icon cannot blend.
+inline Icon bar_icon(const Bar& bar, double value) {
+  double t = (value - bar.min) / (bar.max - bar.min);
+  if (!(t > 0)) t = 0;
+  if (t > 1) t = 1;
+  size_t index = 0;
+  for (size_t i = 0; i < bar.count; ++i) {
+    if (bar.stops[i].position / 1000.0 <= t) index = i;
+  }
+  return bar.count ? bar.stops[index].icon : Icon{};
 }
 
 // Home Assistant entity id "<domain>.<object>": lowercase letters, digits and
@@ -452,6 +531,55 @@ inline uint8_t fill_of(const char* record) {
   return 0;
 }
 
+// "From cover" of a Media tile (the "cover" line).
+struct Cover {
+  bool icon = false;  // the icon takes the cover color
+  uint8_t tile = 0;   // tile tint in percent, 0 = no tint
+};
+
+// Parses "cover [icon] [tile=NN]" spanning [begin, end); unknown tokens make
+// the line invalid.
+inline bool parse_cover_line(const char* begin, const char* end, Cover& out) {
+  Cover parsed;
+  const char* p = begin;
+  const char* token = nullptr;
+  const char* stop = nullptr;
+  if (!next_token(p, end, token, stop) || !token_is(token, stop, "cover")) return false;
+  while (next_token(p, end, token, stop)) {
+    const size_t length = static_cast<size_t>(stop - token);
+    if (token_is(token, stop, "icon")) {
+      parsed.icon = true;
+    } else if (length >= 6 && length <= 7 && memcmp(token, "tile=", 5) == 0) {
+      unsigned percent = 0;
+      for (const char* d = token + 5; d < stop; ++d) {
+        if (*d < '0' || *d > '9') return false;
+        percent = percent * 10 + static_cast<unsigned>(*d - '0');
+      }
+      parsed.tile = clamp_tint(percent);
+    } else {
+      return false;
+    }
+  }
+  out = parsed;
+  return true;
+}
+
+// The "From cover" settings of a v2 record (the first "cover" line, if valid).
+inline Cover cover_of(const char* record) {
+  Cover out;
+  if (!record || !is_v2(record)) return out;
+  for (const char* p = line_end(second_line(record)); *p == '\n';) {
+    const char* begin = p + 1;
+    const char* end = line_end(begin);
+    p = end;
+    if (!starts_with(begin, end, "cover")) continue;
+    Cover parsed;
+    if (parse_cover_line(begin, end, parsed)) out = parsed;
+    return out;
+  }
+  return out;
+}
+
 // Parses "src <auto|rules> <self|entity_id> [tile=NN] [noicon] [off]"
 // spanning [begin, end); options may come in any order, unknown tokens make
 // the line invalid.
@@ -512,6 +640,16 @@ inline Source source_of(const char* record) {
   return out;
 }
 
+// "Ausfuellen" (user 2026-10-11: the one tile color option): the tile is
+// filled with its icon's color. Stored as "fill NN"; earlier records that
+// tinted the tile "From cover" or by a rule ("tile=NN") count as filled too,
+// and their icon takes that color (cover_colors_icon, rule_colors_icon).
+inline bool fills(const char* record) {
+  return fill_of(record) > 0 || cover_of(record).tile > 0 || source_of(record).tile > 0;
+}
+inline bool rule_colors_icon(const Source& layer) { return layer.icon || layer.tile > 0; }
+inline bool cover_colors_icon(const Cover& cover) { return cover.icon || cover.tile > 0; }
+
 // The other entity of an enabled rule layer (subscriptions and dispatch), or
 // None for no layer, the tile's own entity or a switched-off layer.
 inline SourceMode source(const char* record, const char*& entity, size_t& entity_len) {
@@ -535,14 +673,35 @@ inline bool own_state_colors_icon(const char* record) {
          (layer.mode == SourceMode::Rules && layer.self && layer.enabled && layer.icon);
 }
 
+// The color bar that colors the icon from the tile's own numeric state
+// (own_state_colors_icon), for looks that show a rule's color at every
+// place of their gauge (sensor_look.h). False without one.
+inline bool own_bar(const char* record, Bar& bar) {
+  if (!record || !is_v2(record) || !own_state_colors_icon(record)) return false;
+  const char* p = line_end(second_line(record));
+  while (*p == '\n') {
+    const char* begin = p + 1;
+    const char* end = line_end(begin);
+    p = end;
+    if (starts_with(begin, end, "bar ")) return parse_bar(begin, end, bar);
+  }
+  return false;
+}
+
 // Icon color for a known entity state. `state` is the raw Home Assistant
 // state; `display`, when set, is the displayed text (for example the
 // translated Binary sensor state) that state lines may also match. Returns
 // false when the type's default color applies. Callers skip unavailable or
 // unknown states, which always use the default. Only v2 records are
 // evaluated; stored records are always normalized first.
+// `row_fill`, when set, receives the fill of the matching state line
+// (RowFill::Inherit for a bar color, the fixed color or no match); `icon`,
+// when set, the icon of the matching stop or state line (empty for the
+// fixed color, no match or a rule without one).
 inline bool resolve(const char* record, const char* state, const char* display, uint32_t& rgb,
-                    bool fixed_fallback = true) {
+                    bool fixed_fallback = true, RowFill* row_fill = nullptr, Icon* icon = nullptr) {
+  if (row_fill) *row_fill = RowFill::Inherit;
+  if (icon) *icon = Icon{};
   if (!is_v2(record) || !state) return false;
   const char* fixed_begin = second_line(record);
   const char* fixed_end = line_end(fixed_begin);
@@ -560,6 +719,7 @@ inline bool resolve(const char* record, const char* state, const char* display, 
       Bar bar;
       if (numeric && parse_bar(begin, end, bar)) {
         rgb = bar_color(bar, number);
+        if (icon) *icon = bar_icon(bar, number);
         return true;
       }
       continue;
@@ -569,6 +729,8 @@ inline bool resolve(const char* record, const char* state, const char* display, 
     if (text_matches(rule.op, rule.value, rule.value_len, state) ||
         (display && text_matches(rule.op, rule.value, rule.value_len, display))) {
       rgb = rule.color;
+      if (row_fill) *row_fill = rule.fill;
+      if (icon) *icon = rule.icon;
       return true;
     }
   }
@@ -590,6 +752,42 @@ inline uint32_t state_icon_color(const char* record, bool known, const char* sta
   const bool own_rules = own_state_colors_icon(record);
   uint32_t rgb = 0;
   return resolve(record, own_rules ? state : "", own_rules ? display : nullptr, rgb) ? rgb : fallback;
+}
+
+// The icon of the matching stop or state line for a tile's own state, under
+// the condition of state_icon_color(): empty while own rules are off, for an
+// unknown state, no match or a rule without an icon.
+inline Icon state_icon(const char* record, bool known, const char* state, const char* display) {
+  if (!known || !record || !state || !own_state_colors_icon(record)) return Icon{};
+  uint32_t rgb = 0;
+  Icon icon;
+  resolve(record, state, display, rgb, false, nullptr, &icon);
+  return icon;
+}
+
+// The fill the matching state line decides for a tile's own state (the
+// lines state_icon_color() reads): RowFill::Inherit without a matching line
+// with its own mark, for an unknown state and while own rules are off.
+inline RowFill state_fill(const char* record, bool known, const char* state, const char* display) {
+  if (!known || !record || !state || !own_state_colors_icon(record)) return RowFill::Inherit;
+  uint32_t rgb = 0;
+  RowFill fill = RowFill::Inherit;
+  return resolve(record, state, display, rgb, false, &fill) ? fill : RowFill::Inherit;
+}
+
+// Whether a state line may fill the tile ("is+"/"has+"): the light theme
+// then lets the tile change between its plain and its filled look
+// (tile_renderer.cpp tile_surface_rule_of).
+inline bool rows_fill(const char* record) {
+  if (!is_v2(record)) return false;
+  for (const char* p = line_end(second_line(record)); *p == '\n';) {
+    const char* begin = p + 1;
+    const char* end = line_end(begin);
+    p = end;
+    Rule rule;
+    if (parse_rule(begin, end, rule) && rule.fill == RowFill::On) return true;
+  }
+  return false;
 }
 
 // Copies at most `max_bytes` of [begin, end) without splitting a UTF-8
@@ -619,6 +817,14 @@ inline void append_hex(char* out, size_t& n, uint32_t rgb) {
 
 inline void append_text(char* out, size_t& n, const char* text) {
   while (*text) out[n++] = *text++;
+}
+
+// ",<icon>" after a color, nothing without an icon.
+inline void append_icon(char* out, size_t& n, const Icon& icon) {
+  if (!icon.length) return;
+  out[n++] = ',';
+  memcpy(out + n, icon.name, icon.length);
+  n += icon.length;
 }
 
 // Whole number "[-]digits" of at most seven digits (b39 thresholds).
@@ -690,11 +896,11 @@ inline bool migrate_legacy_bar(const char* record, bool has_fixed, uint32_t fixe
   const long long range = highest - min;
   bar.mode = BarMode::Steps;
   bar.count = 0;
-  bar.stops[bar.count++] = {0, has_fixed ? fixed : 0xFFFFFFu};
+  bar.stops[bar.count++] = {0, has_fixed ? fixed : 0xFFFFFFu, Icon{}};
   for (size_t i = count; i-- > 0;) {
     const long long scaled = (thresholds[i] - min) * static_cast<long long>(kPositionScale);
     if (scaled % range) return false;
-    bar.stops[bar.count++] = {static_cast<uint16_t>(scaled / range), colors[i]};
+    bar.stops[bar.count++] = {static_cast<uint16_t>(scaled / range), colors[i], Icon{}};
   }
   snprintf(bar.min_text, sizeof(bar.min_text), "%lld", min);
   snprintf(bar.max_text, sizeof(bar.max_text), "%lld", highest);
@@ -713,30 +919,57 @@ inline bool append_row(const Rule& rule, char* out, size_t& n) {
   if (begin == end) return false;
   out[n++] = '\n';
   append_text(out, n, rule.op == Op::Is ? "is" : "has");
+  if (rule.fill != RowFill::Inherit) out[n++] = rule.fill == RowFill::On ? '+' : '-';
   out[n++] = ' ';
   append_hex(out, n, rule.color);
+  append_icon(out, n, rule.icon);
   out[n++] = ' ';
   memcpy(out + n, begin, static_cast<size_t>(end - begin));
   n += static_cast<size_t>(end - begin);
   return true;
 }
 
+// Whether a v2 record has a color bar or a state line.
+inline bool has_rule_lines(const char* record) {
+  if (!is_v2(record)) return false;
+  for (const char* p = line_end(second_line(record)); *p == '\n';) {
+    const char* begin = p + 1;
+    const char* end = line_end(begin);
+    p = end;
+    if (starts_with(begin, end, "bar ")) return true;
+    Rule rule;
+    if (parse_rule(begin, end, rule) && text_op(rule.op)) return true;
+  }
+  return false;
+}
+
 // Normalizes any input record (Web Admin, import, sidecar, b39 format) into
 // the canonical v2 form: uppercase colors, one valid source entity when
 // `allow_source`, one valid bar with sorted stops when `allow_bar`, up to six
 // non-empty state lines when `allow_rows`, values trimmed and clipped to
-// kMaxValueBytes. A "rules" source allows the bar and the state lines, an
-// "auto" source takes the entity's own color and drops them. Invalid lines
-// are dropped. Returns the length written to `out` (0 = no icon colors);
-// `out` is always terminated.
+// kMaxValueBytes, and the "cover" line when `allow_cover` (Media). A "rules"
+// source allows the bar and the state lines, an "auto" source takes the
+// entity's own color and drops them. Invalid lines are dropped. Returns the
+// length written to `out` (0 = no icon colors); `out` is always terminated.
 inline size_t normalize(const char* in, char* out, size_t out_size, bool allow_bar, bool allow_rows,
-                        bool allow_source = false, bool allow_self = false) {
+                        bool allow_source = false, bool allow_self = false, bool allow_cover = false) {
   if (!out || out_size == 0) return 0;
   out[0] = '\0';
   if (!in || out_size < kMaxRecordBytes + 1) return 0;
   const bool v2 = is_v2(in);
+  // Only the Sensor family and the Binary sensor evaluate rules on their own
+  // state themselves (tile_icon_color_rules.h).
+  const bool own_rules = allow_bar || allow_rows;
   Source layer = allow_source ? source_of(in) : Source{};
   if (layer.self && !allow_self) layer = Source{};
+  // Every other type with an entity of its own (Switch, Cover, Climate,
+  // Media, ...) evaluates them in the rule layer, so they keep their "src
+  // rules self" line; records before b575 stored them without one, which no
+  // path read (user 2026-10-28, issue #102).
+  if (layer.mode == SourceMode::None && v2 && allow_source && allow_self && !own_rules && has_rule_lines(in)) {
+    layer.mode = SourceMode::Rules;
+    layer.self = true;
+  }
   if (layer.mode == SourceMode::Rules) {
     // Another entity, or a type without its own state colors, can use both
     // the bar and the state lines; the Sensor family keeps its type's choice.
@@ -748,11 +981,11 @@ inline size_t normalize(const char* in, char* out, size_t out_size, bool allow_b
     allow_bar = false;
     allow_rows = false;
   }
-  // "src rules self" that colors the icon only is the b40 default of tiles
-  // with their own entity; it stays implicit so existing records keep their
-  // exact form.
+  // "src rules self" that colors the icon only is the b40 default of the
+  // types that evaluate their own state; it stays implicit there so existing
+  // records keep their exact form.
   const bool emit_layer = layer.mode != SourceMode::None &&
-                          !(layer.mode == SourceMode::Rules && layer.self && layer.icon &&
+                          !(own_rules && layer.mode == SourceMode::Rules && layer.self && layer.icon &&
                             layer.tile == 0 && layer.enabled);
   // Fixed color: line 2 of a v2 record, line 1 of a b39 record.
   const char* fixed_begin = v2 ? second_line(in) : in;
@@ -783,6 +1016,13 @@ inline size_t normalize(const char* in, char* out, size_t out_size, bool allow_b
   if (has_fixed) append_hex(out, n, fixed);
   const uint8_t fill = v2 ? fill_of(in) : 0;
   if (fill) n += static_cast<size_t>(snprintf(out + n, out_size - n, "\nfill %u", static_cast<unsigned>(fill)));
+  const Cover cover = allow_cover && v2 ? cover_of(in) : Cover{};
+  const bool has_cover = cover.icon || cover.tile;
+  if (has_cover) {
+    append_text(out, n, "\ncover");
+    if (cover.icon) append_text(out, n, " icon");
+    if (cover.tile) n += static_cast<size_t>(snprintf(out + n, out_size - n, " tile=%u", static_cast<unsigned>(cover.tile)));
+  }
   if (emit_layer) {
     append_text(out, n, layer.mode == SourceMode::Auto ? "\nsrc auto " : "\nsrc rules ");
     if (layer.self) {
@@ -805,6 +1045,7 @@ inline size_t normalize(const char* in, char* out, size_t out_size, bool allow_b
     for (size_t i = 0; i < bar.count; ++i) {
       n += static_cast<size_t>(snprintf(out + n, out_size - n, " %u:", static_cast<unsigned>(bar.stops[i].position)));
       append_hex(out, n, bar.stops[i].color);
+      append_icon(out, n, bar.stops[i].icon);
     }
   }
   size_t rows = 0;
@@ -815,7 +1056,10 @@ inline size_t normalize(const char* in, char* out, size_t out_size, bool allow_b
       const char* begin = p + 1;
       const char* end = line_end(begin);
       p = end;
-      if (v2 && (starts_with(begin, end, "bar ") || starts_with(begin, end, "src "))) continue;
+      if (v2 && (starts_with(begin, end, "bar ") || starts_with(begin, end, "src ") ||
+                 starts_with(begin, end, "cover"))) {
+        continue;
+      }
       Rule rule;
       if (!parse_rule(begin, end, rule)) continue;
       if (!v2) {
@@ -831,7 +1075,7 @@ inline size_t normalize(const char* in, char* out, size_t out_size, bool allow_b
       if (append_row(rule, out, n)) ++rows;
     }
   }
-  if (!has_fixed && !fill && !emit_layer && !has_bar && rows == 0) n = 0;
+  if (!has_fixed && !fill && !has_cover && !emit_layer && !has_bar && rows == 0) n = 0;
   out[n] = '\0';
   return n;
 }

@@ -2,7 +2,11 @@
 
 #include <sdkconfig.h>
 
-#if defined(CONFIG_IDF_TARGET_ESP32P4)
+#include "src/devices/device_select.h"
+
+// The P4 cameras and camera streams, and the S3 panels' camera stream
+// (software decode, camera_stream.cpp).
+#if defined(CONFIG_IDF_TARGET_ESP32P4) || defined(DEVICE_ESP32_S3_RGB_480)
 
 #include <Arduino.h>
 #include <fcntl.h>
@@ -168,6 +172,14 @@ SocketReadResult receiveExact(int fd, void* destination, size_t bytes, StopFn st
   return SocketReadResult::Ok;
 }
 
+bool waitReadable(int fd, uint32_t timeout_ms) {
+  fd_set readable;
+  FD_ZERO(&readable);
+  FD_SET(fd, &readable);
+  timeval timeout = toTimeval(timeout_ms);
+  return select(fd + 1, &readable, nullptr, nullptr, &timeout) != 0;
+}
+
 void closeSocket(int fd) {
   if (fd < 0) return;
   shutdown(fd, SHUT_RDWR);
@@ -176,4 +188,4 @@ void closeSocket(int fd) {
 
 }  // namespace tcp_ack
 
-#endif  // defined(CONFIG_IDF_TARGET_ESP32P4)
+#endif  // defined(CONFIG_IDF_TARGET_ESP32P4) || defined(DEVICE_ESP32_S3_RGB_480)

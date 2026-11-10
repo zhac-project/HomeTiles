@@ -22,8 +22,10 @@ const getFunction = name => {
 const draw = getFunction('draw_landscape_area');
 assert.match(draw, /g_ui_ppa\.rotate\(/, `${revision} ordinary UI must reach the PPA path`);
 for (const entry of ['displayPushPixels', 'displayPushPixelsDMA']) {
+  // The DMA entry is the same path; an upright UI is copied without a turn.
   assert.match(getFunction(`${namespace}::${entry}`),
-    /draw_landscape_area\(/, `${entry} must use the accelerated path`);
+    entry === 'displayPushPixels' ? /draw_landscape_area\(/ : /draw_landscape_area\(|displayPushPixels\(/,
+    `${entry} must use the accelerated path`);
 }
 assert.match(getFunction('init_display'), /g_ui_ppa\.init\(/);
 assert.match(getFunction(`${namespace}::displayTryFullFramePreview`),
@@ -99,6 +101,7 @@ inline int xSemaphoreTake(SemaphoreHandle_t sem, uint32_t timeout) {
   if (timeout == 800 && finish_in_grace) ready_signal = 1;
   int result = ready_signal; ready_signal = 0; return result;
 }
+inline int uxSemaphoreGetCount(SemaphoreHandle_t sem) { assert(sem); return ready_signal; }
 inline int ppa_register_client(const ppa_client_config_t* cfg, ppa_client_handle_t* out) {
   assert(cfg->oper_type == PPA_OPERATION_SRM); ++registered;
   *out = register_error ? nullptr : reinterpret_cast<void*>(1);
@@ -147,6 +150,7 @@ const cpp = String.raw`
 #include <algorithm>
 #include <vector>
 #include "src/devices/common/p4_dsi_ui_ppa.h"
+#include "src/devices/common/p4_dsi_cpu_rotate.h"
 namespace dma2d_arbiter {
 bool lock(uint32_t timeout) {
   assert(timeout == 25 && !lease_held);
@@ -163,7 +167,9 @@ uint16_t* Presenter::activeFramebuffer() const {
   return framebuffer_ready ? framebuffer.data() : nullptr;
 }
 bool Presenter::noteUiWrite(int32_t x, int32_t y, int32_t w, int32_t h, bool ppa) {
-  assert(ppa && x >= 0 && y >= 0 && x + w <= 800 && y + h <= 1280);
+  assert(x >= 0 && y >= 0 && x + w <= 800 && y + h <= 1280);
+  // The V2 CPU path reports its framebuffer write too (no cache invalidate).
+  if (!ppa) return true;
   ++mirror_writes; return mirror_ok;
 }
 [[noreturn]] void restartAfterPpaTimeout(const char*, const char*, int32_t,
@@ -185,6 +191,14 @@ bool write_physical_to_panel(int32_t x, int32_t y, int32_t w, int32_t h, const u
   for (int row = 0; row < h; ++row)
     std::copy_n(data + row * w, w, framebuffer.data() + (y + row) * 800 + x);
   return true;
+}
+// V2 rotates small regions straight into the framebuffer; its cache write-back
+// is the CPU draw this test counts (V1 still goes through the buffer above).
+bool g_panel_fb_ready = true;
+uint16_t* panel_fb() { return framebuffer.data(); }
+void flush_framebuffer_rect(const uint16_t* fb, int32_t x, int32_t y, int32_t w, int32_t h) {
+  assert(fb == framebuffer.data() && x >= 0 && y >= 0 && x + w <= 800 && y + h <= 1280);
+  ++cpu_writes;
 }
 bool draw_physical(int32_t, int32_t, int32_t, int32_t, const uint16_t*) {
   assert(false); return false;

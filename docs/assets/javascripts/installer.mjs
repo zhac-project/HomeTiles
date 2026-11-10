@@ -1,5 +1,5 @@
 import * as esptool from "https://unpkg.com/esptool-js@0.7.0/bundle.js";
-import { defineHomeTilesEsptool } from "./installer-esptool.mjs?v=installer-ui-18";
+import { defineHomeTilesEsptool } from "./installer-esptool.mjs?v=installer-ui-19";
 import { retainPageComponent } from "./retained-page-component.mjs?v=serial-navigation-2";
 import { serialAccess } from "./serial-access.mjs?v=serial-navigation-2";
 import { serialActivity } from "./serial-activity.mjs?v=serial-navigation-3";
@@ -20,14 +20,15 @@ import {
   releaseAssetNames,
   resolveSameOriginAsset,
   validateFirmwareDescriptor,
-} from "./installer-contract.mjs?v=installer-ui-18";
+} from "./installer-contract.mjs?v=installer-ui-19";
 
 const LAST_RUN_STORAGE_KEY = "hometiles.webInstaller.lastRun.v1";
 const LOG_MAX_LINES = 300;
 const LOG_MAX_CHARACTERS = 64 * 1024;
 const LOG_MAX_LINE_CHARACTERS = 4096;
-const GUITION_S3_DEVICE_KEY = "guition_esp32_4848s040";
-const GUITION_S3_NORMAL_BOOT_RESET_SEQUENCE = "D0|R1|W100|R0|W100|D0";
+// An EN pulse with GPIO0 released: boots the flashed app on UART bridges
+// (CH340, CH343) and on USB-Serial-JTAG, like esptool.py's hard reset.
+const NORMAL_BOOT_RESET_SEQUENCE = "D0|R1|W100|R0|W100|D0";
 
 // The bundle provides every chip class, including the ESP32-P4 class whose
 // postConnect() powers on the flash of v3.1/v3.2 silicon.
@@ -94,6 +95,8 @@ export function mountInstaller(root) {
 
   const state = {
     busy: false,
+    // Every block is sent; the device still writes before esptool returns.
+    finishing: false,
     flashMutationStarted: false,
     lastPersistedProgress: -5,
     lastRun: readLastRun(),
@@ -277,8 +280,9 @@ export function mountInstaller(root) {
     state.progress = Math.max(0, Math.min(100, Number(value) || 0));
     elements.progress.value = state.progress;
     elements.progressText.textContent = `${Math.round(state.progress)}%`;
-    if (state.busy) serialActivity.set("installer", state.flashMutationStarted
-      ? `Flashing · ${Math.round(state.progress)}%` : elements.phase.textContent, "busy", true);
+    if (state.busy) serialActivity.set("installer", state.finishing ? "Finishing…"
+      : state.flashMutationStarted ? `Flashing · ${Math.round(state.progress)}%` : elements.phase.textContent,
+    "busy", true);
   }
 
   function persistLastRun(overrides = {}) {
@@ -619,6 +623,15 @@ export function mountInstaller(root) {
     return raw instanceof Uint8Array ? raw : new Uint8Array(raw);
   }
 
+  // The last block is sent, but the device still writes (the empty end of a
+  // 32 MB factory image takes a minute or two) before esptool returns: say
+  // so once, or the page looks stuck at 100 % (user 2026-10-12).
+  function showFinishing(phase, message) {
+    if (state.finishing) return;
+    state.finishing = true;
+    showActivity(phase, message, { progress: state.progress });
+  }
+
   async function writeFlashPart(esploader, part, reportProgress) {
     await esploader.writeFlash({
       fileArray: [{ data: part.data, address: part.address }],
@@ -633,20 +646,16 @@ export function mountInstaller(root) {
     });
   }
 
-  async function resetAndDisconnect(esploader, transport, shouldReset, device) {
+  async function resetAndDisconnect(esploader, transport, shouldReset) {
     let resetSignalSent = false;
     try {
       if (esploader && shouldReset) {
-        if (device?.key === GUITION_S3_DEVICE_KEY) {
-          // esptool-js 0.7.0 hard_reset only releases RTS. This CH340 board
-          // needs an explicit EN pulse with GPIO0 released to boot the app.
-          await esploader.after("custom_reset", undefined, GUITION_S3_NORMAL_BOOT_RESET_SEQUENCE);
-        } else {
-          // Keep the 0.6.1 UART hard_reset. Without an explicit value 0.7.0
-          // first reads chip registers to detect USB-OTG, which fails on a
-          // device that stopped answering and would skip the reset signal.
-          await esploader.after("hard_reset", false);
-        }
+        // esptool-js 0.7.0 hard_reset only releases RTS and never pulls EN
+        // low, so every board stayed in the flasher stub until it was
+        // restarted by hand (the Waveshare 4B looked like a failed Update).
+        // The explicit EN pulse boots the new app; it reads no registers, so
+        // it also reaches a device that stopped answering.
+        await esploader.after("custom_reset", undefined, NORMAL_BOOT_RESET_SEQUENCE);
         resetSignalSent = true;
       }
     } catch (error) {
@@ -669,6 +678,7 @@ export function mountInstaller(root) {
     setLogActionStatus("");
     elements.logPanel.hidden = false;
     state.busy = true;
+    state.finishing = false;
     state.flashMutationStarted = false;
     state.lastPersistedProgress = -5;
     showActivity("Waiting for USB port", "Choose the USB serial port for the selected display.", {
@@ -773,7 +783,10 @@ export function mountInstaller(root) {
             state.lastPersistedProgress = Math.floor(overallPercent / 5) * 5;
             persistLastRun();
           }
+          if (fraction >= 1) showFinishing("Finishing update",
+            "All data is sent. The device is still writing and checking the new image, which can take up to a minute. Keep it connected.");
         });
+        state.finishing = false;
 
         showActivity(
           "Activating verified update",
@@ -799,7 +812,10 @@ export function mountInstaller(root) {
             state.lastPersistedProgress = Math.floor(overallPercent / 5) * 5;
             persistLastRun();
           }
+          if (fraction >= 1) showFinishing("Finishing factory image",
+            "All data is sent. The device is still writing the rest of its flash memory, which can take one to two minutes. Keep it connected.");
         });
+        state.finishing = false;
       }
       setProgress(100);
       completed = true;
@@ -822,18 +838,21 @@ export function mountInstaller(root) {
       // entry is committed, so the previously selected slot remains bootable.
       // An interrupted Factory reset must stay in the serial bootloader.
       const safeToReset = completed || !flashMutationStarted || mode === "update";
-      await resetAndDisconnect(esploader, transport, safeToReset, device);
+      const restarted = await resetAndDisconnect(esploader, transport, safeToReset);
       state.busy = false;
       serialAccess.release("installer");
       serialActivity.set("installer", completed ? "Flash complete"
         : outcome?.outcomeKind === "info" ? "Flash cancelled" : "Flash failed",
       completed ? "success" : outcome?.outcomeKind === "info" ? "idle" : "error");
       if (completed) {
+        const restartHint = restarted
+          ? "The device restarts now; if the screen stays dark, unplug it briefly."
+          : "Please restart the device manually.";
         showActivity(
           "Complete",
           mode === "update"
-            ? "Update complete. Settings were preserved. Please restart the device manually."
-            : "Factory reset complete. Local settings were erased. Please restart the device manually.",
+            ? `Update complete. Settings were preserved. ${restartHint}`
+            : `Factory reset complete. Local settings were erased. ${restartHint}`,
           { kind: "success", progress: 100 },
         );
         persistLastRun({ busy: false, recoveryRequired: false });

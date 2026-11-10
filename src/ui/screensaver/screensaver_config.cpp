@@ -5,6 +5,7 @@
 #include <new>
 
 #include "src/devices/device.h"
+#include "src/tiles/config/grid_layout.h"
 #include "src/types/clock/clock_format.h"
 
 namespace {
@@ -112,7 +113,7 @@ void legacy_tile_from_json(JsonObjectConst in, Tile& tile, size_t index) {
   tile.scene_alias = String(in["scene_alias"] | "");
   if (tile.type == TILE_SWITCH) {
     tile.sensor_decimals = static_cast<uint8_t>(
-        constrain(in["switch_style"] | 0, 0, 1));
+        constrain(in["switch_style"] | 0, 0, 3));
   }
   setTilePopupOpenMode(tile, static_cast<uint8_t>(
       in["popup_open_mode"] | TILE_POPUP_OPEN_LONG_PRESS));
@@ -156,8 +157,9 @@ void ScreensaverConfigStore::resetGrid(TileGridConfig& grid,
                                         bool transparent_defaults) {
   for (size_t i = 0; i < TILES_PER_GRID; ++i) {
     grid.tiles[i] = Tile{};
-    grid.tiles[i].col = static_cast<uint8_t>(i % GRID_COLS);
-    grid.tiles[i].row = static_cast<uint8_t>(i / GRID_COLS);
+    const size_t cell = grid_slots::defaultCell(i, GRID_CELLS);
+    grid.tiles[i].col = static_cast<uint8_t>(cell % GRID_COLS);
+    grid.tiles[i].row = static_cast<uint8_t>(cell / GRID_COLS);
     grid.tiles[i].span_w = 1;
     grid.tiles[i].span_h = 1;
     if (transparent_defaults) grid.tiles[i].background_opacity = 0;
@@ -172,6 +174,7 @@ void ScreensaverConfigStore::resetSettings() {
 }
 
 void ScreensaverConfigStore::resetDefaults() {
+  for (ClockPlace& place : clock_places_) place = ClockPlace{};
   resetSettings();
   resetGrid(gridStorage(), true);
 }
@@ -183,6 +186,7 @@ void ScreensaverConfigStore::normalize() {
       constrain(data_.time_alignment, 0, 2));
   data_.date_alignment = static_cast<uint8_t>(
       constrain(data_.date_alignment, 0, 2));
+  if (data_.theme > 2) data_.theme = 2;
   data_.time_font_size = normalize_font(data_.time_font_size, 48);
   data_.date_font_size = normalize_font(data_.date_font_size, 28, 72);
   data_.clock_x = clamp_u16(data_.clock_x, 0, 1000);
@@ -254,6 +258,13 @@ bool ScreensaverConfigStore::loadPath(const char* path) {
   loaded.shuffle = doc["shuffle"] | false;
   loaded.tile_shadow = doc["tile_shadow"] | false;
   loaded.tile_border = doc["tile_border"] | true;
+  // A file without the global opacity keeps the current one until load()
+  // takes the tiles' former per-tile value.
+  tile_opacity_stored_ = doc["tile_opacity"].is<int>();
+  loaded.tile_opacity = tile_opacity_stored_
+                            ? static_cast<uint8_t>(constrain(doc["tile_opacity"].as<int>(), 0, 255))
+                            : data_.tile_opacity;
+  loaded.theme = static_cast<uint8_t>(constrain(doc["theme"] | 2, 0, 2));
   loaded.show_time = doc["show_time"] | true;
   loaded.show_date = doc["show_date"] | true;
   loaded.show_weekday = doc["show_weekday"] | false;
@@ -269,6 +280,15 @@ bool ScreensaverConfigStore::loadPath(const char* path) {
   loaded.duration_seconds = doc["duration_seconds"].is<int>()
                                 ? clamp_u16(doc["duration_seconds"].as<int>(), 3, 3600)
                                 : legacy_duration_from_doc(doc);
+  loaded.picture_from_ha = strcmp(doc["picture_source"] | "sd", "ha") == 0;
+  loaded.picture_entity = String(doc["picture_entity"] | "");
+  loaded.picture_entity.trim();
+  if (!screensaver_picture_entity_valid(loaded.picture_entity)) loaded.picture_entity = "";
+  const char* fit = doc["picture_fit"] | "fill";
+  loaded.picture_fit = strcmp(fit, "fit") == 0 ? 1 : strcmp(fit, "original") == 0 ? 2 : 0;
+  loaded.picture_every = doc["picture_every"].is<int>()
+                             ? static_cast<uint8_t>(clamp_u16(doc["picture_every"].as<int>(), 3, 60))
+                             : 10;
 
   JsonArrayConst wallpapers = doc["wallpapers"].as<JsonArrayConst>();
   for (JsonObjectConst item : wallpapers) {
@@ -292,11 +312,82 @@ bool ScreensaverConfigStore::loadPath(const char* path) {
     ++index;
   }
 
+  ClockPlace places[grid_layout::kLayoutCount];
+  places[0] = {loaded.clock_x, loaded.clock_y, loaded.time_font_size, loaded.date_font_size, true};
+  JsonObjectConst clock_layouts = doc["clock_layouts"].as<JsonObjectConst>();
+  for (uint8_t i = 1; i < grid_layout::kLayoutCount; ++i) {
+    JsonObjectConst item = clock_layouts[grid_layout::key(grid_layout::from_index(i))].as<JsonObjectConst>();
+    if (item.isNull()) continue;
+    places[i] = {clamp_u16(item["clock_x"] | 500, 0, 1000), clamp_u16(item["clock_y"] | 350, 0, 1000),
+                 normalize_font(item["time_font_size"] | 48, 48), normalize_font(item["date_font_size"] | 28, 28, 72),
+                 true};
+  }
+  const ClockPlace& shown = places[static_cast<uint8_t>(grid_layout::active())].set
+                                ? places[static_cast<uint8_t>(grid_layout::active())]
+                                : places[0];
+  loaded.clock_x = shown.x;
+  loaded.clock_y = shown.y;
+  loaded.time_font_size = shown.time_size;
+  loaded.date_font_size = shown.date_size;
+
   data_ = loaded;
+  for (uint8_t i = 0; i < grid_layout::kLayoutCount; ++i) clock_places_[i] = places[i];
   legacy_slot_count_ = index;
   legacy_slots_loaded_ = have_legacy;
   normalize();
   return true;
+}
+
+// The file's clock keys: the classic place on top, the others' below.
+void ScreensaverConfigStore::writeClockPlaces(JsonDocument& doc, const ClockPlace (&places)[3]) {
+  doc["clock_x"] = places[0].x;
+  doc["clock_y"] = places[0].y;
+  doc["time_font_size"] = places[0].time_size;
+  doc["date_font_size"] = places[0].date_size;
+  JsonObject clock_layouts = doc["clock_layouts"].to<JsonObject>();
+  for (uint8_t i = 1; i < grid_layout::kLayoutCount; ++i) {
+    if (!places[i].set) continue;
+    JsonObject item = clock_layouts[grid_layout::key(grid_layout::from_index(i))].to<JsonObject>();
+    item["clock_x"] = places[i].x;
+    item["clock_y"] = places[i].y;
+    item["time_font_size"] = places[i].time_size;
+    item["date_font_size"] = places[i].date_size;
+  }
+}
+
+void ScreensaverConfigStore::currentClockPlaces(ClockPlace (&out)[3]) const {
+  for (uint8_t i = 0; i < grid_layout::kLayoutCount; ++i) out[i] = clock_places_[i];
+  out[static_cast<uint8_t>(grid_layout::active())] = {data_.clock_x, data_.clock_y, data_.time_font_size,
+                                                       data_.date_font_size, true};
+  if (!out[0].set) out[0] = {data_.clock_x, data_.clock_y, data_.time_font_size, data_.date_font_size, true};
+}
+
+ScreensaverConfigStore::ClockPlace ScreensaverConfigStore::clockPlace(grid_layout::Layout layout) const {
+  ClockPlace places[grid_layout::kLayoutCount];
+  currentClockPlaces(places);
+  const ClockPlace& own = places[static_cast<uint8_t>(layout)];
+  return own.set ? own : places[0];
+}
+
+bool ScreensaverConfigStore::setClockPlace(grid_layout::Layout layout, const ClockPlace& place) {
+  ClockPlace before[grid_layout::kLayoutCount];
+  for (uint8_t i = 0; i < grid_layout::kLayoutCount; ++i) before[i] = clock_places_[i];
+  const ScreensaverConfigData previous = data_;
+  currentClockPlaces(clock_places_);
+  const ClockPlace normalized{clamp_u16(place.x, 0, 1000), clamp_u16(place.y, 0, 1000),
+                              normalize_font(place.time_size, 48), normalize_font(place.date_size, 28, 72), true};
+  clock_places_[static_cast<uint8_t>(layout)] = normalized;
+  // The active layout's lives in data_ (the panel's clock).
+  if (layout == grid_layout::active()) {
+    data_.clock_x = normalized.x;
+    data_.clock_y = normalized.y;
+    data_.time_font_size = normalized.time_size;
+    data_.date_font_size = normalized.date_size;
+  }
+  if (save()) return true;
+  for (uint8_t i = 0; i < grid_layout::kLayoutCount; ++i) clock_places_[i] = before[i];
+  data_ = previous;
+  return false;
 }
 
 bool ScreensaverConfigStore::load() {
@@ -362,6 +453,22 @@ bool ScreensaverConfigStore::load() {
       Serial.println("[ScreensaverConfig] Migrated legacy JSON slots into TileGrid");
     }
   }
+  if (!tile_opacity_stored_) {
+    // Older configurations kept an opacity per tile: the most common one
+    // becomes the global value, so the screensaver looks as before.
+    uint16_t counts[256] = {};
+    uint16_t best = 0;
+    for (size_t i = 0; i < TILES_PER_GRID; ++i) {
+      const Tile& tile = gridStorage().tiles[i];
+      if (tile.type == TILE_EMPTY) continue;
+      const uint16_t count = ++counts[tile.background_opacity];
+      if (count > best) {
+        best = count;
+        data_.tile_opacity = tile.background_opacity;
+      }
+    }
+    if (best && config_ok) config_needs_migration = true;
+  }
   if (config_ok && config_needs_migration) {
     if (save()) {
       Serial.println("[ScreensaverConfig] Configuration migrated to v2");
@@ -379,6 +486,8 @@ String ScreensaverConfigStore::toJson(bool include_device_meta) const {
   doc["shuffle"] = data_.shuffle;
   doc["tile_shadow"] = data_.tile_shadow;
   doc["tile_border"] = data_.tile_border;
+  doc["tile_opacity"] = data_.tile_opacity;
+  doc["theme"] = data_.theme;
   doc["show_time"] = data_.show_time;
   doc["show_date"] = data_.show_date;
   doc["show_weekday"] = data_.show_weekday;
@@ -391,10 +500,20 @@ String ScreensaverConfigStore::toJson(bool include_device_meta) const {
   doc["date_font_size"] = data_.date_font_size;
   doc["clock_x"] = data_.clock_x;
   doc["clock_y"] = data_.clock_y;
+  if (!include_device_meta) {
+    // The file: the classic place on top, the other layouts' below.
+    ClockPlace places[grid_layout::kLayoutCount];
+    currentClockPlaces(places);
+    writeClockPlaces(doc, places);
+  }
   doc["duration_seconds"] = data_.duration_seconds;
+  doc["picture_source"] = data_.picture_from_ha ? "ha" : "sd";
+  doc["picture_entity"] = data_.picture_entity;
+  doc["picture_fit"] = data_.picture_fit == 1 ? "fit" : data_.picture_fit == 2 ? "original" : "fill";
+  doc["picture_every"] = data_.picture_every;
   if (include_device_meta) {
-    doc["screen_width"] = Device::kScreenWidth;
-    doc["screen_height"] = Device::kScreenHeight;
+    doc["screen_width"] = grid_layout::screen_w();
+    doc["screen_height"] = grid_layout::screen_h();
     doc["grid_cols"] = Device::kGridCols;
     doc["grid_rows"] = Device::kGridRows;
     doc["grid_cell_w"] = Device::kGridCellW;
@@ -479,6 +598,18 @@ bool ScreensaverConfigStore::replaceFromJson(const String& json, String& error,
     item.remove("duration_seconds");
   }
   doc["version"] = kConfigVersion;
+  // The clock keys are the active layout's: the file keeps the classic place
+  // on top and the other layouts' in clock_layouts.
+  {
+    ClockPlace places[grid_layout::kLayoutCount];
+    currentClockPlaces(places);
+    const uint8_t active = static_cast<uint8_t>(grid_layout::active());
+    places[active] = {static_cast<uint16_t>(doc["clock_x"] | static_cast<int>(data_.clock_x)),
+                      static_cast<uint16_t>(doc["clock_y"] | static_cast<int>(data_.clock_y)),
+                      static_cast<uint8_t>(doc["time_font_size"] | static_cast<int>(data_.time_font_size)),
+                      static_cast<uint8_t>(doc["date_font_size"] | static_cast<int>(data_.date_font_size)), true};
+    writeClockPlaces(doc, places);
+  }
   // Tile data does not belong in this JSON file, preventing older or
   // incorrect clients from accidentally overwriting the grid.
   doc.remove("slots");
@@ -532,6 +663,12 @@ bool ScreensaverConfigStore::replaceTileGrid(const TileGridConfig& grid) {
   if (saved) gridStorage() = *candidate;
   delete candidate;
   return saved;
+}
+
+void ScreensaverConfigStore::previewTileGrid(const TileGridConfig& grid) {
+  TileGridConfig& storage = gridStorage();
+  storage = grid;
+  normalizeTileGrid(storage);
 }
 
 const Tile* ScreensaverConfigStore::tile(size_t index) const {

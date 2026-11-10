@@ -32,6 +32,18 @@ const MqttTopicRegistry::TopicDescriptor MqttTopicRegistry::kDescriptors[] = {
   {TopicKey::SLEEP_BAT_STAT, TopicDomain::State, "sleep_battery"},
   {TopicKey::LOCAL_CAMERA_CMND, TopicDomain::Command, "local_camera"},
   {TopicKey::LOCAL_CAMERA_STAT, TopicDomain::State, "local_camera"},
+  {TopicKey::LOCK_STAT, TopicDomain::State, "lock"},
+  {TopicKey::ALARM_STAT, TopicDomain::State, "alarm"},
+  {TopicKey::AUDIO_CMND, TopicDomain::Command, "audio"},
+  {TopicKey::AUDIO_STAT, TopicDomain::State, "audio"},
+  {TopicKey::ASSIST_CMND, TopicDomain::Command, "assist"},
+  {TopicKey::ASSIST_STAT, TopicDomain::State, "assist"},
+  {TopicKey::ASSIST_AUDIO_STAT, TopicDomain::State, "assist_audio"},
+  {TopicKey::ASSIST_WAKE_STAT, TopicDomain::State, "assist_wake"},
+  {TopicKey::DISPLAY_THEME_CMND, TopicDomain::Command, "display_theme"},
+  {TopicKey::DISPLAY_THEME_STAT, TopicDomain::State, "display_theme"},
+  {TopicKey::DISPLAY_ROTATION_CMND, TopicDomain::Command, "display_rotation"},
+  {TopicKey::DISPLAY_ROTATION_STAT, TopicDomain::State, "display_rotation"},
 };
 
 void MqttTopicRegistry::begin(const TopicSettings& settings) {

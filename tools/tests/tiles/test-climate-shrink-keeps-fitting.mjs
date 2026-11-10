@@ -62,9 +62,9 @@ assert.deepEqual([...context.climatePlacementOrderFor([], false)], [0, 1, 2, 3, 
 assert.equal(context.climateTargetCaption(state, CONTENT.TARGET_HUMIDITY), 'Humidity');
 assert.equal(context.climateTargetCaption(state, CONTENT.TARGET_TEMPERATURE), 'Cool');
 const css = readRepoFile('src/web/assets/admin.css');
-assert.match(css, /\.tile\.climate \.climate-slot-control small \{[^}]*color:#fff;/);
+assert.match(css, /\.tile\.climate \.climate-slot-control small \{[^}]*color:var\(--pv-text, #fff\);/);
 const renderer = readRepoFile('src/types/climate/renderer.cpp').replace(/\r\n?/g, '\n');
-assert.match(renderer, /lv_obj_t\* caption = lv_label_create\(root\);\n\s*set_label_style\(caption, lv_color_white\(\), FONT_TITLE\);/);
+assert.match(renderer, /lv_obj_t\* caption = lv_label_create\(root\);\n\s*set_label_style\(caption, lv_color_hex\(ui_theme::text\(\)\), FONT_TITLE\);/);
 const fn = name => cppFunctionDefinitions(renderer).find(item => item.name === name)?.source || '';
 assert.match(fn('climate_slot_caption'),
   /TARGET_HUMIDITY\) \{\s*return i18n::climate_humidity_caption_label\(language\);/);

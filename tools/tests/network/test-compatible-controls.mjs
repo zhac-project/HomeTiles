@@ -20,6 +20,15 @@ function definition(source, signature) {
 }
 const mqtt = read('src/network/mqtt/mqtt_handlers.cpp');
 const renderer = read('src/types/switch/renderer.cpp');
+const switchHtml = read('src/types/switch/web_html.cpp');
+// The Climate and Cover editors share the segmented choice (web_html.h).
+const switchHtmlHeader = read('src/types/switch/web_html.h');
+const switchChoiceStart = switchHtmlHeader.indexOf('struct SwitchChoice {');
+assert(switchChoiceStart >= 0, 'struct SwitchChoice');
+const switchChoiceStruct = switchHtmlHeader.slice(switchChoiceStart, switchHtmlHeader.indexOf('};', switchChoiceStart) + 2);
+// Its declaration carries the default of the select's extra attributes.
+const switchChoiceStartDecl = switchHtmlHeader.indexOf('void append_switch_choice(');
+const switchChoiceDecl = switchHtmlHeader.slice(switchChoiceStartDecl, switchHtmlHeader.indexOf(';', switchChoiceStartDecl) + 1);
 const strings = read('src/core/i18n/i18n.cpp');
 const tables = [...strings.matchAll(/static const Strings kStrings(?:De|En|Fr) = \{[\s\S]*?\};/g)].map(match => match[0]);
 assert.equal(tables.length, 3);
@@ -54,10 +63,12 @@ ${definition(mqtt, 'void mqttPublishSwitchCommand(')}
 enum GridType {ROOT};
 struct SwitchState {bool available=true,has_state=false,is_on=false;};
 SwitchState state;
-struct SwitchEventData {String entity_id;GridType grid_type=ROOT;uint8_t index=0;bool use_switch_widget=false;};
+struct SwitchBarView {};SwitchBarView bar_view;
+struct SwitchEventData {String entity_id;GridType grid_type=ROOT;uint8_t index=0;SwitchBarView* view=nullptr;};
 SwitchState get_switch_state(GridType,uint8_t){return state;}
 void update_switch_tile_state(GridType,uint8_t,const char* value){state.is_on=std::strcmp(value,"on")==0;}
-${definition(renderer, 'static void toggle_switch_tile(')}
+void hold_toggle(SwitchEventData*,bool){}
+${definition(renderer, 'void toggle_switch_tile(')}
 namespace i18n {
 ${definition(read('src/core/i18n/i18n.h'), 'struct Strings')} ;
 ${tables.join('\n')}
@@ -68,7 +79,17 @@ struct ConfigManager { const Config& getConfig()const{return config;} } configMa
 struct SceneOption { String alias,entity; };
 String humanizeIdentifier(const String& value,bool){return value;}
 void appendHtmlEscaped(String& output,const String& value) {output+=value;}
-${definition(read('src/types/switch/web_html.cpp'), 'void append_switch_fields_html(')}
+${[...read('src/web/server/web_admin_utils.cpp').matchAll(/void appendEntityPickerField\(/g)]
+  .map(match => definition(read('src/web/server/web_admin_utils.cpp').slice(match.index), 'void appendEntityPickerField(')).join('\n')}
+${switchChoiceStruct}
+${switchChoiceDecl}
+// The panel's value sizes on the select (value_size_attrs.h).
+struct lv_font_t {};
+const lv_font_t g_value_font{};
+#define FONT_VALUE (&g_value_font)
+void append_value_size_attrs(String& html,const lv_font_t*,const char*){html+=" data-sizes=\"28,20,24,32,40,28\"";}
+${definition(switchHtml, 'void append_switch_choice(')}
+${definition(switchHtml, 'void append_switch_fields_html(')}
 ${definition(read('src/types/scene/web_html.cpp'), 'void append_scene_fields_html(')}
 int main(){
   for(const char* domain:{"light","switch","input_boolean","automation","fan","humidifier","remote","siren"}){
@@ -76,7 +97,9 @@ int main(){
     assert(ha_control::supportsSwitchTile(entity.c_str()));
     SwitchEventData data;data.entity_id=entity;
     for(bool widget:{false,true}){
-      data.use_switch_widget=widget;state={true,true,false};
+      // Header layouts (with a bar view) switch optimistically; the icon
+      // button sends toggle. Both send exactly one command.
+      data.view=widget?&bar_view:nullptr;state={true,true,false};
       const size_t before=networkManager.messages.size();
       toggle_switch_tile(&data);
       assert(networkManager.messages.size()==before+1);
@@ -109,12 +132,19 @@ int main(){
   mqttPublishSwitchCommand("switch.local","on");assert(local_commands==1);
   for(const char* language:{"de","en","fr"}){
     config.language=language;String html;
-    append_switch_fields_html(html,"folder3",{"automation.desk","input_boolean.guest","fan.office"});
-    append_scene_fields_html(html,"folder3",{{"desk","button.desk"},{"desk2","input_button.desk"}});
+    append_switch_fields_html(html,"folder3");
+    append_scene_fields_html(html,"folder3");
     const auto& tr=i18n::strings(language);
     assert(html.find(tr.switch_light)!=std::string::npos&&html.find(tr.scene_label)!=std::string::npos);
     assert(html.find("folder3_switch_entity")!=std::string::npos&&html.find("folder3_scene_alias")!=std::string::npos);
-    assert(html.find("automation.desk")!=std::string::npos&&html.find("input_button.desk")!=std::string::npos);
+    // The entities come from /api/entity_options through the shared picker.
+    assert(html.find("id=\"folder3_switch_entity\" data-entity-picker=\"switches\"")!=std::string::npos);
+    assert(html.find("id=\"folder3_scene_alias\" data-entity-picker=\"scenes\"")!=std::string::npos);
+    // Layout, value size and popup as one line of choices like Tile color.
+    for(const char* field:{"folder3_switch_style_choices","folder3_switch_value_font_choices","folder3_switch_popup_open_mode_choices"})
+      assert(html.find(field)!=std::string::npos);
+    for(const char* label:{tr.switch_layout_automatic,tr.switch_layout_dimmer,tr.switch_layout_switch,tr.switch_icon_button,tr.short_press,tr.long_press})
+      assert(html.find(std::string(">")+label+"</button>")!=std::string::npos);
   }
 }
 `;

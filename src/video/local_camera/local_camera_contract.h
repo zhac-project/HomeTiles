@@ -386,20 +386,41 @@ inline uint32_t weightedMeanLuma(const int luminance[5][5]) {
   return weight ? (sum + weight / 2) / weight : 0;
 }
 
-inline ExposureStep stepAutoExposure(ExposureSetting current,
-                                     uint32_t mean_luma,
-                                     uint32_t target_luma,
-                                     uint32_t tolerance,
-                                     const ExposureLimits& limits) {
+// A frame at or above kSaturatedLuma is clipped and carries no magnitude:
+// the exposure drops to kSaturatedExposureRatio of it per evaluation (a half
+// needed ten evaluations from night to day). Other steps are bounded to
+// 1/kMaxExposureRatio..kMaxExposureRatio per evaluation.
+constexpr uint32_t kSaturatedLuma = 250;
+constexpr float kSaturatedExposureRatio = 0.125f;
+constexpr float kMaxExposureRatio = 16.0f;
+
+// exponent: the gamma of the curve the AE statistics see (1 = linear). The
+// luma ratio goes back through it to the linear ratio of the signal; with the
+// luma ratio alone a step corrected only part of the way and stopped at the
+// tolerance edge (104 or 105 instead of 115 after the gamma curve).
+// max_ratio bounds one step.
+inline float exposureRatioFor(uint32_t mean_luma, uint32_t target_luma, float exponent = 1.0f,
+                              float max_ratio = kMaxExposureRatio) {
+  const float mean = static_cast<float>(mean_luma ? mean_luma : 1);
+  float ratio = powf(static_cast<float>(target_luma) / mean,
+                     1.0f / (exponent > 0.05f ? exponent : 1.0f));
+  if (max_ratio < 1.0f) max_ratio = 1.0f;
+  if (max_ratio > kMaxExposureRatio) max_ratio = kMaxExposureRatio;
+  if (ratio < 1.0f / max_ratio) ratio = 1.0f / max_ratio;
+  if (ratio > max_ratio) ratio = max_ratio;
+  if (mean_luma >= kSaturatedLuma && ratio > kSaturatedExposureRatio) {
+    ratio = kSaturatedExposureRatio;
+  }
+  return ratio;
+}
+
+// Scales the exposure product by ratio within one stage's limits, exposure
+// time before gain to keep noise low. limited: nothing changed because the
+// limit in that direction is reached.
+inline ExposureStep scaleExposure(ExposureSetting current, float ratio,
+                                  const ExposureLimits& limits) {
   ExposureStep step;
   step.next = current;
-  const uint32_t low = target_luma > tolerance ? target_luma - tolerance : 0;
-  const uint32_t high = target_luma + tolerance;
-  if (mean_luma >= low && mean_luma <= high) {
-    step.converged = true;
-    return step;
-  }
-
   const uint64_t min_total =
       static_cast<uint64_t>(limits.min_lines) * limits.min_gain_x16;
   const uint64_t max_total =
@@ -412,19 +433,10 @@ inline ExposureStep stepAutoExposure(ExposureSetting current,
   if (gain > limits.max_gain_x16) gain = limits.max_gain_x16;
   const uint64_t total = lines * gain;
 
-  // Ratio in 1/256 steps, bounded to 0.25x..4x per iteration. Saturated
-  // frames carry no magnitude information, so halve at least.
-  const uint32_t mean = mean_luma ? mean_luma : 1;
-  uint64_t ratio_q8 = (static_cast<uint64_t>(target_luma) * 256u + mean / 2) / mean;
-  if (ratio_q8 < 64) ratio_q8 = 64;
-  if (ratio_q8 > 1024) ratio_q8 = 1024;
-  if (mean_luma >= 250 && ratio_q8 > 128) ratio_q8 = 128;
-
-  uint64_t wanted = (total * ratio_q8 + 128) / 256;
+  uint64_t wanted = static_cast<uint64_t>(static_cast<double>(total) * ratio + 0.5);
   if (wanted < min_total) wanted = min_total;
   if (wanted > max_total) wanted = max_total;
 
-  // Prefer exposure time over gain to keep noise low.
   uint64_t next_lines = wanted / limits.min_gain_x16;
   if (next_lines > limits.max_lines) next_lines = limits.max_lines;
   if (next_lines < limits.min_lines) next_lines = limits.min_lines;
@@ -436,13 +448,32 @@ inline ExposureStep stepAutoExposure(ExposureSetting current,
   step.next.gain_x16 = static_cast<uint16_t>(next_gain);
   const bool unchanged = step.next.lines == current.lines &&
                          step.next.gain_x16 == current.gain_x16;
-  const bool wants_brighter = mean_luma < low;
+  const bool wants_brighter = ratio > 1.0f;
   step.limited = unchanged &&
                  ((wants_brighter && wanted >= max_total) ||
                   (!wants_brighter && wanted <= min_total));
   // Nothing more can be done at a limit; treat it as the final setting.
   step.converged = step.limited;
   return step;
+}
+
+inline ExposureStep stepAutoExposure(ExposureSetting current,
+                                     uint32_t mean_luma,
+                                     uint32_t target_luma,
+                                     uint32_t tolerance,
+                                     const ExposureLimits& limits,
+                                     float exponent = 1.0f,
+                                     float max_ratio = kMaxExposureRatio) {
+  const uint32_t low = target_luma > tolerance ? target_luma - tolerance : 0;
+  const uint32_t high = target_luma + tolerance;
+  if (mean_luma >= low && mean_luma <= high) {
+    ExposureStep step;
+    step.next = current;
+    step.converged = true;
+    return step;
+  }
+  return scaleExposure(current, exposureRatioFor(mean_luma, target_luma, exponent, max_ratio),
+                       limits);
 }
 
 // ---------------------------------------------------------------------------
@@ -462,9 +493,11 @@ struct ExposureStages {
   uint16_t max_total_gain_x16 = 0;  // <= normal.max_gain_x16: no digital stage.
 };
 
-inline ExposureStep stepStagedExposure(ExposureSetting current, uint32_t mean_luma,
-                                       uint32_t target_luma, uint32_t tolerance,
-                                       const ExposureStages& stages) {
+// Scales the exposure product by ratio through the stages: the stage follows
+// from the current setting; at its limit the next (brighter) or previous
+// (darker) available stage takes over.
+inline ExposureStep scaleStagedExposure(ExposureSetting current, float ratio,
+                                        const ExposureStages& stages) {
   const ExposureLimits& normal = stages.normal;
   const uint16_t night_lines =
       stages.night_max_lines > normal.max_lines ? stages.night_max_lines : normal.max_lines;
@@ -484,14 +517,29 @@ inline ExposureStep stepStagedExposure(ExposureSetting current, uint32_t mean_lu
   } else if (available[1] && current.gain_x16 > normal.max_gain_x16) {
     stage = 1;
   }
-  ExposureStep step = stepAutoExposure(current, mean_luma, target_luma, tolerance, limits[stage]);
+  ExposureStep step = scaleExposure(current, ratio, limits[stage]);
   if (!step.limited) return step;
-  const uint32_t low = target_luma > tolerance ? target_luma - tolerance : 0;
-  const int direction = mean_luma < low ? 1 : -1;
+  const int direction = ratio > 1.0f ? 1 : -1;
   int next = stage + direction;
   while (next >= 0 && next <= 2 && !available[next]) next += direction;
   if (next < 0 || next > 2) return step;
-  return stepAutoExposure(current, mean_luma, target_luma, tolerance, limits[next]);
+  return scaleExposure(current, ratio, limits[next]);
+}
+
+inline ExposureStep stepStagedExposure(ExposureSetting current, uint32_t mean_luma,
+                                       uint32_t target_luma, uint32_t tolerance,
+                                       const ExposureStages& stages, float exponent = 1.0f,
+                                       float max_ratio = kMaxExposureRatio) {
+  const uint32_t low = target_luma > tolerance ? target_luma - tolerance : 0;
+  const uint32_t high = target_luma + tolerance;
+  if (mean_luma >= low && mean_luma <= high) {
+    ExposureStep step;
+    step.next = current;
+    step.converged = true;
+    return step;
+  }
+  return scaleStagedExposure(
+      current, exposureRatioFor(mean_luma, target_luma, exponent, max_ratio), stages);
 }
 
 // ---------------------------------------------------------------------------
@@ -746,9 +794,14 @@ inline float digitalGainForStep(uint8_t step) {
 inline uint8_t nextDigitalGainStep(uint8_t step, uint32_t mean_luma, uint32_t target_luma,
                                    uint32_t tolerance, float exponent,
                                    bool sensor_at_brighter_limit,
-                                   uint8_t max_step = kMaxDigitalGainStep) {
+                                   uint8_t max_step = kMaxDigitalGainStep,
+                                   int max_jump = kMaxDigitalGainJump) {
   if (max_step > kMaxDigitalGainStep) max_step = kMaxDigitalGainStep;
   if (step > max_step) return max_step;
+  // A clipped frame drops the whole digital gain at once: it carries no
+  // magnitude, and each step down costs another evaluation (139 ms frames at
+  // night, so the first snapshot from night to day stayed white).
+  if (mean_luma >= kSaturatedLuma) return 0;
   const uint32_t low = target_luma > tolerance ? target_luma - tolerance : 0;
   const uint32_t high = target_luma + tolerance;
   const bool too_bright = mean_luma > high;
@@ -761,12 +814,54 @@ inline uint8_t nextDigitalGainStep(uint8_t step, uint32_t mean_luma, uint32_t ta
   int delta = static_cast<int>(lroundf(ev * static_cast<float>(kDigitalGainStepsPerEv)));
   if (too_dark && delta < 1) delta = 1;
   if (too_bright && delta > -1) delta = -1;
-  if (delta > kMaxDigitalGainJump) delta = kMaxDigitalGainJump;
-  if (delta < -kMaxDigitalGainJump) delta = -kMaxDigitalGainJump;
+  if (max_jump < 1) max_jump = 1;
+  if (delta > max_jump) delta = max_jump;
+  if (delta < -max_jump) delta = -max_jump;
   int next = static_cast<int>(step) + delta;
   if (next < 0) next = 0;
   if (next > max_step) next = max_step;
   return static_cast<uint8_t>(next);
+}
+
+// Whether a stream exposure step shows in the measured luma yet. A fixed
+// settle time fits only one delay: the 8-inch stream (b214) saw a gain change
+// 0.6-0.8 s later while it stepped every 0.2 s, overshot and swung between 76
+// and 164. The stream now waits until the luma moved half the expected way
+// (Arrived) or clearly the other way (SceneChanged, e.g. a hand in front of
+// the lens), so any sensor and delay settles without swinging. Half, not
+// most: the b215 8-inch log showed a step 2-3 frames after the write, but
+// only 60-70 % as large as the gamma model expects in bright scenes; with
+// 80 % five of thirteen steps waited the full time.
+enum class StepProgress : uint8_t { Waiting, Arrived, SceneChanged };
+constexpr float kStepArrivedFraction = 0.5f;
+constexpr float kSceneChangeFraction = 0.2f;
+constexpr float kSceneChangeMinLuma = 12.0f;
+// From a clipped frame the expected luma is only a lower bound: leaving the
+// clipped range by this fraction counts as arrived.
+constexpr float kClippedArrivedFraction = 0.3f;
+
+inline StepProgress stepProgress(uint32_t from_luma, float expected_luma, uint32_t luma) {
+  const float from = static_cast<float>(from_luma);
+  const float want = expected_luma - from;
+  const float moved = static_cast<float>(luma) - from;
+  float against = kSceneChangeFraction * from;
+  if (against < kSceneChangeMinLuma) against = kSceneChangeMinLuma;
+  if (want >= 0.0f ? moved <= -against : moved >= against) return StepProgress::SceneChanged;
+  float need = (want >= 0.0f ? want : -want) * kStepArrivedFraction;
+  if (from_luma >= kSaturatedLuma && want < 0.0f && need > kClippedArrivedFraction * from) {
+    need = kClippedArrivedFraction * from;
+  }
+  if (need < 1.0f) need = 1.0f;
+  if (want >= 0.0f ? moved >= need : moved <= -need) return StepProgress::Arrived;
+  return StepProgress::Waiting;
+}
+
+// Two results in a row this close: a change that ramps in (a curve glide)
+// has finished.
+inline bool lumaSteady(uint32_t previous, uint32_t luma) {
+  const uint32_t diff = luma > previous ? luma - previous : previous - luma;
+  const uint32_t allowed = luma * 3 / 100;
+  return diff <= (allowed > 2 ? allowed : 2);
 }
 
 // Limits of the Max. gain setting. 1x to the full amplification (sensor

@@ -1,11 +1,16 @@
 #pragma once
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <vector>
 
+#include "src/tiles/config/grid_layout.h"
 #include "src/tiles/config/tile_config.h"
 
-static constexpr size_t kMaxScreensaverWallpapers = 32;
+// Images the slideshow keeps settings for (an issue reported the former 32
+// as too few for a full card). The slideshow never walks the whole list per
+// slide: it checks only the picked image on the card.
+static constexpr size_t kMaxScreensaverWallpapers = 500;
 static constexpr uint8_t kScreensaverDefaultTileOpacity = 217;  // approximately 85%
 
 struct ScreensaverWallpaperConfig {
@@ -24,6 +29,12 @@ struct ScreensaverConfigData {
   bool shuffle = false;
   bool tile_shadow = false;
   bool tile_border = true;
+  // One background opacity for every screensaver tile (user 2026-10-02:
+  // set beside borders, radius and shadows instead of per tile).
+  uint8_t tile_opacity = kScreensaverDefaultTileOpacity;
+  // The design of the screensaver's tiles (user 2026-10-11): 0 dark, 1 light,
+  // 2 automatic = the panel's design (ui_theme.h).
+  uint8_t theme = 2;
   bool show_time = true;
   bool show_date = true;
   bool show_weekday = false;
@@ -38,7 +49,27 @@ struct ScreensaverConfigData {
   uint16_t clock_y = 350;
   uint16_t duration_seconds = 15;  // Global slide duration, 3..3600 s
   std::vector<ScreensaverWallpaperConfig> wallpapers;
+  // The picture's source: the SD card slideshow above, or the picture the
+  // Bridge sends of an image or camera entity (docs-dev/images.md; the
+  // slideshow stays stored for switching back).
+  bool picture_from_ha = false;
+  String picture_entity;
+  // How the Bridge places it on the screen (bridge_images::Fit) and how
+  // often a camera sends a new still image (3..60 s).
+  uint8_t picture_fit = 0;
+  uint8_t picture_every = 10;
 };
+
+// An entity whose picture the Bridge sends: image.* or camera.*.
+inline bool screensaver_picture_entity_valid(const String& entity) {
+  return (entity.startsWith("image.") && entity.length() > 6) ||
+         (entity.startsWith("camera.") && entity.length() > 7);
+}
+
+// The screensaver shows the Bridge's picture instead of the SD slideshow.
+inline bool screensaver_uses_ha_picture(const ScreensaverConfigData& data) {
+  return data.picture_from_ha && screensaver_picture_entity_valid(data.picture_entity);
+}
 
 class ScreensaverConfigStore {
  public:
@@ -56,7 +87,28 @@ class ScreensaverConfigStore {
   const TileGridConfig& tileGrid() const { return gridStorage(); }
   TileGridConfig& mutableTileGrid() { return gridStorage(); }
   bool replaceTileGrid(const TileGridConfig& grid);
+  // Sets only the RAM grid, normalized like a save, so an open screensaver
+  // shows an edit before its flash write (replaceTileGrid follows).
+  void previewTileGrid(const TileGridConfig& grid);
   const Tile* tile(size_t index) const;
+
+  // The clock's place and size per layout (user 2026-10-08): the classic
+  // one in the file's top-level keys (older firmware reads them), the others
+  // in "clock_layouts"; a layout without its own takes the classic one.
+  // data_ always carries the active layout's (grid_layout::active()), so the
+  // panel and the screensaver tab see and edit only that one; the layout
+  // window edits every layout's.
+  struct ClockPlace {
+    uint16_t x = 500;
+    uint16_t y = 350;
+    uint8_t time_size = 48;
+    uint8_t date_size = 28;
+    bool set = false;
+  };
+  // A layout's clock: its own, else the classic one.
+  ClockPlace clockPlace(grid_layout::Layout layout) const;
+  // The layout window's clock for a layout, saved at once.
+  bool setClockPlace(grid_layout::Layout layout, const ClockPlace& place);
 
  private:
   ScreensaverConfigData data_;
@@ -68,6 +120,13 @@ class ScreensaverConfigStore {
   Tile legacy_tiles_[GRID_COLS];
   size_t legacy_slot_count_ = 0;
   bool legacy_slots_loaded_ = false;
+  // The last loaded file carried tile_opacity; older files kept it per tile.
+  bool tile_opacity_stored_ = false;
+
+  ClockPlace clock_places_[3];
+  // The places with the active layout's taken from data_.
+  void currentClockPlaces(ClockPlace (&out)[3]) const;
+  static void writeClockPlaces(JsonDocument& doc, const ClockPlace (&places)[3]);
 
   void resetDefaults();
   void resetSettings();

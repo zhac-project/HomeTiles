@@ -1,0 +1,146 @@
+// Pictures from the Bridge over the direct link (docs-dev/images.md): a Media
+// tile subscribes to "<ha_prefix>/media_player/<object>/image/<e>x<e>" in the
+// size the Media popup shows its cover, the screensaver to its image or camera
+// entity in the screen's size, a Camera tile to its entity in the tile's size;
+// the message is "HTIMG1 <key> <w>x<h>\n" + JPEG. The panel reads the header
+// and topic strictly, keeps a picture per entity, size and placement, and
+// hands a cover to the tiles of its song, any other picture to the
+// screensaver and the Camera tiles.
+import assert from 'node:assert/strict';
+
+import {readRepoFile} from '../../lib/admin-source.mjs';
+import {compileAndRun} from '../../lib/cpp-host.mjs';
+
+const harness = String.raw`
+#include <cstdio>
+#include <cstring>
+#include "src/network/bridge/bridge_images_core.h"
+using namespace bridge_images;
+#define CHECK(x) do { if (!(x)) { std::printf("FAIL %d %s\n", __LINE__, #x); return 1; } } while (0)
+
+static bool header(const char* text, size_t extra, Header& out) {
+  unsigned char data[128];
+  const size_t length = strlen(text);
+  memcpy(data, text, length);
+  data[length] = 0xFF;
+  data[length + 1] = 0xD8;
+  return parseHeader(data, length + extra, out);
+}
+
+int main() {
+  Header h;
+  CHECK(header("HTIMG1 0123456789abcdef 240x240\n", 2, h));
+  CHECK(strcmp(h.key, "0123456789abcdef") == 0 && h.width == 240 && h.height == 240 && h.jpeg_offset == 32);
+  CHECK(header("HTIMG1 0123456789abcdef 1280x800\n", 2, h) && h.width == 1280 && h.height == 800);
+  CHECK(!header("HTIMG1 0123456789abcdef 240x240\n", 1, h));   // no JPEG start
+  CHECK(!header("HTIMG2 0123456789abcdef 240x240\n", 2, h));
+  CHECK(!header("HTIMG1 0123456789ABCDEF 240x240\n", 2, h));   // lower-case hex only
+  CHECK(!header("HTIMG1 0123456789abcde 240x240\n", 2, h));
+  CHECK(!header("HTIMG1 0123456789abcdef 240x240 \n", 2, h));
+  CHECK(!header("HTIMG1 0123456789abcdef 8x8\n", 2, h));
+  CHECK(!header("HTIMG1 0123456789abcdef 2000x240\n", 2, h));
+  CHECK(!header("HTIMG1 0123456789abcdef 0240x240\n", 2, h));
+  CHECK(!header("HTIMG1 0123456789abcdef 240x240", 2, h));      // no line end
+  CHECK(!parseHeader(nullptr, 0, h));
+
+  char entity[72];
+  uint16_t w = 0, hh = 0;
+  CHECK(entityFromTopic("ha/statestream/media_player/wohnzimmer_tv/image/240x240", "ha/statestream",
+                        entity, sizeof(entity), &w, &hh));
+  CHECK(strcmp(entity, "media_player.wohnzimmer_tv") == 0 && w == 240 && hh == 240);
+  CHECK(entityFromTopic("ha/statestream/image/garten/image/1280x800", "ha/statestream",
+                        entity, sizeof(entity), &w, &hh));
+  CHECK(strcmp(entity, "image.garten") == 0 && w == 1280 && hh == 800);
+  CHECK(entityFromTopic("ha/statestream/camera/haustuer_2/image/800x1280", "ha/statestream",
+                        entity, sizeof(entity), &w, &hh));
+  CHECK(strcmp(entity, "camera.haustuer_2") == 0 && w == 800 && hh == 1280);
+  CHECK(!entityFromTopic("ha/statestream/imagex/garten/image/240x240", "ha/statestream", entity, sizeof(entity), &w, &hh));
+  // Options after the size: the placement and a camera's interval (3..60 s).
+  uint8_t fit = 9;
+  CHECK(entityFromTopic("ha/statestream/image/garten/image/1280x800", "ha/statestream", entity, sizeof(entity), &w, &hh, &fit) && fit == kFill);
+  CHECK(entityFromTopic("ha/statestream/image/garten/image/1280x800/fit", "ha/statestream", entity, sizeof(entity), &w, &hh, &fit) && fit == kContain && w == 1280);
+  CHECK(entityFromTopic("ha/statestream/camera/tuer/image/800x1280/original/5s", "ha/statestream", entity, sizeof(entity), &w, &hh, &fit) && fit == kOriginal && hh == 1280);
+  CHECK(strcmp(entity, "camera.tuer") == 0);
+  CHECK(entityFromTopic("ha/statestream/camera/tuer/image/800x480/3s", "ha/statestream", entity, sizeof(entity), &w, &hh, &fit) && fit == kFill);
+  CHECK(entityFromTopic("ha/statestream/camera/tuer/image/800x480/60s", "ha/statestream", entity, sizeof(entity), &w, &hh, &fit));
+  // The color behind the picture (a vacuum map's surface).
+  CHECK(entityFromTopic("ha/statestream/camera/robo_map/image/400x400/fit/on-1a2b3c/3s", "ha/statestream", entity, sizeof(entity), &w, &hh, &fit) && fit == kContain);
+  CHECK(entityFromTopic("ha/statestream/image/robo_map/image/400x400/on-ffffff", "ha/statestream", entity, sizeof(entity), &w, &hh, &fit) && fit == kFill);
+  const char* bad[] = {"/2s", "/61s", "/05s", "/fill", "/5s/fit", "/fit/", "/fitx", "/originals", "/5", "/5s/", "/fit/fit",
+                       "/on-FFFFFF", "/on-12345", "/3s/on-123456", "/on-123456/fit", "/on-1234567"};
+  for (const char* option : bad) {
+    char topic[96];
+    std::snprintf(topic, sizeof(topic), "ha/statestream/camera/tuer/image/800x480%s", option);
+    if (entityFromTopic(topic, "ha/statestream", entity, sizeof(entity), &w, &hh, &fit)) { std::printf("FAIL %s\n", option); return 1; }
+  }
+  char suffix[40];
+  CHECK(pictureSuffix(suffix, sizeof(suffix), 1280, 800, kFill, 0) && strcmp(suffix, "image/1280x800") == 0);
+  CHECK(pictureSuffix(suffix, sizeof(suffix), 1280, 800, kFill, 10) && strcmp(suffix, "image/1280x800") == 0);
+  CHECK(pictureSuffix(suffix, sizeof(suffix), 800, 1280, kContain, 0) && strcmp(suffix, "image/800x1280/fit") == 0);
+  CHECK(pictureSuffix(suffix, sizeof(suffix), 480, 480, kOriginal, 5) && strcmp(suffix, "image/480x480/original/5s") == 0);
+  CHECK(pictureSuffix(suffix, sizeof(suffix), 480, 480, kFill, 3) && strcmp(suffix, "image/480x480/3s") == 0);
+  CHECK(!pictureSuffix(suffix, 12, 1280, 800, kOriginal, 5));
+  CHECK(pictureSuffix(suffix, sizeof(suffix), 400, 400, kContain, 3, 0x1A2B3C) && strcmp(suffix, "image/400x400/fit/on-1a2b3c/3s") == 0);
+  CHECK(pictureSuffix(suffix, sizeof(suffix), 400, 400, kFill, 0, 0) && strcmp(suffix, "image/400x400/on-000000") == 0);
+  CHECK(pictureSuffix(suffix, sizeof(suffix), 400, 400, kFill, 0, kNoBackdrop) && strcmp(suffix, "image/400x400") == 0);
+  CHECK(!entityFromTopic("ha/statestream/image/garten/image/2000x800", "ha/statestream", entity, sizeof(entity), &w, &hh));
+  CHECK(!entityFromTopic("ha/statestreamimage/garten/image/240x240", "ha/statestream", entity, sizeof(entity), &w, &hh));
+  CHECK(!entityFromTopic("ha/statestream/media_player/tv/state", "ha/statestream", entity, sizeof(entity), &w, &hh));
+  CHECK(!entityFromTopic("ha/statestream/light/tv/image/240x240", "ha/statestream", entity, sizeof(entity), &w, &hh));
+  CHECK(!entityFromTopic("other/media_player/tv/image/240x240", "ha/statestream", entity, sizeof(entity), &w, &hh));
+  CHECK(!entityFromTopic("ha/statestream/media_player/TV/image/240x240", "ha/statestream", entity, sizeof(entity), &w, &hh));
+  CHECK(!entityFromTopic("ha/statestream/media_player/tv/image/240x240/x", "ha/statestream", entity, sizeof(entity), &w, &hh));
+  CHECK(!entityFromTopic("ha/statestream/media_player//image/240x240", "ha/statestream", entity, sizeof(entity), &w, &hh));
+  char small[8];
+  CHECK(!entityFromTopic("ha/statestream/media_player/tv/image/240x240", "ha/statestream", small, sizeof(small), &w, &hh));
+  std::printf("ok\n");
+  return 0;
+}
+`;
+const output = compileAndRun({label: 'bridge images core', harness});
+if (output !== null) assert.equal(output.trim(), 'ok');
+
+// The panel side: picture topics end before any state handler, a Media tile
+// subscribes its player's cover only over the link, in the Media popup's size.
+const handlers = readRepoFile('src/network/mqtt/mqtt_handlers.cpp');
+const process = handlers.slice(handlers.indexOf('static void processMqttMessage('));
+assert.ok(process.indexOf('bridge_images::handleMqttMessage(topic, payload, length)') <
+  process.indexOf('hardwareIo.handleMqttMessage('), 'pictures never reach the state handlers');
+assert.equal((handlers.match(/if \(networkManager\.linkConfigured\(\)\) \{\s*add_route\([^;]*bridge_images::coverSuffix\(\)\);/g) || []).length, 2,
+  'folder and screensaver Media tiles subscribe the cover only over the link');
+
+const images = readRepoFile('src/network/bridge/bridge_images.cpp');
+// The Media popup's cover size, on the P4 rounded up to the hardware JPEG
+// decoder's steps of 16 (b487's 399 px went to the slow software decoder and
+// was cut to 240; b488 on hardware: the V2 cover was blurred, the S3's sharp).
+assert.match(images, /#if defined\(CONFIG_IDF_TARGET_ESP32P4\)\s*return static_cast<uint16_t>\(\(media_popup_layout::kLeftCoverSide \+ 15\) \/ 16 \* 16\);\s*#else\s*return static_cast<uint16_t>\(media_popup_layout::kLeftCoverSide\);/);
+// Both decoders keep a cover of that size (they cut at 240 before).
+assert.equal((readRepoFile('src/tiles/runtime/tile_renderer.cpp').match(/const uint16_t kMaxCoverSide = std::max<uint16_t>\(240, bridge_images::coverEdge\(\)\);/g) || []).length, 2);
+assert.match(readRepoFile('src/ui/popups/media/media_popup.cpp'),
+  /ctx->cover_dsc = make_media_popup_cover_dsc\(cover_dsc, static_cast<uint16_t>\(ctx->cover_side\)\);/,
+  'the popup scales the cover to its own size');
+assert.match(images, /if \(!entityFromTopic\(topic, prefix, entity, sizeof\(entity\), &width, &height, &fit\)\) return false;/);
+assert.match(images, /if \(!parseHeader\(payload, length, header\) \|\| header\.width != width \|\| header\.height != height\) \{/,
+  'a picture has exactly the size its topic asked for');
+// One entity in several sizes (a camera on a tile and on the screensaver):
+// each topic keeps its own picture, and an empty message clears only its own.
+assert.match(images, /Picture\* slot = slotFor\(entity, width, height, fit\);/);
+assert.match(images, /if \(length == 0\) \{\s*for \(Picture& picture : g_pictures\) \{\s*if \(same\(picture, entity, width, height, fit\)\) release\(picture\);/);
+assert.match(images, /return picture\.jpeg && strcmp\(picture\.entity_id, entity_id\) == 0 && picture\.width == width &&\s*picture\.height == height && picture\.fit == fit;/);
+assert.match(images, /if \(!parseHeader\(payload, length, header\) \|\| header\.width != width \|\| header\.height != height\) \{[\s\S]*?return true;\s*\}/,
+  'a malformed picture is dropped');
+assert.match(images, /if \(strncmp\(entity, "media_player\.", 13\) == 0\) \{\s*tile_renderer_media_picture_arrived\(entity\);\s*\} else \{\s*image_screensaver_picture_arrived\(entity\);\s*camera_picture::arrived\(entity\);\s*vacuum_map::arrived\(entity\);\s*\}/,
+  'a cover goes to the tiles, an image or camera picture to the screensaver and the Camera tiles');
+assert.match(readRepoFile('src/ui/screensaver/image_screensaver.cpp'),
+  /picture = bridge_images::find\(config\.picture_entity\.c_str\(\),\s*static_cast<uint16_t>\(grid_layout::screen_w\(\)\),\s*static_cast<uint16_t>\(grid_layout::screen_h\(\)\), config\.picture_fit\);/,
+  'the screensaver takes its own size, not a Camera tile\'s picture of the same entity');
+assert.equal((images.match(/announce\(entity\);/g) || []).length, 2, 'a new and a cleared picture are told');
+assert.match(images, /pictureSuffix\(suffix, sizeof\(suffix\), static_cast<uint16_t>\(grid_layout::screen_w\(\)\),\s*static_cast<uint16_t>\(grid_layout::screen_h\(\)\), fit, every\);/,
+  'the screensaver picture has the screen\'s size as shown, upright or not, with its placement');
+assert.match(images, /slot->fit = fit;/, 'a picture remembers the placement it was rendered with');
+
+const renderer = readRepoFile('src/tiles/runtime/tile_renderer.cpp');
+assert.match(renderer, /if \(should_update_cover && bridge_pictures_enabled\(\) &&\s*media_artwork::read_string\(payload_start, "image_key", image_key\)\) \{\s*update_media_cover_from_picture\(grid_type, grid_index, widgets, image_key\);\s*\} else if \(should_update_cover\) \{/,
+  'over the link the state names its picture; otherwise the embedded copy as before');
+
+console.log('Bridge pictures: strict header and topic, covers in the popup size, screensaver pictures in the screen size');

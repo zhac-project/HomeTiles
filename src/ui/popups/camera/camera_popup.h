@@ -1,20 +1,29 @@
 #pragma once
 
 #include <Arduino.h>
+#include "src/ui/shared/ui_theme.h"
 
 struct CameraPopupInit {
   String entity_id;
   String title;
   String icon_name;
-  uint32_t bg_color = 0x2A2A2A;
+  uint32_t bg_color = ui_theme::popup_card();
   // Header icon color: the tile's fixed icon color, else white.
   uint32_t icon_color = 0xFFFFFF;
+  // A tile set to open in full screen (types/camera/picture.h): straight to
+  // the full screen, and a tap there closes the popup back to the tiles.
+  bool full_screen = false;
 };
 
 void show_camera_popup(const CameraPopupInit& init);
 void hide_camera_popup();
 void preload_camera_popup();
 bool camera_popup_is_visible();
+// The View select's full-screen option (#65, doorbell automations): the next
+// camera popup opens straight in full screen. Cleared by that opening; the
+// caller clears it when no camera popup opened.
+void camera_popup_open_next_in_full_screen(bool full_screen);
+bool camera_popup_is_full_screen();
 bool camera_popup_is_busy();
 void process_camera_popup();
 void camera_popup_handle_mqtt_status(const char* payload);

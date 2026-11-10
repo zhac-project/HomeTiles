@@ -1,9 +1,9 @@
 # Screensaver
 
-Create a separate layout with a clock, tiles, and an optional image slideshow in the Web Admin's **Screensaver** tab.
+Create a separate layout with a clock, tiles, and an optional image slideshow or a picture from Home Assistant in the Web Admin's **Screensaver** tab.
 
 <figure class="ht-screenshot">
-<img src="../images/8in-screensaver.png" alt="Screensaver on the Waveshare 8 inch display" width="1308" height="828" loading="lazy">
+<img src="../images/v09-screensaver.png" alt="Screensaver with a mountain photo, the time and date, and sensor tiles" width="1280" height="800" loading="lazy">
 <figcaption>Screensaver with clock and sensor tiles</figcaption>
 </figure>
 
@@ -15,13 +15,13 @@ Create a separate layout with a clock, tiles, and an optional image slideshow in
 - Tap free background space to return to the dashboard.
 
 <figure class="ht-screenshot">
-<img src="../images/8in-display-popup.png" alt="Display settings with screensaver timeout" width="1272" height="792" loading="lazy">
+<img src="../images/v09-settings-0.png" alt="Display settings with screensaver start and brightness" width="1280" height="800" loading="lazy">
 <figcaption>Display and screensaver settings</figcaption>
 </figure>
 
 ## Prepare the microSD Card { data-toc-label="Prepare images" }
 
-A slideshow needs microSD support. The Waveshare S3 LCD-4 Rev 4.0 and S3 LCD-4B profiles cannot use SD images. The clock and tiles work on a black background without a card.
+A slideshow needs microSD support. The Waveshare S3 LCD-4 Rev 4.0 and S3 LCD-4B profiles cannot use SD images. The clock and tiles work on a black background without a card. A [picture from Home Assistant](#picture-from-home-assistant) needs no card.
 
 1. Format the card as FAT32 and insert it.
 2. Create an `images` folder in the card's root (`/images`).
@@ -44,7 +44,7 @@ If an image stays black, re-export it at the display's native size with these se
 In the Web Admin's **Screensaver** tab, click the background.
 
 <figure class="ht-screenshot">
-<img src="../images/web-admin-screensaver.png" alt="Screensaver editor in the web admin" width="1305" height="790" loading="lazy">
+<img src="../images/v09-webadmin-screensaver.png" alt="Screensaver tab in the Web Admin with clock and tiles" width="1450" height="1212" loading="lazy">
 <figcaption>Screensaver editor</figcaption>
 </figure>
 
@@ -61,13 +61,36 @@ In the Web Admin's **Screensaver** tab, click the background.
 
 Changes save automatically.
 
+## Picture from Home Assistant { data-toc-label="Home Assistant picture" }
+
+Instead of the slideshow, the screensaver can show the picture of a Home Assistant `image` or `camera` entity, for example a weather webcam.
+
+1. Connect the panel to the Bridge directly (pairing on the panel); panels on MQTT keep the slideshow.
+2. Release the entity in the Bridge options under **Images (screensaver)**. A camera released under **Cameras** works too.
+3. In the **Screensaver** tab, click the background, set **Type** to **Picture from Home Assistant**, keep **Use images** on, and choose the entity.
+
+<figure class="ht-screenshot ht-editor-detail">
+<img src="../images/v09-webadmin-screensaver-picture.png" alt="Slideshow tab with Type set to Picture from Home Assistant" width="473" height="435" loading="lazy">
+<figcaption>Type: Picture from Home Assistant</figcaption>
+</figure>
+
+A new picture of an image entity appears at once. A camera sends a new still image at the interval set under **Refresh (s)**, 3 to 60 seconds, and only while the screensaver is visible. **Scaling** sets how the picture uses the screen:
+
+| Scaling | What it does |
+| --- | --- |
+| **Fill** | Covers the whole screen; what stands out is cut off |
+| **Fit** | The whole picture as large as possible, black bars where needed |
+| **Original** | A smaller picture at its own size in the middle; a larger one like **Fit** |
+
+QR codes and maps are enlarged with sharp edges. Upright displays get the picture in their upright size. Switch back to **Slideshow (SD card)** at any time; the slideshow settings stay stored.
+
 ## Position the Clock
 
 Select the clock to change its time/date formats, font sizes, alignment, and shadow. Drag it anywhere and resize its text area; it is independent of the tile grid.
 
 ## Add Tiles
 
-The bottom two rows support Sensor, Binary Sensor, Energy, Switch, Scene, and Media tiles. Select a slot, choose its type, and move or resize it as on the dashboard. Adjust **Color** and **Opacity** together.
+The bottom two rows support Sensor, Binary Sensor, Energy, Switch, Button, and Media tiles. Select a slot, choose its type, and move or resize it as on the dashboard. Adjust **Color** and **Opacity** together.
 
 States stay live. Popups do not open in screensaver mode. Local I/O switches and temperatures remain available when Home Assistant is offline.
 

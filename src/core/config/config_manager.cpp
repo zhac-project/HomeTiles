@@ -1,8 +1,10 @@
 #include "src/core/config/config_manager.h"
 #include "src/core/config/settings_access_record.h"
+#include "src/core/config/swipe_gestures.h"
 #include "src/core/text/title_text.h"
 #include "src/core/config/batched_nvs_write.h"
 #include "src/core/i18n/i18n.h"
+#include "src/types/calendar/calendar_model.h"
 #include "src/types/clock/clock_format.h"
 #include <Preferences.h>
 #include <stddef.h>
@@ -53,15 +55,20 @@ static bool persisted_config_equal(const DeviceConfig& a,
          strcmp(a.timezone, b.timezone) == 0 &&
          a.global_time_format == b.global_time_format &&
          a.global_date_format == b.global_date_format &&
+         a.week_start == b.week_start &&
          a.keyboard_layout == b.keyboard_layout &&
          a.configured == b.configured &&
          a.display_brightness == b.display_brightness &&
          a.screensaver_brightness_pct == b.screensaver_brightness_pct &&
          a.tile_borders == b.tile_borders &&
-         a.tile_radius == b.tile_radius &&
-         a.icon_discs == b.icon_discs &&
-         a.icon_glow == b.icon_glow &&
-         a.default_tile_color == b.default_tile_color &&
+         a.layout == b.layout &&
+         a.head_gear == b.head_gear &&
+         a.head_clock == b.head_clock &&
+         a.head_overview == b.head_overview &&
+         strcmp(a.head_title, b.head_title) == 0 &&
+         strcmp(a.head_icon, b.head_icon) == 0 &&
+         a.theme == b.theme &&
+         a.theme_auto_last == b.theme_auto_last &&
          a.display_rotated_180 == b.display_rotated_180 &&
          a.display_rotation_quarters == b.display_rotation_quarters &&
          a.display_rotation_mode == b.display_rotation_mode &&
@@ -78,8 +85,12 @@ static bool persisted_config_equal(const DeviceConfig& a,
          a.ethernet_enabled == b.ethernet_enabled &&
          a.settings_pin_enabled == b.settings_pin_enabled &&
          a.settings_tile_hidden == b.settings_tile_hidden &&
+         a.settings_parked == b.settings_parked &&
          a.settings_swipe_enabled == b.settings_swipe_enabled &&
          a.settings_reveal_edge == b.settings_reveal_edge &&
+         a.home_swipe_edge == b.home_swipe_edge &&
+         a.back_swipe_edge == b.back_swipe_edge &&
+         a.screensaver_swipe_edge == b.screensaver_swipe_edge &&
          memcmp(a.settings_pin_salt, b.settings_pin_salt,
                 sizeof(a.settings_pin_salt)) == 0 &&
          memcmp(a.settings_pin_hash, b.settings_pin_hash,
@@ -95,7 +106,8 @@ static bool persisted_config_equal(const DeviceConfig& a,
          a.settings_tile_snapshot.col == b.settings_tile_snapshot.col &&
          a.settings_tile_snapshot.row == b.settings_tile_snapshot.row &&
          a.settings_tile_snapshot.span_w == b.settings_tile_snapshot.span_w &&
-         a.settings_tile_snapshot.span_h == b.settings_tile_snapshot.span_h;
+         a.settings_tile_snapshot.span_h == b.settings_tile_snapshot.span_h &&
+         a.settings_tile_snapshot.view_id == b.settings_tile_snapshot.view_id;
 }
 #endif
 
@@ -224,22 +236,27 @@ ConfigManager::ConfigManager() {
   set_timezone_code(config.timezone, sizeof(config.timezone), "berlin");
   config.global_time_format = clock_tile::TIME_FORMAT_AUTO;
   config.global_date_format = clock_tile::DATE_FORMAT_AUTO;
+  config.week_start = calendar_model::kWeekStartAuto;
   config.keyboard_layout = 0;  // Auto (follows the language).
 
   // Display & Power Defaults
   config.display_brightness = 200;
   config.screensaver_brightness_pct = kScreensaverBrightnessPctDefault;
   config.tile_borders = true;
-  config.tile_radius = tile_radius::kDefault;
-  config.icon_discs = true;
-  config.icon_glow = icon_glow::kDefault;
-  config.default_tile_color = tile_color::kDefault;
+  config.layout = 0;
+  config.head_gear = false;
+  config.head_clock = true;
+  config.head_overview = true;
+  config.theme = 0;
+  config.theme_auto_last = 0;
   config.display_rotated_180 = false;
   config.display_rotation_quarters = Device::kRotationDefault;
   config.display_rotation_mode = kDisplayRotationNormal;
   config.wake_mode_mains = kWakeModeTouch;
   config.wake_mode_battery = kWakeModeTouch;
-  config.auto_sleep_enabled = true;
+  // A new panel stays on (user 2026-10-12: the display went dark during the
+  // first-start setup); the 60 s stay ready for when sleep is switched on.
+  config.auto_sleep_enabled = false;
   config.auto_sleep_seconds = 60;
   config.auto_screensaver_enabled = false;
   config.auto_screensaver_seconds = 60;
@@ -251,9 +268,14 @@ ConfigManager::ConfigManager() {
   config.wifi_static_enabled = false;
   config.settings_pin_enabled = false;
   config.settings_tile_hidden = false;
-  config.settings_swipe_enabled = false;
-  config.settings_reveal_edge =
-      static_cast<uint8_t>(SettingsRevealEdge::Left);
+  config.settings_parked = 0;
+  // New panels (user 2026-10-11): Settings from the top, Home from the
+  // bottom (swipe_gestures.h).
+  config.settings_swipe_enabled = true;
+  config.settings_reveal_edge = swipe_gestures::kDefaultSettingsEdge;
+  config.home_swipe_edge = swipe_gestures::kDefaultHomeEdge;
+  config.back_swipe_edge = swipe_gestures::kEdgeOff;
+  config.screensaver_swipe_edge = swipe_gestures::kEdgeOff;
   clear_settings_tile_snapshot(config);
 }
 
@@ -266,7 +288,7 @@ static uint8_t normalize_display_brightness(uint8_t brightness) {
   // Preserve raw 0 for the low-level sleep/restart paths only. Persisted
   // normal brightness must remain at the exact panel's measured visible floor.
   return configured_min;
-#elif defined(DEVICE_GUITION_ESP32_4848S040)
+#elif defined(DEVICE_GUITION_ESP32_4848S040) || defined(DEVICE_GOLDEN_SECURITY_GS_T3E_V2)
   // The first S3 brightness test build could persist values below the panel's
   // measured visible threshold. Upgrade those values to the new 1 % floor
   // instead of unexpectedly jumping to the generic default.
@@ -358,8 +380,10 @@ bool ConfigManager::load() {
       normalize_global_time_format(prefs.getUChar("time_fmt", clock_tile::TIME_FORMAT_AUTO));
   config.global_date_format =
       normalize_global_date_format(prefs.getUChar("date_fmt", clock_tile::DATE_FORMAT_AUTO));
+  config.week_start =
+      calendar_model::normalize_week_start(prefs.getUChar("week_start", calendar_model::kWeekStartAuto));
   config.keyboard_layout = prefs.getUChar("kb_layout", 0);
-  if (config.keyboard_layout > 2) config.keyboard_layout = 0;
+  if (config.keyboard_layout > 4) config.keyboard_layout = 0;
 
   // Load display and power settings.
   config.display_brightness = prefs.getUChar("disp_bright", 200);
@@ -369,11 +393,20 @@ bool ConfigManager::load() {
   config.screensaver_brightness_pct =
       prefs.getUChar("ss_bright", kScreensaverBrightnessPctDefault);
   config.tile_borders = prefs.getBool("tile_border", true);
-  config.tile_radius = tile_radius::clamp(prefs.getUShort("tile_radius", tile_radius::kDefault));
-  config.icon_discs = prefs.getBool("icon_disc", true);
-  config.icon_glow = icon_glow::clamp(prefs.getUChar("icon_glow", icon_glow::kDefault));
-  config.default_tile_color =
-      tile_color::normalize(prefs.getUInt("tile_color", tile_color::kDefault));
+  // b264's test switch "head_bar" is not taken over: a bar layout needs its
+  // places, which only the layout window sets up.
+  config.layout = prefs.getUChar("layout", 0);
+  config.head_gear = prefs.getBool("head_gear", false);
+  config.head_clock = prefs.getBool("head_clock", true);
+  config.head_overview = prefs.getBool("head_overview", true);
+  config.head_title[0] = '\0';
+  config.head_icon[0] = '\0';
+  if (prefs.isKey("head_title")) prefs.getString("head_title", config.head_title, sizeof(config.head_title));
+  if (prefs.isKey("head_icon")) prefs.getString("head_icon", config.head_icon, sizeof(config.head_icon));
+  if (config.layout > 2) config.layout = 0;
+  config.theme = prefs.getUChar("theme", 0);
+  if (config.theme > 2) config.theme = 0;
+  config.theme_auto_last = prefs.getUChar("theme_al", 0) == 1 ? 1 : 0;
   bool rot_180 = prefs.getBool("disp_rot180", false);
   uint8_t rot_mode = rot_180 ? kDisplayRotationFlipped : kDisplayRotationNormal;
   if (prefs.isKey("disp_rot_mode")) {
@@ -460,11 +493,15 @@ bool ConfigManager::load() {
     // One-time compatibility path for test builds that wrote the original
     // individual keys. The next successful save replaces them with one
     // checksummed NVS blob.
+    // A panel without any stored access (new, or never changed) starts with
+    // the Settings swipe from the top (user 2026-10-11).
+    const bool stored_access = prefs.isKey("set_pin_en") || prefs.isKey("set_hidden") || prefs.isKey("set_edge");
     config.settings_pin_enabled = prefs.getBool("set_pin_en", false);
     config.settings_tile_hidden = prefs.getBool("set_hidden", false);
-    config.settings_swipe_enabled = config.settings_tile_hidden;
+    config.settings_swipe_enabled = stored_access ? config.settings_tile_hidden : true;
     config.settings_reveal_edge = prefs.getUChar(
-        "set_edge", static_cast<uint8_t>(SettingsRevealEdge::Left));
+        "set_edge", stored_access ? static_cast<uint8_t>(SettingsRevealEdge::Left)
+                                  : swipe_gestures::kDefaultSettingsEdge);
     if (prefs.getBytesLength("set_pin_salt") ==
         sizeof(config.settings_pin_salt)) {
       prefs.getBytes("set_pin_salt", config.settings_pin_salt,
@@ -491,6 +528,12 @@ bool ConfigManager::load() {
     }
   }
 
+  // The other edge swipes; one action per edge, Settings keeps its edge.
+  config.home_swipe_edge = prefs.getUChar("sw_home", swipe_gestures::kDefaultHomeEdge);
+  config.back_swipe_edge = prefs.getUChar("sw_back", swipe_gestures::kEdgeOff);
+  config.screensaver_swipe_edge = prefs.getUChar("sw_saver", swipe_gestures::kEdgeOff);
+  swipe_gestures::normalize(config);
+
   // Keep the access record binary compatible; long titles use an optional key.
   auto& stored_snapshot = config.settings_tile_snapshot;
   const String stored_title = prefs.getString("set_title", "");
@@ -499,6 +542,13 @@ bool ConfigManager::load() {
       stored_title.startsWith(stored_snapshot.title)) {
     stored_title.toCharArray(stored_snapshot.title, sizeof(stored_snapshot.title));
   }
+  // Settings parked per layout (user 2026-10-13: each layout decides). A
+  // panel from before parked it in every layout or in none. The parked
+  // tile's ID keeps its places in the layouts.
+  config.settings_parked = prefs.isKey("set_parked")
+                               ? static_cast<uint8_t>(prefs.getUChar("set_parked", 0) & kSettingsParkedAll)
+                               : (config.settings_tile_hidden ? kSettingsParkedAll : 0);
+  stored_snapshot.view_id = stored_snapshot.valid ? prefs.getUShort("set_view", 0) : 0;
 
   apply_device_capability_limits(config);
   boot_static_enabled = config.wifi_static_enabled;
@@ -528,8 +578,11 @@ bool ConfigManager::load() {
 
   Serial.println("✓ ConfigManager: Configuration loaded");
   Serial.printf("  WiFi SSID: %s\n", config.wifi_ssid);
-  Serial.printf("  MQTT Host: %s:%u\n", config.mqtt_host, config.mqtt_port);
-  Serial.printf("  MQTT User: %s\n", config.mqtt_user);
+  // A panel on the direct link keeps no broker: nothing to show then.
+  if (config.mqtt_host[0]) {
+    Serial.printf("  MQTT Host: %s:%u\n", config.mqtt_host, config.mqtt_port);
+    Serial.printf("  MQTT User: %s\n", config.mqtt_user);
+  }
 
   return true;
 }
@@ -563,10 +616,10 @@ bool ConfigManager::save(const DeviceConfig& cfg) {
       normalize_global_time_format(normalized.global_time_format);
   normalized.global_date_format =
       normalize_global_date_format(normalized.global_date_format);
-  normalized.tile_radius = tile_radius::clamp(normalized.tile_radius);
-  normalized.icon_glow = icon_glow::clamp(normalized.icon_glow);
-  normalized.default_tile_color = tile_color::normalize(normalized.default_tile_color);
-  if (normalized.keyboard_layout > 2) normalized.keyboard_layout = 0;
+  normalized.week_start = calendar_model::normalize_week_start(normalized.week_start);
+  if (normalized.keyboard_layout > 4) normalized.keyboard_layout = 0;
+  if (normalized.theme > 2) normalized.theme = 0;
+  if (normalized.theme_auto_last > 1) normalized.theme_auto_last = 0;
   if (normalized.settings_reveal_edge >
       static_cast<uint8_t>(SettingsRevealEdge::Bottom)) {
     normalized.settings_reveal_edge =
@@ -575,6 +628,7 @@ bool ConfigManager::save(const DeviceConfig& cfg) {
   if (normalized.settings_tile_hidden) {
     normalized.settings_swipe_enabled = true;
   }
+  swipe_gestures::normalize(normalized);
   if (!normalized.settings_pin_enabled ||
       !pin_access::credentialIsSet(normalized.settings_pin_salt,
                                    normalized.settings_pin_hash)) {
@@ -600,9 +654,20 @@ bool ConfigManager::save(const DeviceConfig& cfg) {
   const std::string normalized_title = hometiles_title::normalize(snapshot.title);
   strncpy(snapshot.title, normalized_title.c_str(), sizeof(snapshot.title));
   snapshot.icon_name[sizeof(snapshot.icon_name) - 1] = '\0';
-  if (!snapshot.valid || !tile_geometry::supported(TILE_SETTINGS,
-      snapshot.col, snapshot.row, snapshot.span_w, snapshot.span_h)) {
+  if (!snapshot.valid) {
     clear_settings_tile_snapshot(normalized);
+  } else if (!tile_geometry::supported(TILE_SETTINGS, snapshot.col, snapshot.row,
+                                       snapshot.span_w, snapshot.span_h)) {
+    // A place outside the classic grid (a bar layout's) loses only the
+    // place; its title, icon and ID stay (user 2026-10-22: an upright place,
+    // row 3.5 on the 7 x 4, dropped the whole snapshot and the layout window
+    // lost the parked tile). A restore then looks for a free place.
+    snapshot.col = 0;
+    snapshot.row = 0;
+    if (!tile_geometry::supported(TILE_SETTINGS, 0, 0, snapshot.span_w, snapshot.span_h)) {
+      snapshot.span_w = 1;
+      snapshot.span_h = 1;
+    }
   }
 #if defined(DEVICE_ESP32_S3_RGB_480)
   normalized.auto_screensaver_seconds =
@@ -656,16 +721,21 @@ bool ConfigManager::save(const DeviceConfig& cfg) {
   prefs.putString("tz", normalized.timezone);
   prefs.putUChar("time_fmt", normalized.global_time_format);
   prefs.putUChar("date_fmt", normalized.global_date_format);
+  prefs.putUChar("week_start", normalized.week_start);
   prefs.putUChar("kb_layout", normalized.keyboard_layout);
 
   // Save display and power settings.
   prefs.putUChar("disp_bright", normalized.display_brightness);
   prefs.putUChar("ss_bright", normalized.screensaver_brightness_pct);
   prefs.putBool("tile_border", normalized.tile_borders);
-  prefs.putUShort("tile_radius", normalized.tile_radius);
-  prefs.putBool("icon_disc", normalized.icon_discs);
-  prefs.putUChar("icon_glow", normalized.icon_glow);
-  prefs.putUInt("tile_color", normalized.default_tile_color);
+  prefs.putUChar("layout", normalized.layout);
+  prefs.putBool("head_gear", normalized.head_gear);
+  prefs.putBool("head_clock", normalized.head_clock);
+  prefs.putBool("head_overview", normalized.head_overview);
+  prefs.putString("head_title", normalized.head_title);
+  prefs.putString("head_icon", normalized.head_icon);
+  prefs.putUChar("theme", normalized.theme);
+  prefs.putUChar("theme_al", normalized.theme_auto_last);
   prefs.putBool("eth_mode", normalized.ethernet_enabled);
   prefs.putBool("disp_rot180", normalized.display_rotated_180);
   prefs.putUChar("disp_rot_q", normalized.display_rotation_quarters);
@@ -689,12 +759,17 @@ bool ConfigManager::save(const DeviceConfig& cfg) {
       prefs.putBytes(SETTINGS_ACCESS_KEY, &settings_access,
                      sizeof(settings_access)) == sizeof(settings_access);
   pin_access::secureClear(&settings_access, sizeof(settings_access));
+  prefs.putUChar("sw_home", normalized.home_swipe_edge);
+  prefs.putUChar("sw_back", normalized.back_swipe_edge);
+  prefs.putUChar("sw_saver", normalized.screensaver_swipe_edge);
 
   const char* snapshot_title = normalized.settings_tile_snapshot.valid &&
       strlen(normalized.settings_tile_snapshot.title) >= 32
       ? normalized.settings_tile_snapshot.title : "";
   const bool snapshot_title_written =
       prefs.putString("set_title", snapshot_title) == strlen(snapshot_title);
+  prefs.putUChar("set_parked", normalized.settings_parked & kSettingsParkedAll);
+  prefs.putUShort("set_view", normalized.settings_tile_snapshot.valid ? normalized.settings_tile_snapshot.view_id : 0);
 
   uint16_t sleep_minutes = (normalized.auto_sleep_seconds + 59) / 60;
   if (sleep_minutes == 0) {
@@ -723,7 +798,7 @@ bool ConfigManager::save(const DeviceConfig& cfg) {
 
   Serial.println("✓ ConfigManager: Configuration saved");
   Serial.printf("  WiFi SSID: %s\n", config.wifi_ssid);
-  Serial.printf("  MQTT Host: %s:%u\n", config.mqtt_host, config.mqtt_port);
+  if (config.mqtt_host[0]) Serial.printf("  MQTT Host: %s:%u\n", config.mqtt_host, config.mqtt_port);
 
   return true;
 }
@@ -858,66 +933,63 @@ bool ConfigManager::saveScreensaverTimeout(bool enabled, uint16_t seconds) {
   return true;
 }
 
-bool ConfigManager::saveTileRadius(uint16_t radius) {
-  radius = tile_radius::clamp(radius);
-  if (config.tile_radius == radius) return true;
+// One switch of the head bar (gear, time, overview): stored at once.
+static bool saveHeadSwitch(bool& field, const char* key, bool enabled) {
+  if (field == enabled) return true;
   Device::ScopedStorageWrite storage_write(BatchedNvsWrite::kNeedsDisplayGuard);
   BatchedNvsWrite::Preferences prefs;
   if (!prefs.begin(PREF_NAMESPACE, false)) {
-    Serial.println("ConfigManager: Failed to open tile radius preferences");
+    Serial.printf("ConfigManager: Failed to open preferences for %s\n", key);
     return false;
   }
-  const bool written = prefs.putUShort("tile_radius", radius) == sizeof(radius);
+  const bool written = prefs.putBool(key, enabled) == sizeof(uint8_t);
   const bool committed = BatchedNvsWrite::finish(prefs);
   if (!written || !committed) return false;
-  config.tile_radius = radius;
+  field = enabled;
   return true;
 }
 
-bool ConfigManager::saveIconDiscs(bool enabled) {
-  if (config.icon_discs == enabled) return true;
-  Device::ScopedStorageWrite storage_write(BatchedNvsWrite::kNeedsDisplayGuard);
-  BatchedNvsWrite::Preferences prefs;
-  if (!prefs.begin(PREF_NAMESPACE, false)) {
-    Serial.println("ConfigManager: Failed to open icon disc preferences");
-    return false;
-  }
-  const bool written = prefs.putBool("icon_disc", enabled) == sizeof(uint8_t);
-  const bool committed = BatchedNvsWrite::finish(prefs);
-  if (!written || !committed) return false;
-  config.icon_discs = enabled;
-  return true;
+void ConfigManager::applySettingsParking(uint8_t layout) {
+  config.settings_tile_hidden = layout < 3 && ((config.settings_parked >> layout) & 1);
+  // Parked: the swipe reaches Settings (swipe_gestures.h).
+  if (config.settings_tile_hidden) config.settings_swipe_enabled = true;
+  swipe_gestures::normalize(config);
 }
 
-bool ConfigManager::saveIconGlow(uint8_t percent) {
-  percent = icon_glow::clamp(percent);
-  if (config.icon_glow == percent) return true;
-  Device::ScopedStorageWrite storage_write(BatchedNvsWrite::kNeedsDisplayGuard);
-  BatchedNvsWrite::Preferences prefs;
-  if (!prefs.begin(PREF_NAMESPACE, false)) {
-    Serial.println("ConfigManager: Failed to open icon glow preferences");
-    return false;
-  }
-  const bool written = prefs.putUChar("icon_glow", percent) == sizeof(uint8_t);
-  const bool committed = BatchedNvsWrite::finish(prefs);
-  if (!written || !committed) return false;
-  config.icon_glow = percent;
-  return true;
+bool ConfigManager::saveHeadGear(bool enabled) { return saveHeadSwitch(config.head_gear, "head_gear", enabled); }
+
+bool ConfigManager::saveHeadClock(bool enabled) { return saveHeadSwitch(config.head_clock, "head_clock", enabled); }
+
+bool ConfigManager::saveHeadOverview(bool enabled) {
+  return saveHeadSwitch(config.head_overview, "head_overview", enabled);
 }
 
-bool ConfigManager::saveDefaultTileColor(uint32_t rgb) {
-  rgb = tile_color::normalize(rgb);
-  if (config.default_tile_color == rgb) return true;
+// At most size - 1 bytes, never cutting a UTF-8 character.
+static void copy_utf8(const String& src, char* dst, size_t size) {
+  size_t length = src.length() < size - 1 ? src.length() : size - 1;
+  while (length > 0 && length < src.length() && (static_cast<uint8_t>(src[length]) & 0xC0) == 0x80) --length;
+  memcpy(dst, src.c_str(), length);
+  dst[length] = '\0';
+}
+
+bool ConfigManager::saveHomeHead(const String& title, const String& icon) {
+  char new_title[sizeof(config.head_title)];
+  char new_icon[sizeof(config.head_icon)];
+  copy_utf8(title, new_title, sizeof(new_title));
+  copy_utf8(icon, new_icon, sizeof(new_icon));
+  if (strcmp(new_title, config.head_title) == 0 && strcmp(new_icon, config.head_icon) == 0) return true;
   Device::ScopedStorageWrite storage_write(BatchedNvsWrite::kNeedsDisplayGuard);
   BatchedNvsWrite::Preferences prefs;
   if (!prefs.begin(PREF_NAMESPACE, false)) {
-    Serial.println("ConfigManager: Failed to open tile color preferences");
+    Serial.println("ConfigManager: Failed to open preferences for the home head");
     return false;
   }
-  const bool written = prefs.putUInt("tile_color", rgb) == sizeof(rgb);
+  const bool written = prefs.putString("head_title", new_title) == strlen(new_title) &&
+                       prefs.putString("head_icon", new_icon) == strlen(new_icon);
   const bool committed = BatchedNvsWrite::finish(prefs);
   if (!written || !committed) return false;
-  config.default_tile_color = rgb;
+  memcpy(config.head_title, new_title, sizeof(new_title));
+  memcpy(config.head_icon, new_icon, sizeof(new_icon));
   return true;
 }
 
@@ -936,6 +1008,58 @@ bool ConfigManager::saveTileBorders(bool enabled) {
   if (!BatchedNvsWrite::finish(prefs)) return false;
 
   config.tile_borders = enabled;
+  return true;
+}
+
+bool ConfigManager::saveLayout(uint8_t layout) {
+  if (layout > 2) return false;
+#if defined(DEVICE_ESP32_S3_RGB_480)
+  if (config.layout == layout) return true;
+#endif
+  Device::ScopedStorageWrite storage_write(
+      BatchedNvsWrite::kNeedsDisplayGuard);
+  BatchedNvsWrite::Preferences prefs;
+  if (!prefs.begin(PREF_NAMESPACE, false)) {
+    Serial.println("ConfigManager: Failed to open layout preferences");
+    return false;
+  }
+  prefs.putUChar("layout", layout);
+  if (!BatchedNvsWrite::finish(prefs)) return false;
+
+  config.layout = layout;
+  return true;
+}
+
+bool ConfigManager::saveTheme(uint8_t theme) {
+  if (theme > 2) return false;
+  if (config.theme == theme) return true;
+  Device::ScopedStorageWrite storage_write(
+      BatchedNvsWrite::kNeedsDisplayGuard);
+  BatchedNvsWrite::Preferences prefs;
+  if (!prefs.begin(PREF_NAMESPACE, false)) {
+    Serial.println("ConfigManager: Failed to open theme preferences");
+    return false;
+  }
+  prefs.putUChar("theme", theme);
+  if (!BatchedNvsWrite::finish(prefs)) return false;
+
+  config.theme = theme;
+  return true;
+}
+
+bool ConfigManager::saveThemeAutoLast(uint8_t theme) {
+  theme = theme == 1 ? 1 : 0;
+  if (config.theme_auto_last == theme) return true;
+  Device::ScopedStorageWrite storage_write(BatchedNvsWrite::kNeedsDisplayGuard);
+  BatchedNvsWrite::Preferences prefs;
+  if (!prefs.begin(PREF_NAMESPACE, false)) {
+    Serial.println("ConfigManager: Failed to open automatic theme preferences");
+    return false;
+  }
+  const bool written = prefs.putUChar("theme_al", theme) == sizeof(uint8_t);
+  const bool committed = BatchedNvsWrite::finish(prefs);
+  if (!written || !committed) return false;
+  config.theme_auto_last = theme;
   return true;
 }
 
@@ -1062,13 +1186,16 @@ void ConfigManager::clear() {
   set_timezone_code(config.timezone, sizeof(config.timezone), "berlin");
   config.global_time_format = clock_tile::TIME_FORMAT_AUTO;
   config.global_date_format = clock_tile::DATE_FORMAT_AUTO;
+  config.week_start = calendar_model::kWeekStartAuto;
   config.display_brightness = 200;
   config.screensaver_brightness_pct = kScreensaverBrightnessPctDefault;
   config.tile_borders = true;
-  config.tile_radius = tile_radius::kDefault;
-  config.icon_discs = true;
-  config.icon_glow = icon_glow::kDefault;
-  config.default_tile_color = tile_color::kDefault;
+  config.layout = 0;
+  config.head_gear = false;
+  config.head_clock = true;
+  config.head_overview = true;
+  config.theme = 0;
+  config.theme_auto_last = 0;
   config.display_rotated_180 = false;
   config.display_rotation_quarters = Device::kRotationDefault;
   config.display_rotation_mode = kDisplayRotationNormal;
@@ -1078,9 +1205,14 @@ void ConfigManager::clear() {
   config.status_date_font_size = 24;
   config.settings_pin_enabled = false;
   config.settings_tile_hidden = false;
-  config.settings_swipe_enabled = false;
-  config.settings_reveal_edge =
-      static_cast<uint8_t>(SettingsRevealEdge::Left);
+  config.settings_parked = 0;
+  // New panels (user 2026-10-11): Settings from the top, Home from the
+  // bottom (swipe_gestures.h).
+  config.settings_swipe_enabled = true;
+  config.settings_reveal_edge = swipe_gestures::kDefaultSettingsEdge;
+  config.home_swipe_edge = swipe_gestures::kDefaultHomeEdge;
+  config.back_swipe_edge = swipe_gestures::kEdgeOff;
+  config.screensaver_swipe_edge = swipe_gestures::kEdgeOff;
   pin_access::clearCredential(config.settings_pin_salt,
                               config.settings_pin_hash);
   clear_settings_tile_snapshot(config);

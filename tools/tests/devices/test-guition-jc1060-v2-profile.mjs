@@ -60,7 +60,8 @@ for (const marker of [
   'namespace DeviceGuitionJC1060P470CV2',
   '"guition_jc1060p470c_v2"',
   '"Guition JC1060P470C V2"',
-  'Device::RotationStepMode::FlipOnly,\n    0,\n    0,',
+  // Normal 0, flipped 2 (issue #108: 0/0 left 0/180 without effect).
+  'Device::RotationStepMode::FlipOnly,\n    0,\n    2,',
 ]) {
   requireMarker(v2Header, marker, 'JC1060 V2 device header');
 }

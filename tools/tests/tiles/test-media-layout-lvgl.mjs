@@ -38,12 +38,14 @@ ${fonts}
 #endif
 class String:public std::string{public:using std::string::string;using std::string::operator=;String()=default;String(const std::string&s):std::string(s){}void trim(){auto a=find_first_not_of(" \r\n");if(a==npos){clear();return;}*this=substr(a,find_last_not_of(" \r\n")-a+1);}};
 ${read('src/types/media/widgets.h').replace(/^#.*$/gm,'')}
+${read('src/types/media/tile_layout.h').replace(/^#include.*$/gm,'').replace('#pragma once','')}
 ${read('src/types/media/content_layout.cpp').replace(/^#include.*$/gm,'')}
-${renderer.slice(renderer.indexOf('#if defined(DEVICE_WAVESHARE_4B)'),renderer.indexOf('struct MediaEventData'))}
+${renderer.slice(renderer.indexOf('static constexpr lv_coord_t kMediaControlButtonSize'),renderer.indexOf('struct MediaEventData'))}
 enum class GridType{TAB0,SCREENSAVER};constexpr int TILES_PER_GRID=16;
 using TileType=int;constexpr int TILE_MEDIA=7,GRID_COLS=4,GRID_ROWS=4;
 ${read('src/tiles/config/tile_config.h').match(/static constexpr uint8_t MEDIA_TILE_MIN_SPAN[^]*?(?=\/\/ A media tile must)/)[0]}
-struct Tile{String title,icon_name,sensor_entity;int span_w=2,span_h=2;};
+struct Tile{String title,icon_name,sensor_entity;int span_w=2,span_h=2;int type=TILE_MEDIA;uint8_t sensor_display_mode=0;};
+${read('src/tiles/config/tile_config.h').match(/static inline bool mediaPopupCoverCentered\(const Tile& tile\) \{[^}]*\}/)[0]}
 MediaTileWidgets widgets[16];
 MediaTileWidgets* tile_renderer_get_media_widgets(GridType){return widgets;}
 struct Logger{void println(const char*){}}Serial;
@@ -53,6 +55,8 @@ ${radiusPolicyHost(root)}
 struct Config{bool tile_borders=true;bool icon_discs=true;uint8_t icon_glow=icon_glow::kDefault;int tile_radius=tile_radius::kMinimum;const char*language="en";};struct Manager{Config cfg;const Config&getConfig(){return cfg;}}configManager;
 ${surfaceStyleHost(root)}
 constexpr int GRID_CELL_H=CELL_H,GRID_GAP=GAP;
+#include "src/types/climate/layout.h"
+#include "src/tiles/runtime/tile_press.h"
 ${read('src/tiles/runtime/tile_icon_disc.h').replace(/^#.*$/gm,'')}
 namespace i18n{struct Strings{const char*media_no_playback="No playback";};const Strings&strings(const char*){static Strings s;return s;}}
 uint32_t tileBgColorOrDefault(const Tile&,uint32_t d){return d;}uint32_t tileDefaultBgColor(){return 0x2A2A2A;}
@@ -71,18 +75,37 @@ ${renderer.match(/struct MediaPopupEventData \{[\s\S]*?\n};/)[0]}
 void show_media_popup_event_cb(lv_event_t*){}
 void media_popup_event_data_delete_cb(lv_event_t*e){delete static_cast<MediaPopupEventData*>(lv_event_get_user_data(e));}
 void update_media_tile_state(GridType,uint8_t,const char*){}
+// Previous and next are marked for the popup control press fill; play keeps its white circle.
+int refreshed_controls=0;namespace tile_icon_source{void refresh_controls(lv_obj_t*card){++refreshed_controls;int marked=0;for(uint32_t i=0;i<lv_obj_get_child_count(card);++i)marked+=tile_icon_disc::is_control(lv_obj_get_child(card,i));assert(marked==2);}}
 ${control.slice(0,control.indexOf('  MediaEventData* data'))}return label;}
+// The playing bars (playing_bars.h) and their timer's guards.
+#include "src/types/media/playing_bars.h"
+bool popup_shell_active(){return false;}struct{bool isInSleep()const{return false;}}powerManager;
+${['media_bars_draw_cb','media_bars_timer_cb','media_bars_delete_cb','create_media_bars'].map(name => fn(renderer,name)).join(String.fromCharCode(10))}
+${fn(renderer,'media_tile_icon_name')}
 ${fn(renderer,'render_media_tile')}
 void snapshot(const char*file,const std::vector<uint32_t>&pixels){std::ofstream out(file,std::ios::binary);auto u16=[&](uint16_t v){out.write(reinterpret_cast<char*>(&v),2);};auto u32=[&](uint32_t v){out.write(reinterpret_cast<char*>(&v),4);};out.write("BM",2);u32(54+pixels.size()*4);u32(0);u32(54);u32(40);u32(SCREEN_WIDTH);u32(-SCREEN_HEIGHT);u16(1);u16(32);u32(0);u32(pixels.size()*4);u32(0);u32(0);u32(0);u32(0);out.write(reinterpret_cast<const char*>(pixels.data()),pixels.size()*4);}
 int main(int argc,char**argv){lv_init();auto*display=lv_display_create(SCREEN_WIDTH,SCREEN_HEIGHT);std::vector<uint32_t>pixels(SCREEN_WIDTH*SCREEN_HEIGHT);lv_display_set_color_format(display,LV_COLOR_FORMAT_XRGB8888);lv_display_set_buffers(display,pixels.data(),nullptr,pixels.size()*4,LV_DISPLAY_RENDER_MODE_FULL);lv_display_set_flush_cb(display,[](lv_display_t*d,const lv_area_t*,uint8_t*){lv_display_flush_ready(d);});lv_theme_default_init(display,lv_color_hex(0x26A69A),lv_color_hex(0xC14444),false,&ui_font_20);
  uint8_t min_w=1,min_h=1;clamp_media_tile_span(TILE_MEDIA,min_w,min_h);assert(min_w==2&&min_h==2);min_w=min_h=9;clamp_media_tile_span(TILE_MEDIA,min_w,min_h);assert(min_w==3&&min_h==3);
  int previous=0;
- for(int h=2;h<=4;++h)for(int w=2;w<=4;++w){Tile t;t.span_w=w;t.span_h=h;t.title="Living room player with a very long title";t.sensor_entity="media_player.test";auto*card=render_media_tile(lv_screen_active(),0,0,t,0,GridType::TAB0);auto&m=widgets[0];
+ for(int h=2;h<=4;++h)for(int w=2;w<=4;++w){Tile t;t.span_w=w;t.span_h=h;t.title="Living room player with a very long title";t.sensor_entity="media_player.test";const int refreshed_before=refreshed_controls;auto*card=render_media_tile(lv_screen_active(),0,0,t,0,GridType::TAB0);auto&m=widgets[0];
+  assert(refreshed_controls==refreshed_before+1);lv_obj_t*previous_btn=lv_obj_get_parent(m.previous_label),*next_btn=lv_obj_get_parent(m.next_label),*play_btn=lv_obj_get_parent(m.play_pause_label);
+  assert(tile_icon_disc::is_control(previous_btn)&&tile_icon_disc::is_control(next_btn)&&!tile_icon_disc::is_control(play_btn)&&!tile_icon_disc::is_disc(previous_btn));
+  {lv_style_value_t v;assert(lv_obj_get_local_style_prop(previous_btn,LV_STYLE_BG_OPA,&v,LV_STATE_PRESSED)!=LV_STYLE_RES_FOUND&&"no local press opacity over the shared one");
+   assert(lv_obj_get_local_style_prop(play_btn,LV_STYLE_BG_OPA,&v,LV_STATE_PRESSED)==LV_STYLE_RES_FOUND&&v.num==LV_OPA_COVER);}
   for(bool subtitle:{true,false})for(bool cover:{true,false}){lv_label_set_text(m.media_title_label,"A long song title that scrolls within the space beside its artwork");lv_label_set_text(m.media_subtitle_label,"Artist with a long name");if(subtitle)lv_obj_remove_flag(m.media_subtitle_label,LV_OBJ_FLAG_HIDDEN);else lv_obj_add_flag(m.media_subtitle_label,LV_OBJ_FLAG_HIDDEN);if(cover)lv_obj_remove_flag(m.cover_clip,LV_OBJ_FLAG_HIDDEN);else lv_obj_add_flag(m.cover_clip,LV_OBJ_FLAG_HIDDEN);set_media_cover_text_layout(m,cover);lv_obj_update_layout(card);
    lv_area_t content,art,title,sub,buttons,header;lv_obj_get_content_coords(card,&content);lv_obj_get_coords(m.cover_clip,&art);lv_obj_get_coords(m.media_title_label,&title);lv_obj_get_coords(m.media_subtitle_label,&sub);lv_obj_get_coords(lv_obj_get_parent(m.play_pause_label),&buttons);lv_obj_get_coords(m.title_label,&header);
    assert(art.x2-art.x1==art.y2-art.y1&&lv_obj_get_width(m.cover_clip)<=240);assert(art.y1>header.y2&&art.y2<buttons.y1);assert(title.y1>=art.y1&&title.y2<buttons.y1);assert(title.x2<=content.x2);if(cover)assert(title.x1>art.x2);if(subtitle)assert(sub.y1>title.y2&&sub.y2<buttons.y1&&sub.x1==title.x1);
    if(cover&&subtitle&&w==h){const int side=lv_obj_get_width(m.cover_clip);assert(side>previous);previous=side;std::cout<<w<<"x"<<h<<": cover="<<side<<", title width="<<lv_obj_get_width(m.media_title_label)<<"\n";lv_obj_set_style_bg_color(m.cover_clip,lv_color_hex(0x447D7A),0);lv_obj_set_style_bg_opa(m.cover_clip,LV_OPA_COVER,0);lv_refr_now(display);if(argc>1)snapshot((String(argv[1])+"-"+std::to_string(w)+".bmp").c_str(),pixels);}
   }
+  // The playing bars (2026-10-23) stand over the title in the centred block; with the
+  // artwork and a subtitle the block still fits between the header and the controls.
+  lv_obj_remove_flag(m.cover_clip,LV_OBJ_FLAG_HIDDEN);lv_obj_remove_flag(m.media_subtitle_label,LV_OBJ_FLAG_HIDDEN);
+  lv_obj_remove_flag(m.bars,LV_OBJ_FLAG_HIDDEN);set_media_cover_text_layout(m,true);lv_obj_update_layout(card);
+  {lv_area_t b,ti,su,btn,hd;lv_obj_get_coords(m.bars,&b);lv_obj_get_coords(m.media_title_label,&ti);lv_obj_get_coords(m.media_subtitle_label,&su);
+   lv_obj_get_coords(lv_obj_get_parent(m.play_pause_label),&btn);lv_obj_get_coords(m.title_label,&hd);
+   assert(b.x1==ti.x1&&"the bars start at the title's left edge");assert(b.y2<ti.y1&&"the bars stand over the title");
+   assert(b.y1>hd.y2&&su.y2<btn.y1&&"bars, title and subtitle between the header and the controls");}
   lv_obj_delete(card);widgets[0]={};
  }
  lv_deinit();std::cout<<"Real Media renderer: supported 2..3 by 2..3 geometry, defensive 4-cell layout, 1x1 normalization, long titles, missing values and growing artwork passed\n";

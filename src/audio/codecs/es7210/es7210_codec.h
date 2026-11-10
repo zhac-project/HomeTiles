@@ -1,0 +1,49 @@
+#pragma once
+
+// Minimal ES7210 microphone ADC driver for capture (MIC1/MIC2 on SDOUT1 in
+// standard I2S, no TDM). Register sequence and clock coefficients come from
+// Espressif's esp-bsp es7210 component (see PROVENANCE.md); registers go
+// through codec_bus, the board's transport.
+//
+// The ADC runs as I2S slave with MCLK from the MCLK pin at 256 x fs.
+// Not thread-safe: one task (the speaker worker) owns the handle.
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include <esp_err.h>
+
+#include "src/audio/codecs/codec_bus.h"
+
+namespace es7210 {
+
+// 7-bit address with AD0 and AD1 low (Waveshare 7B: 0x40).
+constexpr uint8_t kDefaultAddress = 0x40;
+// MCLK the I2S peripheral must provide: kMclkMultiple x sample rate.
+constexpr uint32_t kMclkMultiple = 256;
+
+struct Codec {
+  codec_bus::Device dev;
+};
+
+// True for the sample rates the clock table covers at 256 x fs (16 kHz).
+bool supportsSampleRate(uint32_t sample_rate);
+
+// Attaches the device and reads the chip ID registers 0x3D/0x3E; an answer
+// counts as present. On failure the device is detached again. id_out
+// (optional) receives 0x3D << 8 | 0x3E.
+esp_err_t probe(uint8_t address, Codec* codec, uint16_t* id_out);
+// Mic gain steps of the MIC1-4 gain registers (es7210_mic_gain_t): 0..10 =
+// 0..30 dB in 3 dB steps, then 33, 34.5, 36 and 37.5 dB.
+constexpr uint8_t kMaxGainStep = 14;
+constexpr uint8_t kDefaultGainStep = 10;  // 30 dB
+
+// Resets the ADC and configures 16-bit standard I2S slave capture at
+// sample_rate (MCLK = 256 x rate), mic bias 2.87 V and the mic gain step.
+esp_err_t init(Codec* codec, uint32_t sample_rate, uint8_t gain_step = kDefaultGainStep);
+// Changes the mic gain of a running ADC.
+esp_err_t setGain(Codec* codec, uint8_t gain_step);
+// Detaches the device.
+void release(Codec* codec);
+
+}  // namespace es7210

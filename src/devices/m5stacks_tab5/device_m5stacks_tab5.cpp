@@ -4,13 +4,16 @@
 
 #if defined(DEVICE_M5STACKS_TAB5)
 
+#include <cstring>
 #include <driver/ppa.h>
 #include <esp_cache.h>
 #include <esp_heap_caps.h>
+#include <esp_lcd_mipi_dsi.h>
 #include <soc/ppa_reg.h>
 
 #include "src/core/display/dma2d_arbiter.h"
 #include "src/devices/common/p4_dsi_camera_presenter.h"
+#include "src/devices/common/p4_dsi_cpu_rotate.h"
 #include <LittleFS.h>
 #include <M5Unified.h>
 #include <SD.h>
@@ -54,6 +57,10 @@ uint32_t g_sd_retry_tick_ms = 0;
 bool g_littlefs_ready = false;
 uint8_t g_brightness = 150;
 uint8_t g_rotation = DeviceM5StacksTab5::kProfile.rotation_default;
+// The upright layout (grid_layout.h): the UI is drawn into the panel in its
+// own orientation, 720 x 1280, without the quarter turn. M5GFX keeps its
+// landscape rotation, so its touch stays landscape (DisplayManager turns it).
+bool g_upright = false;
 
 // The Tab5 backlight driver keeps running when the level is lowered to 1%, but
 // it does not start from off at such a low duty: waking at 1% left the display
@@ -128,6 +135,26 @@ void flush_cache_for_dma(const void* ptr, size_t size) {
   esp_cache_msync(reinterpret_cast<void*>(aligned_start),
                   aligned_end - aligned_start,
                   ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+}
+
+// After a PPA write: drops the cached panel framebuffer lines of the area, so
+// a later CPU write next to it (p4_dsi_cpu_rotate.h) cannot write stale
+// pixels back over the PPA's result through a shared cache line (the V2's
+// and 8-inch's ppa_writer sync). One call over the whole span, like the V2's
+// syncFramebufferSpan: one call per row took 1280 calls for every 28-line
+// landscape band, about 300 ms per folder switch (b322). The other lines in
+// the span are clean too: CPU writes are written back at once.
+void invalidate_panel_rect(int32_t x, int32_t y, int32_t w, int32_t h) {
+  if (!g_panel_fb || w <= 0 || h <= 0) return;
+  const uintptr_t start =
+      reinterpret_cast<uintptr_t>(g_panel_fb + static_cast<size_t>(y) * kPanelWidth + x);
+  const uintptr_t end = reinterpret_cast<uintptr_t>(
+      g_panel_fb + static_cast<size_t>(y + h - 1) * kPanelWidth + x + w);
+  const uintptr_t aligned_start = start & ~(kCacheLineSize - 1);
+  const uintptr_t aligned_end = (end + kCacheLineSize - 1) & ~(kCacheLineSize - 1);
+  esp_cache_msync(reinterpret_cast<void*>(aligned_start), aligned_end - aligned_start,
+                  ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_INVALIDATE |
+                      ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
 }
 
 bool ppa_cooldown_active() {
@@ -339,8 +366,8 @@ bool init_display() {
 
 bool rect_inside_logical_bounds(int32_t x, int32_t y, int32_t w, int32_t h) {
   return x >= 0 && y >= 0 && w > 0 && h > 0 &&
-         (x + w) <= kLogicalWidth &&
-         (y + h) <= kLogicalHeight;
+         (x + w) <= (g_upright ? kPanelWidth : kLogicalWidth) &&
+         (y + h) <= (g_upright ? kPanelHeight : kLogicalHeight);
 }
 
 bool ppa_rotate_to_panel(int32_t x, int32_t y, int32_t w, int32_t h,
@@ -402,9 +429,14 @@ bool ppa_rotate_to_panel(int32_t x, int32_t y, int32_t w, int32_t h,
 
   int32_t dst_x = 0;
   int32_t dst_y = 0;
-  const int32_t dst_w = h;
-  const int32_t dst_h = w;
-  if (g_rotation & 0x02) {
+  // Upright: the area keeps its shape, straight or turned by 180 into the
+  // mirrored place.
+  const int32_t dst_w = g_upright ? w : h;
+  const int32_t dst_h = g_upright ? h : w;
+  if (g_upright) {
+    dst_x = (g_rotation & 0x02) ? kPanelWidth - x - w : x;
+    dst_y = (g_rotation & 0x02) ? kPanelHeight - y - h : y;
+  } else if (g_rotation & 0x02) {
     dst_x = y;
     dst_y = kLogicalWidth - x - w;
   } else {
@@ -450,8 +482,10 @@ bool ppa_rotate_to_panel(int32_t x, int32_t y, int32_t w, int32_t h,
   oper.out.block_offset_y = dst_y;
   oper.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
 
-  oper.rotation_angle = (g_rotation & 0x02) ? PPA_SRM_ROTATION_ANGLE_90
-                                            : PPA_SRM_ROTATION_ANGLE_270;
+  oper.rotation_angle = g_upright ? ((g_rotation & 0x02) ? PPA_SRM_ROTATION_ANGLE_180
+                                                         : PPA_SRM_ROTATION_ANGLE_0)
+                       : (g_rotation & 0x02) ? PPA_SRM_ROTATION_ANGLE_90
+                                             : PPA_SRM_ROTATION_ANGLE_270;
   oper.scale_x = 1.0f;
   oper.scale_y = 1.0f;
   oper.rgb_swap = false;
@@ -479,6 +513,7 @@ bool ppa_rotate_to_panel(int32_t x, int32_t y, int32_t w, int32_t h,
                     static_cast<long>(w), static_cast<long>(h),
                     static_cast<long>(dst_x), static_cast<long>(dst_y));
       g_ppa_consecutive_faults = 0;
+      invalidate_panel_rect(dst_x, dst_y, dst_w, dst_h);
       return true;
     }
     // IDF 5.5 cannot cancel a submitted SRM transaction. Returning here
@@ -490,6 +525,7 @@ bool ppa_rotate_to_panel(int32_t x, int32_t y, int32_t w, int32_t h,
         kPpaRotateTimeoutMs + kPpaWedgeGraceMs);
   }
   g_ppa_consecutive_faults = 0;
+  invalidate_panel_rect(dst_x, dst_y, dst_w, dst_h);
   return true;
 }
 
@@ -500,11 +536,100 @@ void push_pixels_with_ppa_fallback(int32_t x, int32_t y, int32_t w, int32_t h,
     return;
   }
 
+  // Upright: straight (or 180) into the panel framebuffer, bytes swapped
+  // like the PPA does; M5GFX would turn it for its landscape rotation.
+  if (g_upright) {
+    if (!g_panel_fb) return;
+    const bool flipped = (g_rotation & 0x02) != 0;
+    p4_dsi_cpu_rotate::copy_into(g_panel_fb, kPanelWidth, kPanelWidth, kPanelHeight, x, y, w, h, data, flipped, true);
+    const int32_t dst_x = flipped ? kPanelWidth - x - w : x;
+    const int32_t dst_y = flipped ? kPanelHeight - y - h : y;
+    for (int32_t row = 0; row < h; ++row) {
+      flush_cache_for_dma(g_panel_fb + static_cast<size_t>(dst_y + row) * kPanelWidth + dst_x,
+                          static_cast<size_t>(w) * sizeof(uint16_t));
+    }
+    return;
+  }
+
+  // Landscape areas below the PPA's width: turned by the CPU straight into
+  // the panel framebuffer, bytes swapped, at the PPA's places (the V2's and
+  // 8-inch's way, p4_dsi_cpu_rotate.h) instead of through M5GFX. Each touched
+  // row is written back for the DMA (a sync over the whole span measured
+  // slower on the V2).
+  if (g_panel_fb) {
+    const bool flipped = (g_rotation & 0x02) != 0;
+    const int32_t dst_x = flipped ? y : kLogicalHeight - y - h;
+    const int32_t dst_y = flipped ? kLogicalWidth - x - w : x;
+    p4_dsi_cpu_rotate::rotate_into(g_panel_fb, kPanelWidth, dst_x, dst_y, w, h, data, flipped, true);
+    for (int32_t row = 0; row < w; ++row) {
+      flush_cache_for_dma(g_panel_fb + static_cast<size_t>(dst_y + row) * kPanelWidth + dst_x,
+                          static_cast<size_t>(h) * sizeof(uint16_t));
+    }
+    return;
+  }
+
   if (dma) {
     M5.Display.pushImageDMA(x, y, w, h, data);
   } else {
     M5.Display.pushImage(x, y, w, h, data);
   }
+}
+
+// Camera full screen (#65): the Bridge's frames, 720 x 1280 and already in
+// the panel's orientation, go from the JPEG decoder straight into the one
+// framebuffer M5GFX scans (it has no second one); a copy of the UI comes back
+// afterwards. Each decode starts right after a panel refresh: the decoder
+// fills the framebuffer (about 11 ms) faster than the panel reads it (about
+// 16 ms), so the scan stays behind it and shows no half frame.
+uint16_t* g_full_ui_copy = nullptr;
+bool g_full_active = false;
+SemaphoreHandle_t g_full_refresh = nullptr;
+bool g_full_refresh_tried = false;
+
+// M5GFX keeps its DPI panel handle protected and registers no DPI callbacks.
+struct PanelDsiAccess : lgfx::Panel_DSI {
+  static esp_lcd_panel_handle_t handle(lgfx::Panel_DSI* panel) {
+    return panel ? panel->*(&PanelDsiAccess::_disp_panel_handle) : nullptr;
+  }
+};
+
+bool IRAM_ATTR on_full_refresh_done(esp_lcd_panel_handle_t, esp_lcd_dpi_panel_event_data_t*,
+                                    void* user_ctx) {
+  SemaphoreHandle_t sem = static_cast<SemaphoreHandle_t>(user_ctx);
+  if (!sem) return false;
+  BaseType_t high_task_woken = pdFALSE;
+  xSemaphoreGiveFromISR(sem, &high_task_woken);
+  return high_task_woken == pdTRUE;
+}
+
+// Once: the refresh signal. Without it the frames still show, maybe torn.
+void ensure_full_refresh_signal() {
+  if (g_full_refresh_tried) return;
+  g_full_refresh_tried = true;
+  auto* panel = static_cast<lgfx::Panel_DSI*>(M5.Display.getPanel());
+  const esp_lcd_panel_handle_t handle = PanelDsiAccess::handle(panel);
+  SemaphoreHandle_t sem = xSemaphoreCreateBinary();
+  esp_err_t err = ESP_ERR_INVALID_STATE;
+  if (handle && sem) {
+    esp_lcd_dpi_panel_event_callbacks_t cbs = {};
+    cbs.on_refresh_done = on_full_refresh_done;
+    err = esp_lcd_dpi_panel_register_event_callbacks(handle, &cbs, sem);
+  }
+  if (err == ESP_OK) {
+    g_full_refresh = sem;
+  } else if (sem) {
+    vSemaphoreDelete(sem);
+  }
+  Serial.printf("[Device/M5StacksTab5] Full screen refresh signal: %s\n",
+                err == ESP_OK ? "ready" : "unavailable, frames may tear");
+}
+
+void sync_panel_fb(bool memory_to_cache) {
+  esp_cache_msync(g_panel_fb, kPanelFrameBytes,
+                  memory_to_cache
+                      ? (ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_INVALIDATE |
+                         ESP_CACHE_MSYNC_FLAG_TYPE_DATA)
+                      : (ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA));
 }
 
 }  // namespace
@@ -573,6 +698,73 @@ bool DeviceM5StacksTab5::displayTryFullFramePreview(
       x, y, w, h, source_stride, data, byte_swap);
 }
 
+bool DeviceM5StacksTab5::displayFullFrameInfo(uint16_t& width, uint16_t& height,
+                                              uint16_t& turn_cw) {
+  if (!g_display_ready || !g_panel_fb) return false;
+  width = static_cast<uint16_t>(kPanelWidth);
+  height = static_cast<uint16_t>(kPanelHeight);
+  // ppa_rotate_to_panel()'s counter-clockwise turns, clockwise.
+  if (g_upright) {
+    turn_cw = (g_rotation & 0x02) ? 180 : 0;
+  } else {
+    turn_cw = (g_rotation & 0x02) ? 270 : 90;
+  }
+  return true;
+}
+
+bool DeviceM5StacksTab5::displayBeginFullFrames() {
+  if (!g_display_ready || !g_panel_fb) return false;
+  if (g_full_active) return true;
+  ensure_full_refresh_signal();
+  if (!g_full_ui_copy) {
+    g_full_ui_copy = static_cast<uint16_t*>(
+        heap_caps_aligned_alloc(kCacheLineSize, kPanelFrameBytes, MALLOC_CAP_SPIRAM));
+  }
+  if (!g_full_ui_copy) {
+    Serial.println("[Device/M5StacksTab5] Full screen: no memory for the UI copy");
+    return false;
+  }
+  // The UI as the panel scans it (PPA writes reach memory only), then black.
+  sync_panel_fb(true);
+  std::memcpy(g_full_ui_copy, g_panel_fb, kPanelFrameBytes);
+  std::memset(g_panel_fb, 0, kPanelFrameBytes);
+  sync_panel_fb(false);
+  g_full_active = true;
+  Serial.println("[Device/M5StacksTab5] Full screen: UI kept, screen black");
+  return true;
+}
+
+uint16_t* DeviceM5StacksTab5::displayAcquireFullFrame(size_t& bytes) {
+  bytes = 0;
+  if (!g_full_active || !g_panel_fb) return nullptr;
+  if (g_full_refresh) {
+    // A refresh that already passed does not count: start with the next one.
+    xSemaphoreTake(g_full_refresh, 0);
+    xSemaphoreTake(g_full_refresh, pdMS_TO_TICKS(40));
+  }
+  bytes = kPanelFrameBytes;
+  return g_panel_fb;
+}
+
+bool DeviceM5StacksTab5::displaySubmitFullFrame() {
+  if (!g_full_active || !g_panel_fb) return false;
+  // The decoder wrote memory: no stale CPU line may stand for its pixels.
+  sync_panel_fb(true);
+  return true;
+}
+
+void DeviceM5StacksTab5::displayEndFullFrames() {
+  if (!g_full_active) return;
+  g_full_active = false;
+  if (g_full_ui_copy && g_panel_fb) {
+    std::memcpy(g_panel_fb, g_full_ui_copy, kPanelFrameBytes);
+    sync_panel_fb(false);
+  }
+  heap_caps_free(g_full_ui_copy);
+  g_full_ui_copy = nullptr;
+  Serial.println("[Device/M5StacksTab5] Full screen ended: UI back");
+}
+
 void DeviceM5StacksTab5::displayWaitDMA() {
   if (!g_display_ready) {
     return;
@@ -600,6 +792,11 @@ void DeviceM5StacksTab5::displaySetRotation(uint8_t rotation) {
 
   M5.Display.waitDMA();
   M5.Display.setRotation(to_panel_rotation(g_rotation));
+}
+
+void DeviceM5StacksTab5::displaySetUpright(bool upright) {
+  g_upright = upright;
+  Serial.printf("[Device/M5StacksTab5] UI %s\n", upright ? "upright (no quarter turn)" : "landscape");
 }
 
 void DeviceM5StacksTab5::setBrightness(uint8_t value) {
@@ -847,13 +1044,11 @@ void DeviceM5StacksTab5::migrateStorageFromSD() {
 
   LittleFS.mkdir("/_tile_grids");
   LittleFS.mkdir("/_tile_links");
-  LittleFS.mkdir("/icons");
 
   if (initSDCard()) {
     Serial.println("[Storage] Migrating data from SD to LittleFS...");
     copyDirectory(SD, LittleFS, "/_tile_grids");
     copyDirectory(SD, LittleFS, "/_tile_links");
-    copyDirectory(SD, LittleFS, "/icons");
     Serial.println("[Storage] Migration complete");
   } else {
     Serial.println("[Storage] No SD card, starting fresh");

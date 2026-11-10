@@ -47,8 +47,21 @@
   function isScreensaverTileTab(tab) {
     return tab === 'screensaver';
   }
-  function firstAllowedGridRow(tab) {
-    return isScreensaverTileTab(tab) ? Math.max(0, GRID_ROWS - 2) : 0;
+  // The first of the screensaver's rows at the bottom of a layout's screen
+  // with `rows` rows: two, three upright (screensaver_places::first_row).
+  function screensaverFirstRow(key, rows) {
+    return Math.max(0, rows - (key === 'portrait' ? 3 : 2));
+  }
+  function firstAllowedGridRow(tab, classic = false) {
+    // The screensaver's two rows at the bottom of the shown grid, three
+    // upright (screensaver_places.cpp); in the layout window at the bottom
+    // of that layout's screen; for an import's classic places at the bottom
+    // of the stored grid.
+    if (!isScreensaverTileTab(tab)) return 0;
+    if (classic) return Math.max(0, GRID_ROWS - 2);
+    const inWindow = typeof layoutWindow !== 'undefined' && layoutWindow;
+    const key = inWindow ? layoutWindow.key : typeof ACTIVE_LAYOUT === 'string' ? ACTIVE_LAYOUT : 'classic';
+    return screensaverFirstRow(key, inWindow ? LAYOUTS[key].rows : placeRows(tab));
   }
   function restoreCurrentTileSelectionUi() {
     if (currentTileIndex === -1 || !currentTileTab) return;
@@ -88,7 +101,6 @@
 
   function syncFolderFragmentWithRoot(tabEl) {
     if (!tabEl) return;
-    syncTileRadiusControls(tabEl);
     syncGlobalDisplayControls(tabEl);
 
     const sourceBorderToggle = Array.from(
@@ -109,7 +121,7 @@
       .map(button => {
         const folderId = Number(button.dataset.folderId);
         if (!Number.isInteger(folderId) || folderId <= 0) return null;
-        const buttonLabel = button.querySelector('span')?.textContent || '';
+        const buttonLabel = button.querySelector('.tab-label')?.textContent || '';
         return {
           value: String(folderId),
           label: String(button.dataset.folderName || buttonLabel ||
@@ -157,12 +169,8 @@
       buttonTpl.innerHTML = String(data.button_html || '').trim();
       buttonEl = buttonTpl.content.firstElementChild;
       if (!buttonEl) return false;
-      const navButtons = Array.from(nav.querySelectorAll('.tab-btn'));
-      const fixedBtn = navButtons.find(
-        btn => btn.dataset.tabTarget === 'tab-tiles-screensaver') ||
-        navButtons.find(btn => btn.dataset.tabTarget === 'tab-network');
-      if (fixedBtn) nav.insertBefore(buttonEl, fixedBtn);
-      else nav.appendChild(buttonEl);
+      // Folders go after the others in the folder row.
+      (document.getElementById('folderTabs') || nav).appendChild(buttonEl);
     }
 
     const expectedTabId = String(
@@ -188,6 +196,8 @@
     const screensaverTab = document.getElementById('tab-tiles-screensaver');
     networkTab.parentNode.insertBefore(tabEl, screensaverTab || networkTab);
     syncFolderFragmentWithRoot(tabEl);
+    // Markup kept from before a page change shows the pages as they are now.
+    if (typeof syncPageHeads === 'function') syncPageHeads();
     associateFieldLabels(tabEl);
 
     initTileTabs();
@@ -215,6 +225,16 @@
         ensureNavigateTargetOption(
           folderNum, formatFolderLabel(name, folderNum));
       }
+      return true;
+    }
+    // A known folder whose page is not loaded yet: its tab takes the name
+    // and icon at once, its page loads (fresh) when it is opened. Loading it
+    // here held the tab back until the panel had built the page.
+    if ((name !== null || icon !== null) && !folderTabLoadPromises[folderNum] &&
+        document.querySelector('.folder-tab-btn[data-folder-id="' + folderNum + '"]')) {
+      updateFolderTabUi(folderNum, name || '', icon || '');
+      ensureNavigateTargetOption(folderNum, formatFolderLabel(name, folderNum));
+      forgetFolderTabSessionFragment(folderNum);
       return true;
     }
     if (folderTabLoadPromises[folderNum]) {
@@ -255,4 +275,63 @@
     } finally {
       delete folderTabLoadPromises[folderNum];
     }
+  }
+
+  // Folder tabs not opened yet are prefetched one at a time while the Web
+  // Admin is idle, so a later click opens them at once. The device answers
+  // from its UI loop, so the prefetch waits for a quiet editor, leaves a short
+  // gap between requests and stops at the first failure.
+  const FOLDER_TAB_PREFETCH_IDLE_MS = 2500;
+  const FOLDER_TAB_PREFETCH_STEP_MS = 150;
+  let folderTabPrefetchTimer = null;
+  let folderTabPrefetchStopped = false;
+  let lastAdminInteractionMs = Date.now();
+
+  function noteAdminInteraction() {
+    lastAdminInteractionMs = Date.now();
+  }
+
+  function scheduleFolderTabPrefetch(delayMs = FOLDER_TAB_PREFETCH_IDLE_MS) {
+    if (folderTabPrefetchStopped || folderTabPrefetchTimer) return;
+    folderTabPrefetchTimer = window.setTimeout(runFolderTabPrefetch, delayMs);
+  }
+
+  function nextFolderTabToPrefetch() {
+    for (const key of Object.keys(tabByFolder)) {
+      const folderId = Number(key);
+      if (!Number.isInteger(folderId) || folderId <= 0) continue;
+      const tab = tabByFolder[folderId];
+      if (!document.getElementById('tab-tiles-' + tab)) {
+        return { folderId, tab, step: 'tab' };
+      }
+      if (!tileDataLoadedTabs.has(tab)) return { folderId, tab, step: 'tiles' };
+    }
+    return null;
+  }
+
+  async function runFolderTabPrefetch() {
+    folderTabPrefetchTimer = null;
+    if (folderTabPrefetchStopped) return;
+    const idleMs = Date.now() - lastAdminInteractionMs;
+    if (document.hidden || dragSource || resizeState || fileManagerUploadBusy ||
+        idleMs < FOLDER_TAB_PREFETCH_IDLE_MS) {
+      scheduleFolderTabPrefetch(Math.max(
+        FOLDER_TAB_PREFETCH_STEP_MS, FOLDER_TAB_PREFETCH_IDLE_MS - idleMs));
+      return;
+    }
+    const next = nextFolderTabToPrefetch();
+    if (!next) return;
+    let ok = false;
+    try {
+      ok = next.step === 'tab'
+        ? await ensureFolderTabUi(next.folderId)
+        : Array.isArray(await fetchTileGridData(next.tab, false));
+    } catch (error) {
+      ok = false;
+    }
+    if (!ok) {
+      folderTabPrefetchStopped = true;
+      return;
+    }
+    scheduleFolderTabPrefetch(FOLDER_TAB_PREFETCH_STEP_MS);
   }

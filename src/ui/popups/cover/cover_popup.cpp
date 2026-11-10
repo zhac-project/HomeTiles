@@ -11,16 +11,22 @@
 #include "src/ui/popups/camera/camera_popup.h"
 #include "src/ui/popups/pin/pin_popup.h"
 #include "src/ui/popups/climate/climate_popup.h"
+#include "src/ui/popups/device/device_popup.h"
+#include "src/ui/popups/vacuum/vacuum_popup.h"
+#include "src/ui/popups/calendar/calendar_popup.h"
 #include "src/ui/popups/energy/energy_popup.h"
 #include "src/ui/popups/light/light_popup.h"
 #include "src/ui/popups/media/media_popup.h"
 #include "src/ui/popups/popup_layout.h"
+#include "src/ui/popups/popup_nav_style.h"
 #include "src/ui/popups/popup_surface.h"
 #include "src/ui/popups/sensor/sensor_popup.h"
 #include "src/ui/popups/weather/weather_popup.h"
 
 #include <cmath>
 #include <cstring>
+#include "src/ui/shared/ui_theme.h"
+#include "src/ui/shared/value_unit.h"
 
 namespace {
 
@@ -49,7 +55,10 @@ struct CoverPopupContext {
   CoverState state;
   CoverPopupMode mode = CoverPopupMode::Position;
   // Card color of the last opening; state updates never change it.
-  uint32_t card_color = popup_surface::kDefaultCard;
+  uint32_t card_color = popup_surface::default_card();
+  // The state color of icon, sliders and buttons (cover_accent): the cover
+  // color (kHaCoverActive) or the inactive grey.
+  uint32_t accent = 0x926BC7;
   CoverChannel dragging_channel = CoverChannel::None;
   CoverChannel protected_channel = CoverChannel::None;
   lv_obj_t* overlay = nullptr;
@@ -58,6 +67,7 @@ struct CoverPopupContext {
   lv_obj_t* icon_label = nullptr;
   lv_obj_t* title_label = nullptr;
   lv_obj_t* top_value_label = nullptr;
+  lv_obj_t* top_value_unit = nullptr;  // value_unit.h
   lv_obj_t* main_panel = nullptr;
   lv_obj_t* position_panel = nullptr;
   lv_obj_t* controls_panel = nullptr;
@@ -82,10 +92,6 @@ struct CoverPopupContext {
   lv_obj_t* controls_mode_icon = nullptr;
   bool suppress_events = false;
   bool user_dragging = false;
-  uint32_t last_live_publish_ms = 0;
-  lv_timer_t* live_publish_timer = nullptr;
-  CoverChannel pending_live_publish_channel = CoverChannel::None;
-  bool live_publish_pending = false;
   uint32_t block_remote_until_ms = 0;
   lv_timer_t* remote_apply_timer = nullptr;
   CoverPopupInit pending_remote_init;
@@ -123,9 +129,9 @@ constexpr int kActionButtonGapRaw =
 constexpr int kActionButtonGap =
     kActionButtonGapRaw > 0 ? kActionButtonGapRaw : 0;
 constexpr uint32_t kRemoteBlockMs = 1500;
-constexpr uint32_t kLivePublishIntervalMs = 500;
 constexpr uint32_t kHaCoverActive = 0x926BC7;
-constexpr uint32_t kHaCoverInactive = 0x9E9E9E;
+// A closed cover: the resting grey of the theme (ui_theme::icon_rest).
+inline uint32_t ha_cover_inactive() { return ui_theme::icon_rest(); }
 
 bool has_feature(const CoverPopupContext* ctx, uint8_t feature) {
   return ctx && (ctx->state.supported_features & feature) != 0;
@@ -166,11 +172,22 @@ bool horizontal_cover(const CoverPopupContext* ctx) {
          ctx->device_class == "door" || ctx->device_class == "gate";
 }
 
+// Like the tile (cover renderer cover_icon_active): closed stays in the
+// active color, only unknown and unavailable turn grey.
 bool cover_icon_is_active(const CoverState& state) {
   return state.valid && state.available &&
          strcmp(state.state, "unknown") != 0 &&
-         strcmp(state.state, "unavailable") != 0 &&
-         strcmp(state.state, "closed") != 0;
+         strcmp(state.state, "unavailable") != 0;
+}
+
+// Home Assistant colors the whole Cover by its state (stateColorCss: icon,
+// sliders and buttons alike): the cover color for every known state, the
+// inactive grey for unknown and unavailable, like the tile's icon and bar
+// (cover renderer cover_icon_color: unavailable is the theme's one
+// unavailable grey, so header, sliders and buttons match the tile).
+uint32_t cover_accent(const CoverState& state) {
+  if (state.valid && !state.available) return ui_theme::unavailable_icon(ha_cover_inactive());
+  return cover_icon_is_active(state) ? kHaCoverActive : ha_cover_inactive();
 }
 
 void set_hidden(lv_obj_t* obj, bool hidden) {
@@ -275,16 +292,19 @@ void update_top_value(CoverPopupContext* ctx) {
                                    : String("unavailable");
   String text = i18n::cover_state_label(
       configManager.getConfig().language, display_state);
+  // The position's percent a step smaller after it (value_unit.h, user
+  // 2026-10-26).
+  String unit;
   if (ctx->state.has_position) {
     text += "  \xC2\xB7  ";
     text += String(ctx->state.position);
-    text += "%";
+    unit = "%";
   } else if (ctx->state.has_tilt_position) {
     text += "  \xC2\xB7  ";
     text += String(ctx->state.tilt_position);
-    text += "%";
+    unit = "%";
   }
-  lv_label_set_text(ctx->top_value_label, text.c_str());
+  value_unit::show(ctx->top_value_label, ctx->top_value_unit, text, unit);
 }
 
 int slider_center_y_for_value(uint8_t value) {
@@ -366,17 +386,29 @@ void update_tilt_handle(CoverPopupContext* ctx) {
                  center_y - kVerticalSliderRadius);
 }
 
+// The buttons follow the sliders (user 2026-10-01): the circle step of the
+// state color, whether the cover is open or closed (popup_nav_style::fill
+// with cover_accent, the tile's circle options).
+void cover_fill(uint32_t card_color, uint32_t accent, lv_color_t& color, lv_opa_t& opa) {
+  popup_nav_style::fill(popup_surface::card(card_color), lv_color_hex(accent), color, opa);
+}
+
+// The selected position chip and a pressed one show the cover fill.
 void update_preset_group(lv_obj_t* const* buttons, bool enabled,
-                         bool has_value, uint8_t value) {
+                         bool has_value, uint8_t value, uint32_t card_color,
+                         uint32_t accent) {
   if (!buttons) return;
+  lv_color_t fill;
+  lv_opa_t opa;
+  cover_fill(card_color, accent, fill, opa);
   for (size_t i = 0; i < kPresetCount; ++i) {
     lv_obj_t* button = buttons[i];
     if (!button) continue;
     const bool active = has_value && value == kPresetValues[i];
     set_disabled(button, !enabled);
-    lv_obj_set_style_bg_color(button, lv_color_white(), 0);
-    lv_obj_set_style_bg_opa(button,
-                            active ? LV_OPA_20 : LV_OPA_TRANSP, 0);
+    popup_nav_style::set_bg(button, fill, active ? opa : static_cast<lv_opa_t>(LV_OPA_TRANSP), LV_PART_MAIN);
+    popup_nav_style::set_bg(button, fill, opa, LV_PART_MAIN | LV_STATE_PRESSED);
+    popup_nav_style::no_press_filter(button, LV_PART_MAIN | LV_STATE_PRESSED);
   }
 }
 
@@ -401,10 +433,10 @@ void update_position_ui(CoverPopupContext* ctx) {
   update_position_fill(ctx);
   update_tilt_handle(ctx);
   update_preset_group(ctx->position_presets, enabled && show_position,
-                      ctx->state.has_position, ctx->state.position);
+                      ctx->state.has_position, ctx->state.position, ctx->card_color, ctx->accent);
   update_preset_group(ctx->tilt_presets, enabled && show_tilt,
                       ctx->state.has_tilt_position,
-                      ctx->state.tilt_position);
+                      ctx->state.tilt_position, ctx->card_color, ctx->accent);
 }
 
 void update_controls_ui(CoverPopupContext* ctx) {
@@ -481,20 +513,22 @@ void update_controls_ui(CoverPopupContext* ctx) {
   set_icon(ctx->tilt_open_icon, "arrow-top-right");
 }
 
+// The selected mode button and a pressed one show the cover fill.
 void style_mode_button(lv_obj_t* button, lv_obj_t* icon, bool active,
-                       bool enabled, uint32_t card_color) {
+                       bool enabled, uint32_t card_color, uint32_t accent) {
   if (!button) return;
-  const lv_opa_t normal_opa =
-      enabled && active ? LV_OPA_20 : LV_OPA_TRANSP;
-  lv_obj_set_style_bg_color(button, lv_color_white(), 0);
-  lv_obj_set_style_bg_opa(button, normal_opa, 0);
-  lv_obj_set_style_bg_color(button, lv_color_white(), LV_STATE_PRESSED);
-  lv_obj_set_style_bg_opa(
-      button, enabled ? LV_OPA_20 : LV_OPA_TRANSP, LV_STATE_PRESSED);
+  lv_color_t fill;
+  lv_opa_t opa;
+  cover_fill(card_color, accent, fill, opa);
+  popup_nav_style::set_bg(button, fill, enabled && active ? opa : static_cast<lv_opa_t>(LV_OPA_TRANSP),
+                          LV_PART_MAIN);
+  popup_nav_style::set_bg(button, fill, enabled ? opa : static_cast<lv_opa_t>(LV_OPA_TRANSP),
+                          LV_PART_MAIN | LV_STATE_PRESSED);
+  popup_nav_style::no_press_filter(button, LV_PART_MAIN | LV_STATE_PRESSED);
   if (icon) {
     lv_obj_set_style_text_color(
         icon,
-        enabled ? lv_color_white()
+        enabled ? lv_color_hex(ui_theme::text())
                 : popup_surface::lighter(card_color, popup_surface::kDisabled),
         0);
   }
@@ -507,11 +541,29 @@ void style_mode_buttons(CoverPopupContext* ctx) {
   style_mode_button(ctx->position_mode_button, ctx->position_mode_icon,
                     ctx->mode == CoverPopupMode::Position &&
                         position_available,
-                    position_available, ctx->card_color);
+                    position_available, ctx->card_color, ctx->accent);
   style_mode_button(ctx->controls_mode_button, ctx->controls_mode_icon,
                     ctx->mode == CoverPopupMode::Controls &&
                         controls_available,
-                    controls_available, ctx->card_color);
+                    controls_available, ctx->card_color, ctx->accent);
+}
+
+// Arrows and stop rest on the cover fill; a press shows one more step
+// (popup_nav_style::fill_raised). Only a change touches their style.
+void style_action_buttons(CoverPopupContext* ctx) {
+  if (!ctx) return;
+  lv_color_t fill, raised;
+  lv_opa_t opa, raised_opa;
+  cover_fill(ctx->card_color, ctx->accent, fill, opa);
+  popup_nav_style::fill_raised(popup_surface::card(ctx->card_color), lv_color_hex(ctx->accent), raised,
+                               raised_opa);
+  for (lv_obj_t* button : {ctx->main_open_button, ctx->main_close_button, ctx->tilt_close_button,
+                           ctx->tilt_open_button, ctx->stop_button}) {
+    if (!button) continue;
+    popup_nav_style::set_bg(button, fill, opa, LV_PART_MAIN);
+    popup_nav_style::set_bg(button, raised, raised_opa, LV_PART_MAIN | LV_STATE_PRESSED);
+    popup_nav_style::no_press_filter(button, LV_PART_MAIN | LV_STATE_PRESSED);
+  }
 }
 
 void update_mode_visibility(CoverPopupContext* ctx) {
@@ -535,22 +587,34 @@ void update_mode_visibility(CoverPopupContext* ctx) {
   set_hidden(ctx->position_mode_button, !show_mode_switch);
   set_hidden(ctx->controls_mode_button, !show_mode_switch);
   style_mode_buttons(ctx);
+  style_action_buttons(ctx);
+}
+
+// The tracks are created once in the cover color; a state color change
+// recolors them and the buttons (preset chips follow in update_position_ui).
+void apply_accent(CoverPopupContext* ctx, uint32_t accent) {
+  if (!ctx || ctx->accent == accent) return;
+  ctx->accent = accent;
+  for (lv_obj_t* track : {ctx->position_slider.track, ctx->tilt_slider.track}) {
+    if (track) lv_obj_set_style_bg_color(track, lv_color_hex(accent), 0);
+  }
+  style_mode_buttons(ctx);
+  style_action_buttons(ctx);
 }
 
 void refresh_popup(CoverPopupContext* ctx) {
   if (!ctx) return;
+  apply_accent(ctx, cover_accent(ctx->state));
   update_top_value(ctx);
   update_position_ui(ctx);
   update_controls_ui(ctx);
   update_mode_visibility(ctx);
   if (ctx->icon_label) {
-    lv_obj_set_style_text_color(
-        ctx->icon_label,
-        lv_color_hex(cover_icon_is_active(ctx->state)
-                         ? kHaCoverActive
-                         : kHaCoverInactive),
-        0);
+    lv_obj_set_style_text_color(ctx->icon_label, lv_color_hex(ctx->accent), 0);
   }
+  // The header's arrow pulses while the Cover moves, like the tile; before
+  // the shell shows (an opening) the show paths call it again.
+  popup_shell_pulse_icon(ctx->card, cover_state_moving(ctx->state));
 }
 
 void apply_init(CoverPopupContext* ctx, const CoverPopupInit& init) {
@@ -657,22 +721,6 @@ void publish_action(CoverPopupContext* ctx, const char* command,
   }
 }
 
-void cancel_live_publish(CoverPopupContext* ctx) {
-  if (!ctx) return;
-  if (ctx->live_publish_timer) {
-    lv_timer_delete(ctx->live_publish_timer);
-    ctx->live_publish_timer = nullptr;
-  }
-  ctx->live_publish_pending = false;
-  ctx->pending_live_publish_channel = CoverChannel::None;
-}
-
-bool can_live_publish(const CoverPopupContext* ctx) {
-  return ctx && ctx->user_dragging && ctx->state.available &&
-         ctx->entity_id.length() && ctx->card &&
-         !lv_obj_has_flag(ctx->card, LV_OBJ_FLAG_HIDDEN);
-}
-
 void publish_channel_value(CoverPopupContext* ctx, CoverChannel channel) {
   if (!ctx || channel == CoverChannel::None) return;
   publish_action(ctx,
@@ -680,47 +728,6 @@ void publish_channel_value(CoverPopupContext* ctx, CoverChannel channel) {
                      ? "set_cover_position"
                      : "set_cover_tilt_position",
                  channel_value(ctx, channel), channel);
-}
-
-void live_publish_timer_cb(lv_timer_t* timer) {
-  CoverPopupContext* ctx =
-      static_cast<CoverPopupContext*>(lv_timer_get_user_data(timer));
-  if (!ctx) return;
-  if (ctx->live_publish_timer == timer) {
-    ctx->live_publish_timer = nullptr;
-  }
-  if (!ctx->live_publish_pending) return;
-  const CoverChannel channel = ctx->pending_live_publish_channel;
-  ctx->live_publish_pending = false;
-  ctx->pending_live_publish_channel = CoverChannel::None;
-  if (!can_live_publish(ctx)) return;
-  publish_channel_value(ctx, channel);
-  ctx->last_live_publish_ms = millis();
-}
-
-void schedule_live_publish(CoverPopupContext* ctx, CoverChannel channel) {
-  if (!can_live_publish(ctx) || channel == CoverChannel::None) return;
-  const uint32_t now = millis();
-  const uint32_t elapsed = now - ctx->last_live_publish_ms;
-  if (ctx->last_live_publish_ms == 0 ||
-      elapsed >= kLivePublishIntervalMs) {
-    cancel_live_publish(ctx);
-    publish_channel_value(ctx, channel);
-    ctx->last_live_publish_ms = now;
-    return;
-  }
-
-  ctx->pending_live_publish_channel = channel;
-  ctx->live_publish_pending = true;
-  if (ctx->live_publish_timer) return;
-  ctx->live_publish_timer = lv_timer_create(
-      live_publish_timer_cb, kLivePublishIntervalMs - elapsed, ctx);
-  if (ctx->live_publish_timer) {
-    lv_timer_set_repeat_count(ctx->live_publish_timer, 1);
-    return;
-  }
-  ctx->live_publish_pending = false;
-  ctx->pending_live_publish_channel = CoverChannel::None;
 }
 
 void on_preset(lv_event_t* event) {
@@ -746,23 +753,15 @@ void on_preset(lv_event_t* event) {
       return;
     }
 
-    const uint8_t value = kPresetValues[i];
-    set_channel_value(ctx, channel, value);
-    update_top_value(ctx);
-    if (channel == CoverChannel::Position) {
-      update_position_fill(ctx);
-    } else {
-      update_tilt_handle(ctx);
-    }
-    update_preset_group(
-        channel == CoverChannel::Position ? ctx->position_presets
-                                          : ctx->tilt_presets,
-        true, true, value);
+    // A preset only sends, like the open and close buttons: the slider keeps
+    // showing the reported position and follows the cover on its way, like
+    // Home Assistant. Only a slider the finger moves shows its own value
+    // (user 2026-10-02: the slider jumped to the preset and back).
     publish_action(ctx,
                    channel == CoverChannel::Position
                        ? "set_cover_position"
                        : "set_cover_tilt_position",
-                   value, channel);
+                   kPresetValues[i]);
     return;
   }
 }
@@ -813,20 +812,22 @@ void apply_slider_point(CoverPopupContext* ctx, CoverChannel channel,
     update_preset_group(
         channel == CoverChannel::Position ? ctx->position_presets
                                           : ctx->tilt_presets,
-        true, true, value);
+        true, true, value, ctx->card_color, ctx->accent);
   }
-  schedule_live_publish(ctx, channel);
 }
 
 void commit_slider(CoverPopupContext* ctx, CoverChannel channel) {
+  // The position or tilt goes out once, on release, like Home Assistant's
+  // cover sliders (ha-state-control-cover-position: value-changed only).
+  // Commands while dragging restart a motor every time, and a Cover that
+  // answers each command at once (a template without state) reported the
+  // target early.
   if (!ctx || channel == CoverChannel::None) return;
-  cancel_live_publish(ctx);
   update_preset_group(
       channel == CoverChannel::Position ? ctx->position_presets
                                         : ctx->tilt_presets,
-      true, channel_has_value(ctx, channel), channel_value(ctx, channel));
+      true, channel_has_value(ctx, channel), channel_value(ctx, channel), ctx->card_color, ctx->accent);
   publish_channel_value(ctx, channel);
-  ctx->last_live_publish_ms = millis();
 }
 
 void on_slider_track(lv_event_t* event) {
@@ -884,7 +885,7 @@ void on_position_slider_draw(lv_event_t* event) {
   lv_draw_rect_dsc_t fill;
   lv_draw_rect_dsc_init(&fill);
   fill.base.layer = layer;
-  fill.bg_color = lv_color_hex(kHaCoverActive);
+  fill.bg_color = lv_color_hex(ctx->accent);
   fill.bg_opa = LV_OPA_COVER;
   fill.border_opa = LV_OPA_TRANSP;
   fill.radius = kVerticalSliderRadius;
@@ -984,7 +985,6 @@ void on_delete(lv_event_t* event) {
   if (lv_event_get_code(event) != LV_EVENT_DELETE) return;
   CoverPopupContext* ctx = static_cast<CoverPopupContext*>(
       lv_event_get_user_data(event));
-  cancel_live_publish(ctx);
   cancel_deferred_remote_apply(ctx);
   if (g_ctx == ctx) g_ctx = nullptr;
   delete ctx;
@@ -994,9 +994,9 @@ lv_obj_t* create_action_button(lv_obj_t* parent, const char* icon_name,
                                lv_obj_t** icon_out) {
   lv_obj_t* button = lv_button_create(parent);
   lv_obj_set_size(button, kActionButtonSize, kActionButtonSize);
-  lv_obj_set_style_bg_color(button, lv_color_white(), 0);
+  lv_obj_set_style_bg_color(button, lv_color_hex(ui_theme::icon()), 0);
   lv_obj_set_style_bg_opa(button, LV_OPA_10, 0);
-  lv_obj_set_style_bg_color(button, lv_color_white(), LV_STATE_PRESSED);
+  lv_obj_set_style_bg_color(button, lv_color_hex(ui_theme::icon()), LV_STATE_PRESSED);
   lv_obj_set_style_bg_opa(button, LV_OPA_20, LV_STATE_PRESSED);
   lv_obj_set_style_radius(button, LV_RADIUS_CIRCLE, 0);
   lv_obj_set_style_radius(button, LV_RADIUS_CIRCLE, LV_STATE_PRESSED);
@@ -1021,7 +1021,7 @@ lv_obj_t* create_action_button(lv_obj_t* parent, const char* icon_name,
   lv_obj_t* icon = lv_label_create(button);
   lv_obj_set_style_text_font(icon, FONT_MDI_ICONS, 0);
   popup_layout::applyIconScale(icon);
-  lv_obj_set_style_text_color(icon, lv_color_white(), 0);
+  lv_obj_set_style_text_color(icon, lv_color_hex(ui_theme::text()), 0);
   lv_label_set_text(icon, getMdiChar(icon_name).c_str());
   lv_obj_center(icon);
   if (icon_out) *icon_out = icon;
@@ -1033,7 +1033,7 @@ lv_obj_t* create_mode_button(lv_obj_t* parent, const char* icon_name,
   lv_obj_t* button = lv_button_create(parent);
   lv_obj_set_size(button, kModeButtonSize, kModeButtonSize);
   lv_obj_set_style_radius(button, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_bg_color(button, lv_color_white(), 0);
+  lv_obj_set_style_bg_color(button, lv_color_hex(ui_theme::icon()), 0);
   lv_obj_set_style_bg_opa(button, LV_OPA_TRANSP, 0);
   lv_obj_set_style_border_width(button, 0, 0);
   lv_obj_set_style_pad_all(button, 0, 0);
@@ -1046,7 +1046,7 @@ lv_obj_t* create_mode_button(lv_obj_t* parent, const char* icon_name,
   lv_obj_t* icon = lv_label_create(button);
   lv_obj_set_style_text_font(icon, FONT_MDI_ICONS, 0);
   popup_layout::applyIconScale(icon);
-  lv_obj_set_style_text_color(icon, lv_color_white(), 0);
+  lv_obj_set_style_text_color(icon, lv_color_hex(ui_theme::text()), 0);
   lv_label_set_text(icon, getMdiChar(icon_name).c_str());
   lv_obj_center(icon);
   if (icon_out) *icon_out = icon;
@@ -1134,9 +1134,9 @@ void create_preset_buttons(CoverPopupContext* ctx,
                  place_left ? LV_ALIGN_LEFT_MID : LV_ALIGN_RIGHT_MID,
                  0, offset_y);
     lv_obj_set_style_radius(button, kPresetButtonHeight / 2, 0);
-    lv_obj_set_style_bg_color(button, lv_color_white(), 0);
+    lv_obj_set_style_bg_color(button, lv_color_hex(ui_theme::icon()), 0);
     lv_obj_set_style_bg_opa(button, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_bg_color(button, lv_color_white(), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(button, lv_color_hex(ui_theme::icon()), LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(button, LV_OPA_20, LV_STATE_PRESSED);
     lv_obj_set_style_border_width(button, 0, 0);
     lv_obj_set_style_border_width(button, 0, LV_STATE_PRESSED);
@@ -1157,7 +1157,7 @@ void create_preset_buttons(CoverPopupContext* ctx,
 
     lv_obj_t* label = lv_label_create(button);
     lv_obj_set_style_text_font(label, popup_layout::font24(), 0);
-    lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(ui_theme::text()), 0);
     lv_label_set_text(label, kPresetLabels[i]);
     lv_obj_center(label);
     lv_obj_add_event_cb(button, on_preset, LV_EVENT_CLICKED, ctx);
@@ -1189,6 +1189,7 @@ void apply_card_color(CoverPopupContext* ctx, uint32_t bg_color) {
         popup_surface::lighter(color, popup_surface::kDisabled), 0);
   }
   style_mode_buttons(ctx);
+  style_action_buttons(ctx);
   if (ctx->position_slider.track) {
     lv_obj_invalidate(ctx->position_slider.track);
   }
@@ -1204,6 +1205,7 @@ static void finish_cover_popup_open(const CoverPopupInit& init) {
 // While open, the popup follows its tile's current background (a rules tint
 // that changes with the entity state); tile_icon_source calls this.
 void cover_popup_follow_tile_color(uint32_t color) {
+  const ui_theme::SurfaceScope popup_scope = popup_surface::theme_scope();
   CoverPopupContext* ctx = g_ctx;
   if (!ctx || !ctx->card || lv_obj_has_flag(ctx->card, LV_OBJ_FLAG_HIDDEN)) return;
   apply_card_color(ctx, color);
@@ -1217,8 +1219,8 @@ static void prepare_cover_popup_open(const CoverPopupInit& init) {
   hometiles_title::set(ctx->title_label, init.title.c_str());
   set_hidden(ctx->icon_label, !init.icon_visible);
   lv_label_set_text(ctx->icon_label, getMdiChar(init.icon_name).c_str());
-  lv_obj_set_style_text_color(ctx->icon_label,
-      lv_color_hex(cover_icon_is_active(init.state) ? kHaCoverActive : kHaCoverInactive), 0);
+  apply_accent(ctx, cover_accent(init.state));
+  lv_obj_set_style_text_color(ctx->icon_label, lv_color_hex(ctx->accent), 0);
   if (!defer_popup_body(ctx->card, ctx->title_label, ctx->icon_label,
                         ctx->close_button, init, finish_cover_popup_open,
                         ctx->entity_id == init.entity_id))
@@ -1226,6 +1228,7 @@ static void prepare_cover_popup_open(const CoverPopupInit& init) {
 }
 
 void show_cover_popup(const CoverPopupInit& init) {
+  const ui_theme::SurfaceScope popup_scope = popup_surface::theme_scope();
   hide_pin_popup();
   if (!init.entity_id.length()) return;
   hide_light_popup();
@@ -1234,6 +1237,9 @@ void show_cover_popup(const CoverPopupInit& init) {
   hide_weather_popup();
   hide_energy_popup();
   hide_media_popup();
+  hide_device_popup();
+  hide_vacuum_popup();
+  hide_calendar_popup();
   hide_camera_popup();
 
   if (g_ctx && g_ctx->overlay && g_ctx->card) {
@@ -1248,6 +1254,7 @@ void show_cover_popup(const CoverPopupInit& init) {
 
     if (g_ctx && g_ctx->card) viewNavigationPopupShown(g_ctx->card, init.entity_id.c_str());
     show_popup_shell(g_ctx->overlay, g_ctx->card, g_ctx->title_label, g_ctx->icon_label, g_ctx->close_button);
+    popup_shell_pulse_icon(g_ctx->card, cover_state_moving(init.state));
     return;
   }
 
@@ -1277,12 +1284,13 @@ void show_cover_popup(const CoverPopupInit& init) {
   lv_obj_clear_flag(value_box, LV_OBJ_FLAG_SCROLLABLE);
 
   ctx->top_value_label = lv_label_create(value_box);
+  ctx->top_value_unit = nullptr;
   lv_obj_set_width(ctx->top_value_label, LV_PCT(100));
   lv_obj_set_height(ctx->top_value_label, popup_layout::kValueHeight);
   lv_obj_set_style_text_align(ctx->top_value_label, LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_set_style_text_font(ctx->top_value_label,
                              popup_layout::font40(), 0);
-  lv_obj_set_style_text_color(ctx->top_value_label, lv_color_white(), 0);
+  lv_obj_set_style_text_color(ctx->top_value_label, lv_color_hex(ui_theme::text()), 0);
   lv_obj_set_style_translate_y(
       ctx->top_value_label, popup_layout::kLargeValueTextOffsetY, 0);
 
@@ -1383,9 +1391,11 @@ void show_cover_popup(const CoverPopupInit& init) {
 
   if (g_ctx && g_ctx->card) viewNavigationPopupShown(g_ctx->card, init.entity_id.c_str());
   show_popup_shell(g_ctx->overlay, g_ctx->card, g_ctx->title_label, g_ctx->icon_label, g_ctx->close_button);
+  popup_shell_pulse_icon(g_ctx->card, cover_state_moving(init.state));
 }
 
 void update_cover_popup(const CoverPopupInit& init) {
+  const ui_theme::SurfaceScope popup_scope = popup_surface::theme_scope();
   if (!g_ctx || !g_ctx->card || !g_ctx->overlay) return;
   if (lv_obj_has_flag(g_ctx->card, LV_OBJ_FLAG_HIDDEN)) return;
   if (!g_ctx->entity_id.equalsIgnoreCase(init.entity_id)) return;
@@ -1400,6 +1410,7 @@ void update_cover_popup(const CoverPopupInit& init) {
 }
 
 void preload_cover_popup() {
+  const ui_theme::SurfaceScope popup_scope = popup_surface::theme_scope();
   if (g_ctx && g_ctx->overlay && g_ctx->card) return;
   CoverPopupInit init;
   init.entity_id = "__preload__";
@@ -1424,7 +1435,6 @@ void hide_cover_popup() {
   g_ctx->dragging_channel = CoverChannel::None;
   g_ctx->protected_channel = CoverChannel::None;
   g_ctx->block_remote_until_ms = 0;
-  cancel_live_publish(g_ctx);
   cancel_deferred_remote_apply(g_ctx);
   hide_popup_shell(g_ctx->card);
   cancel_popup_open(g_ctx->card);

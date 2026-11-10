@@ -1,10 +1,12 @@
 #include "src/devices/common/p4_dsi_camera_presenter.h"
+#include "src/devices/common/p4_dsi_cpu_rotate.h"
 
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
 
 #include <Arduino.h>
 #include <cstring>
 #include <esp_cache.h>
+#include <esp_heap_caps.h>
 #include <freertos/task.h>
 
 #include "src/core/hardware/board_hal.h"
@@ -73,21 +75,54 @@ bool rectInside(int32_t x, int32_t y, int32_t w, int32_t h,
   }
 }
 
+// A turned layout's transform: the other one than the driver's own (a panel
+// upright by itself shows its upright UI straight, a landscape panel and the
+// JC4880 in landscape a quarter turned).
+static Transform turned(Transform own) {
+  return own == Transform::Portrait90Or270 ? Transform::Native0Or180 : Transform::Portrait90Or270;
+}
+
 bool Presenter::init(const Config& config, esp_lcd_panel_handle_t panel,
                      SemaphoreHandle_t refresh_done,
                      uint16_t* framebuffer0, uint16_t* framebuffer1) {
   config_ = config;
+  own_transform_ = config.transform;
+  if (upright_) config_.transform = turned(own_transform_);
   panel_ = panel;
   refresh_done_ = refresh_done;
   framebuffers_[0] = framebuffer0;
   framebuffers_[1] = framebuffer1;
   active_index_ = 0;
   double_buffer_active_ = false;
+  refresh_pending_ = false;
   fault_cooldown_until_ms_ = 0;
   resetMirrorDirty();
   ready_ = panel_ && refresh_done_ && framebuffers_[0] && framebuffers_[1] &&
            config_.panel_width > 0 && config_.panel_height > 0;
   return ready_;
+}
+
+void Presenter::setUpright(bool upright) {
+  upright_ = upright;
+  config_.transform = upright ? turned(own_transform_) : own_transform_;
+  Serial.printf("[CameraDisplay/%s] UI %s\n", config_.device_name ? config_.device_name : "P4",
+                upright ? "turned against the driver's own" : "the driver's own");
+}
+
+bool Presenter::drawUpright(int32_t x, int32_t y, int32_t w, int32_t h,
+                            const uint16_t* data, uint8_t rotation) {
+  uint16_t* framebuffer = activeFramebuffer();
+  if (!framebuffer || !data ||
+      !rectInside(x, y, w, h, config_.panel_width, config_.panel_height)) {
+    return false;
+  }
+  const bool flipped = (rotation & 0x02U) != 0;
+  const int32_t dst_x = flipped ? config_.panel_width - x - w : x;
+  const int32_t dst_y = flipped ? config_.panel_height - y - h : y;
+  p4_dsi_cpu_rotate::copy_into(framebuffer, config_.panel_width, config_.panel_width,
+                               config_.panel_height, x, y, w, h, data, flipped);
+  return flushFramebufferRect(framebuffer, dst_x, dst_y, w, h) &&
+         noteUiWrite(dst_x, dst_y, w, h, false);
 }
 
 size_t Presenter::framebufferBytes() const {
@@ -194,16 +229,24 @@ bool Presenter::noteUiWrite(int32_t x, int32_t y, int32_t w, int32_t h,
   return true;
 }
 
-bool Presenter::begin() {
+bool Presenter::begin(bool covers_panel) {
   if (double_buffer_active_) return true;
+  finishPendingSwap();
   uint16_t* active = activeFramebuffer();
   uint16_t* inactive = inactiveFramebuffer();
-  if (!active || !inactive ||
-      !syncFramebufferSpan(active, 0, 0, config_.panel_width,
-                           config_.panel_height, true)) {
-    return false;
+  if (!active || !inactive) return false;
+  // A partial frame (a camera stream) lands on a copy of the UI. A frame
+  // that fills the panel (the screensaver, each opening and slide) replaces
+  // every pixel, and the 2 MB copy before it cost the V2 tens of ms (b307).
+  if (!covers_panel) {
+    if (!syncFramebufferSpan(active, 0, 0, config_.panel_width,
+                             config_.panel_height, true)) {
+      return false;
+    }
+    std::memcpy(inactive, active, framebufferBytes());
   }
-  std::memcpy(inactive, active, framebufferBytes());
+  // Written back either way: no dirty CPU line of the inactive framebuffer
+  // may be evicted over the PPA result later.
   if (!syncCache(inactive, framebufferBytes(), false)) return false;
   resetMirrorDirty();
   double_buffer_active_ = true;
@@ -272,6 +315,23 @@ bool Presenter::waitRefreshDone() const {
   return false;
 }
 
+void Presenter::finishPendingSwap() {
+  if (!refresh_pending_) return;
+  // The refresh after the swap request is usually long over by the next
+  // camera frame, so this rarely waits. It keeps the rule that nothing
+  // writes into a framebuffer the panel may still scan.
+  if (!waitRefreshDone()) {
+    // The driver accepted the swap but did not confirm which framebuffer is
+    // now scanned. Writing into the guessed inactive one could tear the live
+    // picture, so restart with the pipeline quarantined.
+    restartAfterDisplayTimeout(
+        config_.device_name, "DSI framebuffer refresh", 0, 0,
+        config_.panel_width, config_.panel_height, config_.panel_width, 0,
+        kRefreshTimeoutMs);
+  }
+  refresh_pending_ = false;
+}
+
 [[noreturn]] void Presenter::restartAfterTimeout(
     int32_t x, int32_t y, int32_t w, int32_t h, int32_t source_stride,
     uint8_t rotation) const {
@@ -285,7 +345,8 @@ bool Presenter::present(int32_t x, int32_t y, int32_t w, int32_t h,
                         int32_t source_stride, const uint16_t* data,
                         size_t data_size, bool byte_swap, uint8_t rotation,
                         const PpaRuntime& runtime) {
-  if (!ready_ || !data || source_stride < w || h <= 0 ||
+  // Full-screen frames own both framebuffers until endFullFrames().
+  if (!ready_ || full_frames_ || !data || source_stride < w || h <= 0 ||
       (reinterpret_cast<uintptr_t>(data) & (kCacheLineSize - 1U)) != 0 ||
       !runtime.handle || !runtime.done || !runtime.async_ready ||
       runtime.reset_pending || runtime.cooldown_active ||
@@ -334,9 +395,21 @@ bool Presenter::present(int32_t x, int32_t y, int32_t w, int32_t h,
     return false;
   }
 
+  // The previous frame's swap must be scanned before the now inactive
+  // framebuffer is written again.
+  finishPendingSwap();
   Dma2dArbiterGuard dma2d_guard(kDma2dLockTimeoutMs);
   if (!dma2d_guard.locked()) return false;
-  if (!begin() || !syncUiToInactive()) {
+  const bool covers_panel = dst_x == 0 && dst_y == 0 &&
+                            dst_w == config_.panel_width &&
+                            dst_h == config_.panel_height;
+  bool synced = begin(covers_panel);
+  if (synced && covers_panel) {
+    resetMirrorDirty();  // UI changes since the last frame are overwritten.
+  } else if (synced) {
+    synced = syncUiToInactive();
+  }
+  if (!synced) {
     Serial.printf("[CameraDisplay/%s] Framebuffer synchronization failed\n",
                   config_.device_name ? config_.device_name : "P4");
     noteFault(runtime);
@@ -420,25 +493,166 @@ bool Presenter::present(int32_t x, int32_t y, int32_t w, int32_t h,
   }
   // The IDF refresh callback is a continuous VSYNC/frame-end signal, not a
   // one-shot completion owned by draw_bitmap(). Discard every boundary that
-  // happened before or during the draw call, then wait for the next one after
-  // the driver accepted the new framebuffer selection.
+  // happened before or during the draw call; the next one after this point
+  // confirms the new framebuffer. The UI loop does not wait for it here (up
+  // to one refresh, about 15 ms at 68.6 Hz): UI writes go to the new
+  // framebuffer at once, which the panel shows from that refresh on, and the
+  // next present() or end() waits before the old one is written again.
   drainRefreshSignal();
-  if (!waitRefreshDone()) {
-    // The driver accepted the swap but did not confirm which framebuffer is
-    // now scanned. Continuing with a guessed active index can make UI and PPA
-    // write into the live scanout buffer concurrently.
-    dma2d_guard.detach();
-    restartAfterDisplayTimeout(
-        config_.device_name, "DSI framebuffer refresh", dst_x, dst_y, dst_w,
-        dst_h, config_.panel_width, rotation, kRefreshTimeoutMs);
-  }
   active_index_ ^= 1U;
+  refresh_pending_ = true;
   noteSuccess(runtime);
   return true;
 }
 
+// The Bridge sends full frames in multiples of 16 (the JPEG blocks). The
+// frame keeps the panel's width (the decoder writes whole framebuffer rows);
+// a height like 600 becomes 592, centred, the rows around it black. The top
+// row starts on a cache line, as the decoder's output must.
+bool Presenter::fullFrameRows(int32_t& top, int32_t& rows) const {
+  top = 0;
+  rows = 0;
+  if (config_.panel_width <= 0 || config_.panel_width % 16 != 0) return false;
+  rows = config_.panel_height - config_.panel_height % 16;
+  if (rows <= 0) return false;
+  const size_t row_bytes = static_cast<size_t>(config_.panel_width) * sizeof(uint16_t);
+  top = (config_.panel_height - rows) / 2;
+  while (top > 0 && (static_cast<size_t>(top) * row_bytes) % kCacheLineSize != 0) --top;
+  return true;
+}
+
+bool Presenter::fullFrameInfo(uint8_t rotation, uint16_t& width,
+                              uint16_t& height, uint16_t& turn_cw) const {
+  int32_t top = 0;
+  int32_t rows = 0;
+  if (!ready_ || !fullFrameRows(top, rows)) return false;
+  width = static_cast<uint16_t>(config_.panel_width);
+  height = static_cast<uint16_t>(rows);
+  // present() turns frames by the PPA's counter-clockwise angle: 90 CCW is
+  // 270 clockwise, 270 CCW is 90 clockwise.
+  if (config_.transform == Transform::Portrait90Or270) {
+    turn_cw = (rotation & 0x02U) ? 270 : 90;
+  } else {
+    turn_cw = (rotation & 0x02U) ? 180 : 0;
+  }
+  return true;
+}
+
+bool Presenter::swapTo(uint16_t* framebuffer) {
+  const esp_err_t swap_err = esp_lcd_panel_draw_bitmap(
+      panel_, 0, 0, config_.panel_width, config_.panel_height, framebuffer);
+  if (swap_err != ESP_OK) {
+    Serial.printf("[CameraDisplay/%s] DSI framebuffer swap failed: %d\n",
+                  config_.device_name ? config_.device_name : "P4",
+                  static_cast<int>(swap_err));
+    return false;
+  }
+  // As in present(): the next refresh after this point shows the new one.
+  drainRefreshSignal();
+  active_index_ ^= 1U;
+  refresh_pending_ = true;
+  return true;
+}
+
+bool Presenter::beginFullFrames() {
+  if (!ready_) return false;
+  if (full_frames_) return true;
+  finishPendingSwap();
+  uint16_t* active = activeFramebuffer();
+  uint16_t* inactive = inactiveFramebuffer();
+  const size_t bytes = framebufferBytes();
+  if (!active || !inactive) return false;
+  if (!ui_copy_) {
+    ui_copy_ = static_cast<uint16_t*>(
+        heap_caps_aligned_alloc(kCacheLineSize, bytes, MALLOC_CAP_SPIRAM));
+  }
+  if (!ui_copy_) {
+    Serial.printf("[CameraDisplay/%s] Full screen: no memory for the UI copy\n",
+                  config_.device_name ? config_.device_name : "P4");
+    return false;
+  }
+  // The UI as the panel scans it, like begin() (PPA writes reach memory only).
+  bool ok = syncCache(active, bytes, true);
+  if (ok) {
+    std::memcpy(ui_copy_, active, bytes);
+    // Black at once until the first full frame: the inactive framebuffer
+    // cleared, written back, shown (b318's enlarged popup frame was smaller
+    // than the full frame and stood still; the user prefers black).
+    std::memset(inactive, 0, bytes);
+    ok = syncCache(inactive, bytes, false) && swapTo(inactive);
+  }
+  if (!ok) {
+    heap_caps_free(ui_copy_);
+    ui_copy_ = nullptr;
+    return false;
+  }
+  double_buffer_active_ = true;
+  resetMirrorDirty();
+  full_frames_ = true;
+  Serial.printf("[CameraDisplay/%s] Full screen: UI kept, screen black\n",
+                config_.device_name ? config_.device_name : "P4");
+  return true;
+}
+
+uint16_t* Presenter::acquireFullFrame(size_t& bytes) {
+  bytes = 0;
+  int32_t top = 0;
+  int32_t rows = 0;
+  if (!ready_ || !full_frames_ || !fullFrameRows(top, rows)) return nullptr;
+  // The decoder may only write a framebuffer the panel no longer scans.
+  finishPendingSwap();
+  uint16_t* framebuffer = inactiveFramebuffer();
+  if (!framebuffer) return nullptr;
+  // The rows the frame does not cover stay black (this framebuffer may
+  // still hold the UI there).
+  const size_t row_pixels = static_cast<size_t>(config_.panel_width);
+  const int32_t bottom = top + rows;
+  if (top > 0) {
+    std::memset(framebuffer, 0, static_cast<size_t>(top) * row_pixels * sizeof(uint16_t));
+  }
+  if (bottom < config_.panel_height) {
+    std::memset(framebuffer + static_cast<size_t>(bottom) * row_pixels, 0,
+                static_cast<size_t>(config_.panel_height - bottom) * row_pixels * sizeof(uint16_t));
+  }
+  if ((top > 0 || bottom < config_.panel_height) &&
+      !syncCache(framebuffer, framebufferBytes(), false)) {
+    return nullptr;
+  }
+  bytes = static_cast<size_t>(rows) * row_pixels * sizeof(uint16_t);
+  return framebuffer + static_cast<size_t>(top) * row_pixels;
+}
+
+bool Presenter::submitFullFrame() {
+  if (!ready_ || !full_frames_) return false;
+  uint16_t* frame = inactiveFramebuffer();
+  // The decoder wrote memory: no stale CPU line may stand for its pixels.
+  if (!frame || !syncCache(frame, framebufferBytes(), true)) return false;
+  return swapTo(frame);
+}
+
+void Presenter::endFullFrames() {
+  if (!full_frames_) return;
+  full_frames_ = false;
+  finishPendingSwap();
+  uint16_t* inactive = inactiveFramebuffer();
+  if (ui_copy_ && inactive) {
+    std::memcpy(inactive, ui_copy_, framebufferBytes());
+    if (syncCache(inactive, framebufferBytes(), false)) swapTo(inactive);
+  }
+  heap_caps_free(ui_copy_);
+  ui_copy_ = nullptr;
+  // The other framebuffer still holds the last video frame: a later camera
+  // frame starts over with a whole copy of the UI (begin()).
+  double_buffer_active_ = false;
+  resetMirrorDirty();
+  Serial.printf("[CameraDisplay/%s] Full screen ended: UI back\n",
+                config_.device_name ? config_.device_name : "P4");
+}
+
 void Presenter::end() {
-  if (!double_buffer_active_) return;
+  // A stream stopping under the full screen leaves it to endFullFrames().
+  if (full_frames_ || !double_buffer_active_) return;
+  finishPendingSwap();
   double_buffer_active_ = false;
   resetMirrorDirty();
   Serial.printf("[CameraDisplay/%s] DSI double buffering ended; fb%u remains active\n",

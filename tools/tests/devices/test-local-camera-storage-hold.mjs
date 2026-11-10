@@ -31,8 +31,6 @@ for (const handler of held) {
   assert.match(routes, new RegExp(`withStorageHold\\(\\[this\\]\\(\\) \\{ this->${handler}\\(\\); \\}\\)\\)`),
     `${handler} runs with the camera held off`);
 }
-// Tile radius: only the save (not the live preview) touches the flash.
-assert.match(routes, /server\.on\("\/api\/display\/tile-radius", HTTP_POST, \[this\]\(\) \{[\s\S]*?local_camera::ScopedStorageHold hold\(server\.arg\("preview"\) != "1"\);\s*handleTileRadius\(\);/);
 // Reads, status polls and the camera's own settings never stop the stream.
 for (const handler of ['handleGetTiles', 'handleStatus', 'handleLocalCamera', 'handleGetFolders',
                        'handleCreateScreenshot']) {
@@ -70,7 +68,7 @@ assert.match(body('storageHoldActive'), /if \(g_storage_holds\.load\(\) != 0\) r
 // A snapshot in progress aborts, new snapshot requests are busy, keepalives
 // defer through the gate.
 assert.match(body('abortRequested'), /storageHoldActive\(\)/);
-assert.match(body('handleMqttMessage'), /g_stream_running\.load\(\) \|\| g_stream_wanted\.load\(\) \|\|\s*storageHoldActive\(\)\) \{/);
+assert.match(body('handleCommandPayload'), /g_stream_running\.load\(\) \|\| g_stream_wanted\.load\(\) \|\|\s*storageHoldActive\(\)\) \{/);
 assert.match(body('currentGate'), /in\.storage_hold = storageHoldActive\(\);/);
 
 // --- Contract ----------------------------------------------------------------------

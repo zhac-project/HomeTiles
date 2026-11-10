@@ -1,6 +1,5 @@
 #include "src/types/types_registry.h"
 #include "src/types/value/value_control.h"
-#include "src/network/bridge/ha_bridge_config.h"
 
 #include <cstdio>
 #include <cstring>
@@ -18,6 +17,8 @@
 #include "src/types/switch/renderer.h"
 #include "src/types/text/renderer.h"
 #include "src/types/energy/renderer.h"
+#include "src/types/power_flow/renderer.h"
+#include "src/types/vacuum/vacuum_tile.h"
 #include "src/types/weather/renderer.h"
 #include "src/types/media/renderer.h"
 #include "src/types/climate/renderer.h"
@@ -36,12 +37,15 @@
 #include "src/types/switch/web_handler.h"
 #include "src/types/text/web_handler.h"
 #include "src/types/energy/web_handler.h"
+#include "src/types/power_flow/web_handler.h"
 #include "src/types/weather/web_handler.h"
 #include "src/types/media/web_handler.h"
 #include "src/types/climate/web_handler.h"
 #include "src/types/cover/web_handler.h"
 #include "src/types/camera/web_handler.h"
 #include "src/types/pixelanim/web_handler.h"
+#include "src/types/calendar/calendar_tile.h"
+#include "src/types/calendar/web.h"
 
 #include "src/types/clock/web_html.h"
 #include "src/types/navigate/web_html.h"
@@ -54,6 +58,7 @@
 #include "src/types/switch/web_html.h"
 #include "src/types/text/web_html.h"
 #include "src/types/energy/web_html.h"
+#include "src/types/power_flow/web_html.h"
 #include "src/types/weather/web_html.h"
 #include "src/types/media/web_html.h"
 #include "src/types/climate/web_html.h"
@@ -73,6 +78,7 @@
 #include "src/types/switch/web_scripts.h"
 #include "src/types/text/web_scripts.h"
 #include "src/types/energy/web_scripts.h"
+#include "src/types/power_flow/web_scripts.h"
 #include "src/types/weather/web_scripts.h"
 #include "src/types/media/web_scripts.h"
 #include "src/types/climate/web_scripts.h"
@@ -93,6 +99,7 @@
 #include "src/types/switch/web_styles.h"
 #include "src/types/text/web_styles.h"
 #include "src/types/energy/web_styles.h"
+#include "src/types/power_flow/web_styles.h"
 #include "src/types/weather/web_styles.h"
 #include "src/types/media/web_styles.h"
 #include "src/types/climate/web_styles.h"
@@ -101,6 +108,9 @@
 #include "src/types/pixelanim/web_styles.h"
 #include "src/types/settings/web_styles.h"
 
+#include "src/types/device/device_tile.h"
+#include "src/types/device/web.h"
+
 #include "src/core/config/config_manager.h"
 #include "src/core/i18n/i18n.h"
 #include "src/web/server/web_admin_utils.h"
@@ -108,19 +118,9 @@
 namespace {
 
 const String kEmptyString;
-const std::vector<String> kEmptyStrings;
-const std::vector<SceneOption> kEmptyScenes;
 
 const String& safeString(const String* value) {
   return value ? *value : kEmptyString;
-}
-
-const std::vector<String>& safeStrings(const std::vector<String>* value) {
-  return value ? *value : kEmptyStrings;
-}
-
-const std::vector<SceneOption>& safeScenes(const std::vector<SceneOption>* value) {
-  return value ? *value : kEmptyScenes;
 }
 
 lv_obj_t* render_number_wrapper(lv_obj_t* parent, int col, int row, const Tile& tile,
@@ -132,7 +132,7 @@ bool apply_number_wrapper(WebServer& server, Tile& tile, const TileTypeApplyCont
   return editable_entity_matches(tile.type, tile.sensor_entity);
 }
 void append_number_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
-  append_number_fields_html(html, safeString(ctx.tab_id), parseSensorList(haBridgeConfig.get().numbers_text));
+  append_number_fields_html(html, safeString(ctx.tab_id));
 }
 
 lv_obj_t* render_select_wrapper(lv_obj_t* parent, int col, int row, const Tile& tile,
@@ -144,7 +144,7 @@ bool apply_select_wrapper(WebServer& server, Tile& tile, const TileTypeApplyCont
   return editable_entity_matches(tile.type, tile.sensor_entity);
 }
 void append_select_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
-  append_select_fields_html(html, safeString(ctx.tab_id), parseSensorList(haBridgeConfig.get().selects_text));
+  append_select_fields_html(html, safeString(ctx.tab_id));
 }
 
 lv_obj_t* render_datetime_wrapper(lv_obj_t* parent, int col, int row, const Tile& tile,
@@ -156,7 +156,7 @@ bool apply_datetime_wrapper(WebServer& server, Tile& tile, const TileTypeApplyCo
   return editable_entity_matches(tile.type, tile.sensor_entity);
 }
 void append_datetime_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
-  append_datetime_fields_html(html, safeString(ctx.tab_id), parseSensorList(haBridgeConfig.get().datetimes_text));
+  append_datetime_fields_html(html, safeString(ctx.tab_id));
 }
 
 lv_obj_t* render_sensor_wrapper(lv_obj_t* parent,
@@ -249,6 +249,16 @@ lv_obj_t* render_energy_wrapper(lv_obj_t* parent,
   return render_energy_tile(parent, col, row, tile, index, grid_type);
 }
 
+lv_obj_t* render_power_flow_wrapper(lv_obj_t* parent,
+                                     int col,
+                                     int row,
+                                     const Tile& tile,
+                                     uint8_t index,
+                                     GridType grid_type,
+                                     scene_publish_cb_t) {
+  return render_power_flow_tile(parent, col, row, tile, index, grid_type);
+}
+
 lv_obj_t* render_media_wrapper(lv_obj_t* parent,
                                int col,
                                int row,
@@ -277,6 +287,46 @@ lv_obj_t* render_cover_wrapper(lv_obj_t* parent,
                                GridType grid_type,
                                scene_publish_cb_t) {
   return render_cover_tile(parent, col, row, tile, index, grid_type);
+}
+
+// Lock, Alarm panel and Fan share one renderer and field set (types/device).
+lv_obj_t* render_device_wrapper(lv_obj_t* parent, int col, int row, const Tile& tile, uint8_t index,
+                                GridType grid_type, scene_publish_cb_t) {
+  return render_device_tile(parent, col, row, tile, index, grid_type);
+}
+bool apply_device_wrapper(WebServer& server, Tile& tile, const TileTypeApplyContext&) {
+  return apply_device_fields_from_request(server, tile);
+}
+void append_lock_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
+  append_device_fields_html(html, safeString(ctx.tab_id), TILE_LOCK);
+}
+void append_alarm_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
+  append_device_fields_html(html, safeString(ctx.tab_id), TILE_ALARM);
+}
+void append_fan_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
+  append_device_fields_html(html, safeString(ctx.tab_id), TILE_FAN);
+}
+// Vacuum: the device field set and runtime, its own tile (types/vacuum).
+lv_obj_t* render_vacuum_wrapper(lv_obj_t* parent, int col, int row, const Tile& tile, uint8_t index,
+                                GridType grid_type, scene_publish_cb_t) {
+  return render_vacuum_tile(parent, col, row, tile, index, grid_type);
+}
+void append_vacuum_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
+  append_device_fields_html(html, safeString(ctx.tab_id), TILE_VACUUM);
+}
+// DEVICE_I18N once for the three types.
+void append_no_scripts(String&) {}
+
+// Calendar (types/calendar).
+lv_obj_t* render_calendar_wrapper(lv_obj_t* parent, int col, int row, const Tile& tile, uint8_t index,
+                                  GridType grid_type, scene_publish_cb_t) {
+  return render_calendar_tile(parent, col, row, tile, index, grid_type);
+}
+bool apply_calendar_wrapper(WebServer& server, Tile& tile, const TileTypeApplyContext&) {
+  return apply_calendar_fields_from_request(server, tile);
+}
+void append_calendar_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
+  append_calendar_fields_html(html, safeString(ctx.tab_id));
 }
 
 lv_obj_t* render_camera_wrapper(lv_obj_t* parent,
@@ -357,6 +407,11 @@ bool apply_energy_wrapper(WebServer& server, Tile& tile, const TileTypeApplyCont
   return true;
 }
 
+bool apply_power_flow_wrapper(WebServer& server, Tile& tile, const TileTypeApplyContext&) {
+  apply_power_flow_fields_from_request(server, tile);
+  return true;
+}
+
 bool apply_media_wrapper(WebServer& server, Tile& tile, const TileTypeApplyContext&) {
   apply_media_fields_from_request(server, tile);
   return true;
@@ -415,17 +470,16 @@ bool apply_back_wrapper(WebServer& server, Tile& tile, const TileTypeApplyContex
 }
 
 void append_sensor_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
-  append_sensor_fields_html(html, safeString(ctx.tab_id), safeStrings(ctx.sensor_options));
+  append_sensor_fields_html(html, safeString(ctx.tab_id));
 }
 
 void append_binary_sensor_fields_wrapper(String& html,
                                          const TileTypeWebContext& ctx) {
-  append_binary_sensor_fields_html(
-      html, safeString(ctx.tab_id), safeStrings(ctx.binary_sensor_options));
+  append_binary_sensor_fields_html(html, safeString(ctx.tab_id));
 }
 
 void append_scene_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
-  append_scene_fields_html(html, safeString(ctx.tab_id), safeScenes(ctx.scene_options));
+  append_scene_fields_html(html, safeString(ctx.tab_id));
 }
 
 void append_navigate_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
@@ -437,7 +491,7 @@ void append_back_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
 }
 
 void append_switch_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
-  append_switch_fields_html(html, safeString(ctx.tab_id), safeStrings(ctx.switch_options));
+  append_switch_fields_html(html, safeString(ctx.tab_id));
 }
 
 void append_clock_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
@@ -449,20 +503,23 @@ void append_text_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
 }
 
 void append_weather_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
-  append_weather_fields_html(html, safeString(ctx.tab_id), safeStrings(ctx.weather_options));
+  append_weather_fields_html(html, safeString(ctx.tab_id));
 }
 
 void append_energy_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
-  append_energy_fields_html(html, safeString(ctx.tab_id), safeStrings(ctx.energy_options));
+  append_energy_fields_html(html, safeString(ctx.tab_id));
+}
+
+void append_power_flow_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
+  append_power_flow_fields_html(html, safeString(ctx.tab_id));
 }
 
 void append_media_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
-  append_media_fields_html(html, safeString(ctx.tab_id), safeStrings(ctx.media_options));
+  append_media_fields_html(html, safeString(ctx.tab_id));
 }
 
 void append_climate_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
-  append_climate_fields_html(
-      html, safeString(ctx.tab_id), safeStrings(ctx.climate_options));
+  append_climate_fields_html(html, safeString(ctx.tab_id));
 }
 
 void append_settings_fields_wrapper(String& html,
@@ -471,13 +528,11 @@ void append_settings_fields_wrapper(String& html,
 }
 
 void append_cover_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
-  append_cover_fields_html(
-      html, safeString(ctx.tab_id), safeStrings(ctx.cover_options));
+  append_cover_fields_html(html, safeString(ctx.tab_id));
 }
 
 void append_camera_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
-  append_camera_fields_html(
-      html, safeString(ctx.tab_id), safeStrings(ctx.camera_options));
+  append_camera_fields_html(html, safeString(ctx.tab_id));
 }
 
 void append_pixelanim_fields_wrapper(String& html, const TileTypeWebContext& ctx) {
@@ -574,6 +629,24 @@ const TileTypeDescriptor kTileTypes[] = {
     append_energy_fields_wrapper,
     append_energy_styles,
     append_energy_scripts
+  },
+  {
+    TILE_POWER_FLOW,
+    "Leistungsfluss",
+    "power-flow",
+    "power_flow",
+    "power_flow",
+    nullptr,
+    "loadPowerFlowFields",
+    "savePowerFlowFields",
+    "resetPowerFlowFields",
+    0x2A2A2A,
+    false,
+    render_power_flow_wrapper,
+    apply_power_flow_wrapper,
+    append_power_flow_fields_wrapper,
+    append_power_flow_styles,
+    append_power_flow_scripts
   },
   {
     TILE_WEATHER,
@@ -701,7 +774,98 @@ const TileTypeDescriptor kTileTypes[] = {
     append_cover_styles,
     append_cover_scripts
   },
-#if !defined(DEVICE_ESP32_S3_RGB_480)
+  {
+    TILE_LOCK,
+    "Schloss",
+    "device",
+    "lock",
+    "device",
+    nullptr,
+    "loadLockFields",
+    "saveLockFields",
+    "resetLockFields",
+    0x2A2A2A,
+    false,
+    render_device_wrapper,
+    apply_device_wrapper,
+    append_lock_fields_wrapper,
+    append_device_styles,
+    append_device_scripts
+  },
+  {
+    TILE_ALARM,
+    "Alarmanlage",
+    "device",
+    "alarm",
+    "device",
+    nullptr,
+    "loadAlarmFields",
+    "saveAlarmFields",
+    "resetAlarmFields",
+    0x2A2A2A,
+    false,
+    render_device_wrapper,
+    apply_device_wrapper,
+    append_alarm_fields_wrapper,
+    append_no_scripts,
+    append_no_scripts
+  },
+  {
+    TILE_FAN,
+    "Ventilator",
+    "device",
+    "fan",
+    "device",
+    nullptr,
+    "loadFanFields",
+    "saveFanFields",
+    "resetFanFields",
+    0x2A2A2A,
+    false,
+    render_device_wrapper,
+    apply_device_wrapper,
+    append_fan_fields_wrapper,
+    append_no_scripts,
+    append_no_scripts
+  },
+  {
+    TILE_VACUUM,
+    "Staubsauger",
+    "device",
+    "vacuum",
+    "device",
+    nullptr,
+    "loadVacuumFields",
+    "saveVacuumFields",
+    "resetVacuumFields",
+    0x2A2A2A,
+    false,
+    render_vacuum_wrapper,
+    apply_device_wrapper,
+    append_vacuum_fields_wrapper,
+    append_no_scripts,
+    append_no_scripts
+  },
+  {
+    TILE_CALENDAR,
+    "Kalender",
+    "calendar",
+    "calendar",
+    "calendar",
+    nullptr,
+    "loadCalendarFields",
+    "saveCalendarFields",
+    "resetCalendarFields",
+    0x2A2A2A,
+    false,
+    render_calendar_wrapper,
+    apply_calendar_wrapper,
+    append_calendar_fields_wrapper,
+    append_calendar_styles,
+    append_calendar_scripts
+  },
+  // The ESP32-S3 shows the camera too, decoded in software at a few frames
+  // per second (camera_stream.cpp, user 2026-10-09).
   {
     TILE_CAMERA,
     "Camera",
@@ -720,7 +884,6 @@ const TileTypeDescriptor kTileTypes[] = {
     append_camera_styles,
     append_camera_scripts
   },
-#endif
   {
     TILE_PIXELANIM,
     "Animation",
@@ -898,12 +1061,18 @@ static const char* localized_tile_type_label(const TileTypeDescriptor& entry) {
     case TILE_DATETIME: return i18n::locale(language).editable_labels[2];
     case TILE_BINARY_SENSOR: return i18n::binary_sensor_label(language, 0);
     case TILE_ENERGY: return tr.tile_type_energy;
+    case TILE_POWER_FLOW: return i18n::power_flow_label(language, i18n::PowerFlowLabel::Type);
     case TILE_WEATHER: return tr.tile_type_weather;
     case TILE_SCENE: return tr.tile_type_scene;
     case TILE_FOLDER: return tr.tile_type_folder;
     case TILE_SWITCH: return tr.tile_type_switch;
     case TILE_MEDIA: return tr.tile_type_media;
     case TILE_COVER: return i18n::cover_label(language, 0);
+    case TILE_LOCK: return i18n::device_label(language, i18n::DeviceLabel::TypeLock);
+    case TILE_ALARM: return i18n::device_label(language, i18n::DeviceLabel::TypeAlarm);
+    case TILE_FAN: return i18n::device_label(language, i18n::DeviceLabel::TypeFan);
+    case TILE_VACUUM: return i18n::vacuum_label(language, i18n::VacuumLabel::Type);
+    case TILE_CALENDAR: return i18n::calendar_label(language, i18n::CalendarLabel::TypeCalendar);
     case TILE_CAMERA: return tr.camera_tile_type;
     case TILE_CLIMATE: return i18n::climate_tile_type_label(language);
     case TILE_CLOCK: return tr.tile_type_clock;

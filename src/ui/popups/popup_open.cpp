@@ -1,6 +1,7 @@
 #include "src/ui/popups/popup_open.h"
 #include "src/ui/popups/popup_first_frame.h"
 #include "src/ui/popups/popup_body.h"
+#include "src/ui/popups/popup_surface.h"
 
 namespace {
 struct Opening {
@@ -74,6 +75,8 @@ void process_popup_open() {
   opening.payload = nullptr;
   opening.destroy = nullptr;
   clear();
+  // Deferred popup content draws with the open popup's surface.
+  const ui_theme::SurfaceScope popup_scope = popup_surface::scope();
   if (apply) apply(payload);
   else if (simple_apply) simple_apply();
   if (destroy) destroy(payload);

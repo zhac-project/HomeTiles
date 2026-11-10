@@ -30,11 +30,17 @@ constexpr uint16_t kChipId = 0x5647;
 // 2-lane 24 MHz RAW10 mode: the vendored 1280x960 2x2-binning table plus the
 // HomeTiles window override (PROVENANCE.md). The Waveshare LCD-X front camera
 // sits a quarter turn from the landscape UI, so the sensor outputs a portrait
-// window with all 960 binned rows and 544 centred columns; the Bridge turns
-// the JPEG into 960x544. 30 fps instead of the table's 45
+// window with all 960 binned rows and 720 centred columns; the Bridge turns
+// the JPEG into 960x720 (a strip is 4:3, user 2026-10-08). 30 fps instead of the table's 45
 // (less CSI and PSRAM traffic).
-constexpr uint32_t kFrameWidth = 544;
+constexpr uint32_t kFrameWidth = 720;
 constexpr uint32_t kFrameHeight = 960;
+// The other window: the whole binned image, 1280x960, sent when the Bridge
+// does not turn (an upright layout, or a camera rotation that takes the
+// quarter turn back; the sensor then lies landscape). User 2026-10-08: a
+// sensor standing upright sends a landscape strip, a lying one everything.
+constexpr uint32_t kTurnedFrameWidth = 1280;
+constexpr uint32_t kTurnedFrameHeight = 960;
 constexpr uint32_t kDataLanes = 2;
 // Table pixel clock 88333333 Hz, RAW10 over two lanes (esp_cam_sensor:
 // OV5647_MIPI_CSI_LINE_RATE_1280x960_45FPS = 441.7 Mbit/s per lane).
@@ -65,6 +71,13 @@ constexpr uint16_t frameLengthFor(uint16_t lines) {
 
 class Sensor {
  public:
+  // The full-width window of an upright layout for the core.
+  // An upright layout turns the picture a quarter back: counter-clockwise
+  // when this sensor's picture (board mirror on) is mirrored that way
+  // (local_camera.cpp displayQuarterTurns(); 8-inch hardware 2026-10-08).
+  static constexpr bool kUprightTurnCounterClockwise = true;
+  static constexpr uint32_t kTurnedWidth = kTurnedFrameWidth;
+  static constexpr uint32_t kTurnedHeight = kTurnedFrameHeight;
   // Adds the SCCB device to an existing bus. Never creates a bus.
   esp_err_t attach(i2c_master_bus_handle_t bus);
   // Removes the device from the bus; the bus itself stays untouched. On an
@@ -75,11 +88,11 @@ class Sensor {
   // ACK probe followed by the chip-ID read. chip_id receives the raw value
   // even when it does not match kChipId.
   esp_err_t probe(uint16_t* chip_id);
-  // Software reset, 1280x960 table, 544x960 window at 30 fps, manual
-  // exposure, gain and white balance (the ISP pipeline owns them), stream off,
-  // table-default mirror when mirror is set. The readout is then orientation
-  // state 0.
-  esp_err_t loadDefaultMode(bool mirror);
+  // Software reset, 1280x960 table, 720x960 window (turned: 1280x960) at
+  // 30 fps, manual exposure, gain and white balance (the ISP pipeline owns
+  // them), stream off, table-default mirror when mirror is set. The readout
+  // is then orientation state 0.
+  esp_err_t loadDefaultMode(bool mirror, bool turned = false);
   // Sensor readout orientation relative to the table readout: mirror turns it
   // horizontally, flip vertically, both = 180 degrees. The ISP window offsets
   // move with the flips so the Bayer order stays the same in every state.
@@ -98,6 +111,8 @@ class Sensor {
   // Board mirror from loadDefaultMode() (orientation state 0): setOrientation()
   // mirrors relative to it.
   bool default_mirror_ = true;
+  // The turned window (loadDefaultMode()): its offsets for setOrientation().
+  bool turned_ = false;
 };
 
 }  // namespace ov5647

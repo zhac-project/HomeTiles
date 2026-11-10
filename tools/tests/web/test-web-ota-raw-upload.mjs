@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 
 function read(relativePath) {
-  return fs.readFileSync(path.join(repoRoot, relativePath), 'utf8');
+  return fs.readFileSync(path.join(repoRoot, relativePath), 'utf8').replace(/\r\n/g, '\n');
 }
 
 function requireMarker(source, marker, label) {
@@ -41,9 +41,9 @@ for (const marker of [
   '#if defined(CONFIG_IDF_TARGET_ESP32P4)',
   '#define FW_META_SILICON_MIN_REV CONFIG_ESP_REV_MIN_FULL',
   '#define FW_META_SILICON_MAX_REV CONFIG_ESP_REV_MAX_FULL',
-  '#define FW_META_SILICON_VARIANT "rev3_1"',
+  '#define FW_META_SILICON_VARIANT "post_v3"',
   '#define FW_META_SILICON_MIN_REV 301',
-  '#define FW_META_SILICON_MAX_REV 301',
+  '#define FW_META_SILICON_MAX_REV 399',
   '#error "Every ESP32-P4 build must target one unambiguous silicon generation"',
   'chip_revision < kCurrentFirmwareDescriptor.silicon.minimum_revision',
   'chip_revision > kCurrentFirmwareDescriptor.silicon.maximum_revision',
@@ -94,12 +94,14 @@ if (stagingPolicy.includes('DEVICE_WAVESHARE') ||
 
 requireMarker(server, '"/api/ota/upload/raw", HTTP_POST,',
   'Raw OTA route');
+// Both OTA routes pass the optional Web Admin password gate; upload chunks of
+// an unauthorised request never reach the OTA writer.
 requireMarker(server,
-  '"/api/ota/upload", HTTP_POST,\n        localOnly([this]() { this->handleOtaUploadDone(); }),',
+  '"/api/ota/upload", HTTP_POST,\n        guardedUploadDone(localOnly([this]() { this->handleOtaUploadDone(); })),',
   'Legacy multipart OTA route');
-requireMarker(server, 'localOnlyUpload([this]() { this->handleOtaUpdate(); }));',
+requireMarker(server, 'guardedUpload(localOnlyUpload([this]() { this->handleOtaUpdate(); })));',
   'Legacy multipart OTA callback');
-requireMarker(server, 'localOnlyUpload([this]() { this->handleOtaRawUpdate(); }));',
+requireMarker(server, 'guardedRaw(localOnlyUpload([this]() { this->handleOtaRawUpdate(); })));',
   'Raw OTA callback');
 
 const browserUpload = functionBody(

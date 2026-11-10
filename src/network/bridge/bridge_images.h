@@ -1,0 +1,47 @@
+#pragma once
+
+#include <Arduino.h>
+
+#include "src/network/bridge/bridge_images_core.h"
+
+// Pictures from the Bridge over the direct link (docs-dev/images.md): a
+// Media tile subscribes to its player's cover in the size the Media popup
+// shows it, keyed like the player state's "image_key"; the screensaver to
+// its image or camera entity in the screen's size; a Camera tile to its
+// image or camera entity in the tile's size. The Bridge renders and sends
+// them. One entity can come in several sizes at once (a camera on a tile and
+// on the screensaver): a picture is kept per entity, size and placement.
+// Loop task only.
+namespace bridge_images {
+
+struct Picture {
+  char entity_id[72] = "";
+  char key[kKeyLength + 1] = "";
+  uint8_t* jpeg = nullptr;  // PSRAM
+  size_t length = 0;
+  uint16_t width = 0;   // The size its topic asked for (= the JPEG's).
+  uint16_t height = 0;
+  uint8_t fit = kFill;  // The placement its topic asked for.
+  uint32_t used = 0;
+};
+
+// Edge of a media player's cover picture: the Media popup's cover.
+uint16_t coverEdge();
+// The statestream route suffix of a cover picture, "image/<edge>x<edge>".
+const char* coverSuffix();
+
+// The statestream route suffix of a full-screen picture: "image/<w>x<h>" of
+// the screen as shown (the screensaver's picture) with its placement and a
+// camera's interval in seconds (0: none).
+const char* screenSuffix(uint8_t fit, uint8_t every);
+
+// A message on a picture topic: stored (or dropped when malformed), and the
+// player's tiles or the screensaver told. False for any other topic.
+bool handleMqttMessage(const char* topic, const uint8_t* payload, size_t length);
+
+// The newest picture of an entity in any size; nullptr without one.
+const Picture* find(const char* entity_id);
+// The picture of an entity in exactly this size and placement.
+const Picture* find(const char* entity_id, uint16_t width, uint16_t height, uint8_t fit);
+
+}  // namespace bridge_images

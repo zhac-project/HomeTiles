@@ -13,9 +13,16 @@ inline constexpr uint16_t kScreenHeight = kProfile.screen_height;
 inline constexpr uint8_t kGridCols = kProfile.grid_cols;
 inline constexpr uint8_t kGridRows = kProfile.grid_rows;
 inline constexpr uint16_t kGridGap = kProfile.grid_gap;
-inline constexpr uint16_t kGridPad = kProfile.grid_pad;
-inline constexpr uint16_t kGridCellW = kProfile.grid_cell_w;
-inline constexpr uint16_t kGridCellH = kProfile.grid_cell_h;
+// The classic layout's grid (user 2026-10-08): the profile's columns and
+// rows with one grid gap as the outer margin like the head bar layouts, the
+// cells as large as the rest allows. One look on every layout: the popup card
+// reaches the screen edge and every corner stays concentric. The profiles'
+// own pad and cell sizes (the former 3 or 4 px margin) are not used.
+inline constexpr uint16_t kGridPad = kGridGap;
+inline constexpr uint16_t kGridCellW =
+    static_cast<uint16_t>((kScreenWidth - (kGridCols + 1) * kGridGap) / kGridCols);
+inline constexpr uint16_t kGridCellH =
+    static_cast<uint16_t>((kScreenHeight - (kGridRows + 1) * kGridGap) / kGridRows);
 inline constexpr uint8_t kDisplayFlushBands = kProfile.display_flush_bands;
 inline constexpr uint8_t kBacklightInputMin = kProfile.backlight_input_min;
 #if defined(DEVICE_WAVESHARE_TOUCH_LCD_10_1)
@@ -75,6 +82,15 @@ bool displayTryFullFramePreview(int32_t x, int32_t y, int32_t w, int32_t h,
 // Ends device-specific preview buffering. This is a no-op on devices whose
 // preview path does not keep persistent display state.
 void displayEndFullFramePreview();
+// Camera full screen (#65; Guition V2 for now, false/nullptr elsewhere):
+// frames in the panel's own size and orientation (the clockwise turn the
+// Bridge applies) go from the JPEG decoder straight into the framebuffer.
+// Begin keeps the UI and turns the screen black, End puts the UI back.
+bool displayFullFrameInfo(uint16_t& width, uint16_t& height, uint16_t& turn_cw);
+bool displayBeginFullFrames();
+uint16_t* displayAcquireFullFrame(size_t& bytes);
+bool displaySubmitFullFrame();
+void displayEndFullFrames();
 bool ppaCooldownActive();
 void displayWaitDMA();
 // Best-effort wait for the beginning of a physical panel frame. Devices
@@ -82,6 +98,10 @@ void displayWaitDMA();
 void displayWaitFrameStart();
 void displayFillScreen(uint16_t color);
 void displaySetRotation(uint8_t rotation);
+// The upright layout on a landscape panel (grid_layout::turned()): LVGL draws
+// the screen upright and the panel shows it without the quarter turn; touch
+// comes upright too. Only panels with grid_layout::upright_ready() act on it.
+void displaySetUpright(bool upright);
 
 void setBrightness(uint8_t value);
 uint8_t getBrightness();

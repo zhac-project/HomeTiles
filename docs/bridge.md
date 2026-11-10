@@ -1,9 +1,9 @@
 # Bridge Integration
 
-The [HomeTiles Bridge](https://github.com/GalusPeres/HomeTiles-Bridge) connects your displays to Home Assistant over MQTT. It shares entity data and sends tile actions back to Home Assistant, with each display listed as its own device.
+The [HomeTiles Bridge](https://github.com/GalusPeres/HomeTiles-Bridge) connects your displays to Home Assistant: directly over an encrypted link, or over an MQTT broker. It shares entity data and sends tile actions back to Home Assistant, with each display listed as its own device.
 
 <figure class="ht-screenshot">
-<img src="../images/bridge-devices.png" alt="Bridge integration with three panels" width="1328" height="918" loading="lazy">
+<img src="../images/bridge-devices.png" alt="Bridge integration with three panels" width="1250" height="1245" loading="lazy">
 <figcaption>Displays in the HomeTiles Bridge integration</figcaption>
 </figure>
 
@@ -11,13 +11,13 @@ The [HomeTiles Bridge](https://github.com/GalusPeres/HomeTiles-Bridge) connects 
 
 ## Installation
 
-You need Home Assistant 2025.11 or newer, an MQTT broker, and HomeTiles Bridge v0.7.0 or newer for all documented features with firmware v0.7.0. Follow the [Home Assistant setup guide](home-assistant-setup.md) to install the Bridge and pair your first display.
+You need Home Assistant 2025.11 or newer and HomeTiles Bridge v0.9.4 for all documented features with firmware v0.9.4. The direct link needs no MQTT broker. Follow the [Installation](installer.md#install-the-bridge) to install the Bridge and pair your first display.
 
 <a id="via-hacs-recommended"></a>
 <a id="manual"></a>
 <a id="adding-a-panel"></a>
 
-HACS provides Bridge updates. After an update, restart Home Assistant. For additional displays, follow [Multiple displays](home-assistant-setup.md#multiple-displays).
+HACS provides Bridge updates. After an update, restart Home Assistant. For additional displays, follow [Multiple displays](advanced-setup.md#multiple-displays).
 
 ## Configuration
 
@@ -27,25 +27,42 @@ Open **Settings → Devices & Services → HomeTiles Bridge → Configure**.
 
 | Field | Setting |
 | --- | --- |
-| Base topic | Must match **Device topic base** in the display's MQTT settings. Each display needs a unique value. |
+| Base topic | The display's topic name. Pairing sets it; over MQTT it must match **Device topic base** in the display's MQTT settings. Each display needs a unique value. |
 | HA prefix | Default: `ha/statestream`. Use the same value on the Bridge and all displays. |
 | Device name / manufacturer / model | Optional details shown in Home Assistant. |
 
 ### Entity Configuration { data-toc-label="Entities" }
 
-Select the sensors, binary sensors, numbers, selects, date/time entities, weather, lights, switchable entities, covers, climate entities, media players, cameras, and scenes/scripts/buttons you want to use. Then assign them to tiles in the [Web Admin](web-admin.md).
+A paired display with a [Web Admin password](web-admin.md#web-admin-password) does not need these lists: its entity picker finds every entity in Home Assistant, and the display tells the Bridge which entities its tiles use. Displays without a password, and displays on MQTT, offer the entities selected here.
+
+Select the sensors, binary sensors, numbers, selects, date/time entities, weather, lights, switchable entities, covers, fans, locks, alarm panels, climate entities, media players, cameras, images, and scenes/scripts/buttons you want to use. Then assign them to tiles in the [Web Admin](web-admin.md).
 
 Selections are shared across all displays. Action aliases are generated automatically and remain stable when selections are reordered; custom aliases use one `alias=entity_id` per line.
 
 **Switches / switchable entities** accepts `switch`, `input_boolean`, `automation`, `fan`, `humidifier`, `remote`, and `siren`. They use the existing Switch tile and its on/off popup; lights retain brightness/color controls. Automations are enabled/disabled. Fan and Siren require HA support for both on and off.
 
-**Scenes / Scripts / Buttons** accepts `scene`, `script`, `button`, and `input_button`. Assign these to the existing Scene tile: a tap activates the scene, starts the script without parameters, or presses the button once. See the [compatibility table](tiles.md#switch) for exact behavior and limits. Use updated firmware for the complete availability handling and translated editor labels.
+**Scenes / Scripts / Buttons** accepts `scene`, `script`, `button`, and `input_button`. Assign these to the [Button tile](tiles.md#button) (called Scene before v0.9.2): a tap activates the scene, starts the script without parameters, or presses the button once. See the [compatibility table](tiles.md#switch) for exact behavior and limits. Use updated firmware for the complete availability handling and translated editor labels.
 
 Older display configurations, entity selections, aliases, and MQTT topic names remain valid. Commands must target selected entities; retained switch/action commands are ignored on reconnect.
 
 **Numbers** accepts `number` and `input_number`; **Selects** accepts `select` and `input_select`; **Date/Time** accepts `time`, `date`, `datetime`, and `input_datetime`. Use their dedicated [editable tile types](tiles.md#number). State, writable limits, options, availability, and history come from Home Assistant. Recorder exclusions also apply to these history views.
 
-Bridge v0.7.0 remains compatible with older firmware and existing configurations. New features require the corresponding firmware; no reset or re-pairing is needed for a normal update.
+**Fans**, **Locks**, and **Alarm panels** feed the [Fan](tiles.md#fan), [Lock](tiles.md#lock), and [Alarm Panel](tiles.md#alarm-panel) tiles (Bridge v0.8.0). Locks and alarm panels can only be operated from a [paired](#encrypted-commands) display with a Web Admin password. **Codes for locks and alarm panels** lets the Bridge check the codes of devices that ignore a wrong code; **Allow opening without a code** is only for devices without their own code. Fans also remain selectable as switchable entities.
+
+**Calendars** feed the [Calendar](tiles.md#calendar) tile. The Bridge reads their events from Home Assistant and publishes them retained on `ha_prefix/calendar/<object>/events`: when an event starts or ends, and every 15 minutes.
+
+Bridge v0.9.0 remains compatible with older firmware and existing configurations. New features require the corresponding firmware; no reset or re-pairing is needed for a normal update.
+
+## Display Settings { data-toc-label="Display settings" }
+
+The display's Home Assistant device has its settings under **Configuration**: **Display Brightness**, **Screensaver Brightness**, **Display Standby** and **Display Standby After**, and with HomeTiles and Bridge v0.9.4:
+
+| Entity | Use |
+| --- | --- |
+| **Theme** | **Dark**, **Light** or **Automatic** (light by day, dark at night), the same choice as under **Settings → Display** on the display. |
+| **Display Rotation** | The steps the display offers: 0°, 90°, 180° and 270° on displays that turn in quarter turns, 0° and 180° on the others. |
+
+With older firmware the display keeps the former **Display Rotation** switch for 180° and has no Theme select.
 
 ## Control the Displayed View
 
@@ -78,6 +95,18 @@ Commands to offline displays or missing targets are rejected. Status updates do 
 
 Enable the electricity, gas, or water categories you need. Each requires the corresponding data in Home Assistant's [Energy Dashboard](https://my.home-assistant.io/redirect/energy/). These selections are also shared across displays.
 
+### Pairing and Encryption { #encrypted-commands data-toc-label="Pairing" }
+
+Pairing connects a display to the Bridge over the direct link. Every message between them is encrypted and signed, commands as well as states, and each command runs at most once. Camera stream tokens travel encrypted too.
+
+1. On the display, tap **Pair** under **Settings → System → Security** (or in the first-start setup).
+2. Home Assistant shows **Panel found** under **Settings → Devices & services → Discovered**; a display that is already set up over MQTT shows **Connect the panel**. Select **Add** or **Submit**. Where Home Assistant cannot find displays over mDNS (Docker without host networking, VLANs), open **Add integration → HomeTiles Bridge → Panel by IP address (direct connection)** within the two minutes and enter the display's IP address (shown under **Settings → WiFi**); a fixed IP address for the display in the router helps (Bridge v0.9.4).
+3. The display and Home Assistant show the same six-digit number. Confirm only if both numbers match, in Home Assistant and on the display.
+
+The [Installation](installer.md#set-up-the-display) shows each step. To switch encryption off, unpair on the display or use **Security** in the Bridge options; the other side follows, and the display then counts as a new display.
+
+Displays paired over MQTT with firmware v0.8.0 keep their encrypted commands until they are paired again; pairing moves them to the direct link. Protocol details: [bridge-link.md](https://github.com/GalusPeres/HomeTiles/blob/main/docs-dev/bridge-link.md) and [command-encryption.md](https://github.com/GalusPeres/HomeTiles/blob/main/docs-dev/command-encryption.md).
+
 ## Local Hardware Entities { data-toc-label="Local I/O" }
 
 Configure GPIO switches, onboard relays, and DS18B20 inputs on the display's [I/O tab](hardware-io.md). The Bridge adds them to that display's Home Assistant device automatically; they do not belong in the shared entity selection.
@@ -105,22 +134,43 @@ Displays with a camera can share it with Home Assistant. This needs HomeTiles v0
 | Guition JC8012P4A1 V2 and V1 | Built-in OV02C10 |
 | Guition JC1060P470C V2, JC4880P443 | Optional OV02C10 module on the CSI connector |
 | Waveshare ESP32-P4 7-inch, 8-inch, 10.1-inch | Built-in OV5647 front camera |
-| Waveshare ESP32-P4 7B, 4.3-inch, 4B | Optional OV5647 module on the CSI connector |
+| Waveshare ESP32-P4 7B, 4.3-inch, 5-inch, 4B | Optional OV5647 module on the CSI connector |
 | M5Stack Tab5 | Built-in SC2356 |
 
 Tested on the Guition JC8012P4A1 V2, Waveshare 8-inch, and M5Stack Tab5. On the other displays, use **Rotation**, **Mirror image**, or **Swap red and blue** under [Advanced](web-admin.md#built-in-camera) if the image appears turned or its colors are swapped.
 
 1. In the Web Admin, open **Settings → Built-in camera** and enable **Allow Home Assistant to use the built-in camera**, then press **Save**.
 2. The Bridge adds a **Camera** entity to the display's Home Assistant device, plus a **Camera** switch that pauses it.
-3. Open the camera in Home Assistant, or show it on another display with a [Camera tile](tiles.md#camera-experimental).
+3. Open the camera in Home Assistant, or show it on another display with a [Camera tile](tiles.md#camera).
 
 The display captures images only while Home Assistant asks for them. Opening the camera starts a live stream that uses the same TCP ports `8124`–`8131` as camera tiles; it stops a few seconds after the last viewer closes. While the camera is in use, the display shows the [camera indicator](device-ui.md#built-in-camera-indicator). Tapping its pill ends the current stream.
 
 Disabling the setting removes the entity. The paused switch keeps the entity but sends no images. A display cannot show its own camera in its own camera popup.
 
+## Voice Assistant (early version) { #voice-assistant data-toc-label="Voice assistant" }
+
+ESP32-P4 displays with a speaker and microphone can play audio from Home Assistant and work as an Assist voice satellite. This needs HomeTiles v0.9.2 and Bridge v0.9.2. It is an early version: the display has no microphone button and no audio settings yet; everything is set in Home Assistant.
+
+It runs on the Waveshare ESP32-P4 4B, 4.3-inch, 7-inch, 7B, 8-inch and 10.1-inch, the Guition JC8012P4A1 V1, V2 and V3, JC1060P470C V2 and JC4880P443, and the M5Stack Tab5. Displays with only a speaker connector need a speaker fitted. Tested on the Guition JC8012P4A1 V2, Waveshare 4B and 8-inch, and M5Stack Tab5. The ESP32-S3 displays have no voice support.
+
+The Bridge adds these entities to the display's Home Assistant device while the display announces its speaker or microphone:
+
+| Entity | Use |
+| --- | --- |
+| **Speaker** | Media player: plays sounds, music, announcements and spoken answers from Home Assistant, with title, position, pause and seeking, and sets the volume. The Bridge decodes every format and sends the display plain audio at the pace it plays (HomeTiles and Bridge v0.9.4 or newer). When a camera's stream has sound, the display plays it in step with the picture while the camera popup or full screen is open. While it plays, the display does not listen for its wake word. |
+| **Assist** | Assist satellite: Home Assistant's voice pipeline listens through the display's microphone, and the answer plays on its speaker. |
+| **Start Assist** button | Starts a voice request without a wake word. |
+| **Listening** | The display listens for its wake word by itself. Off on a new display. |
+| **Wake word** | Okay Nabu, Hey Jarvis or Alexa. Kept while Listening is off. |
+| **Assistant** | The Assist pipeline the display uses. |
+| **Finished speaking detection** | How quickly a request ends after you stop speaking. |
+| **Microphone** | Off on a new display. Turning it on from Home Assistant needs a [paired](#encrypted-commands) display. |
+
+It works on the direct link and over MQTT.
+
 ## MQTT Topics Reference { data-toc-label="MQTT reference" }
 
-Entity states use `<HA prefix>/<entity>/...`. The Bridge publishes them itself; Home Assistant's MQTT Statestream integration is not required.
+Entity states use `<HA prefix>/<entity>/...`. The Bridge publishes them itself; Home Assistant's MQTT Statestream integration is not required. On the direct link the same topics travel over the link instead of a broker.
 
 ??? info "Topic reference for debugging"
     `{id}` is the panel device ID; `<base>` is its unique base topic.
@@ -153,5 +203,9 @@ Entity states use `<HA prefix>/<entity>/...`. The Bridge publishes them itself; 
     | `<base>/stat/display_brightness` | Display → HA | Current display brightness |
     | `<base>/cmnd/screensaver_brightness` | HA → Display | Screensaver brightness (1–100%) |
     | `<base>/stat/screensaver_brightness` | Display → HA | Current screensaver brightness |
+    | `<base>/cmnd/display_theme` | HA → Display | Theme (`dark`, `light`, `auto`) |
+    | `<base>/stat/display_theme` | Display → HA | Current theme setting |
+    | `<base>/cmnd/display_rotation` | HA → Display | Rotation in degrees (one of the display's steps) |
+    | `<base>/stat/display_rotation` | Display → HA | Rotation and steps, `{"degrees":90,"options":[0,90,180,270]}` |
     | `<base>/cmnd/io/{channel_id}` | HA → Display | Local Switch command (`ON` / `OFF`) |
     | `<base>/stat/io/{channel_id}` | Display → HA | Local Switch or temperature state |

@@ -24,11 +24,21 @@
   const SELECTED_TILE_STORAGE_KEY = 'selectedAdminTile';
   let selectedTileByTab = {};
 
+  // The entity a Scene tile runs (sceneTarget on the panel): its stored
+  // scene, script or button id, or the entity of a Bridge alias.
+  function sceneEntityOf(value, sceneEntities = sensorMetaCache.sceneEntities) {
+    if (!value) return '';
+    if (/^(scene|script|button|input_button)\./.test(value)) return value;
+    return sceneEntities?.[value] || '';
+  }
+
   function normalizeSensorMetaPayload(payload) {
     if (!payload || typeof payload !== 'object') {
       return { values: {}, units: {}, icons: {}, names: {}, sceneEntities: {}, loaded: false };
     }
     const hasMeta = Object.prototype.hasOwnProperty.call(payload, 'editable_values') ||
+                    Object.prototype.hasOwnProperty.call(payload, 'device_values') ||
+                    Object.prototype.hasOwnProperty.call(payload, 'calendar_values') ||
                     Object.prototype.hasOwnProperty.call(payload, 'values') ||
                     Object.prototype.hasOwnProperty.call(payload, 'units') ||
                     Object.prototype.hasOwnProperty.call(payload, 'icons') ||
@@ -36,7 +46,9 @@
                     Object.prototype.hasOwnProperty.call(payload, 'binary_sensor_values') ||
                     Object.prototype.hasOwnProperty.call(payload, 'energy_values') ||
                     Object.prototype.hasOwnProperty.call(payload, 'energy_units') ||
-                    Object.prototype.hasOwnProperty.call(payload, 'climate_values');
+                    Object.prototype.hasOwnProperty.call(payload, 'climate_values') ||
+                    Object.prototype.hasOwnProperty.call(payload, 'weather_values') ||
+                    Object.prototype.hasOwnProperty.call(payload, 'media_values');
     if (!hasMeta) {
       return { values: payload || {}, units: {}, icons: {}, names: {}, sceneEntities: {}, loaded: true };
     }
@@ -49,8 +61,18 @@
         payload.climate_values || {}
       ),
       editableValues: payload.editable_values || payload.editableValues || {},
+      // Lock, Alarm panel and Fan detail states (types/device).
+      deviceValues: payload.device_values || payload.deviceValues || {},
+      // Calendar events (types/calendar).
+      calendarValues: payload.calendar_values || payload.calendarValues || {},
+      // Weather and media tile states, the payloads their tiles draw.
+      weatherValues: payload.weather_values || payload.weatherValues || {},
+      mediaValues: payload.media_values || payload.mediaValues || {},
+      // "From cover": the color each shown media card sampled from its cover.
+      mediaCoverColors: payload.media_cover_colors || payload.mediaCoverColors || {},
       units: Object.assign({}, payload.units || {}, payload.energy_units || {}),
-      icons: payload.icons || {},
+      // Energy sources the configuration gives no icon: the device's by category.
+      icons: Object.assign({}, payload.energy_icons || {}, payload.icons || {}),
       names: payload.names || {},
       // Scene alias -> entity, so scene tiles resolve the entity icon like the
       // device. A grid refresh normalizes the already normalized cache again,

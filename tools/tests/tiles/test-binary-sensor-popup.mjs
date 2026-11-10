@@ -134,7 +134,7 @@ assert.match(
 );
 assert.match(
   popup,
-  /const bool missing = !state\.length\(\);[\s\S]*lv_label_set_text\(ctx->value_label, "--"\)/,
+  /const bool missing = !state\.length\(\);[\s\S]*show_header_value\(ctx,\s*missing \? String\("--"\)/,
   'A missing HA entity must stay distinct from unknown and unavailable in the popup',
 );
 assert.match(
@@ -168,12 +168,15 @@ assert.ok(
     i18nHeader.includes('binary_sensor_states[36]'),
   'Binary popup and state strings must live in the central locale schema',
 );
-for (const locale of ['kLocaleDe', 'kLocaleEn', 'kLocaleFr']) {
+// Every registered language.
+const locales = [...i18n.matchAll(/\{&kStrings\w+, &(kLocale\w+)\}/g)].map(match => match[1]);
+assert.ok(locales.length >= 7, 'every built-in language is registered');
+for (const locale of locales) {
   assert.ok(i18n.includes(locale), `Missing central locale: ${locale}`);
 }
 assert.equal(
   (i18n.match(/"24H", "7D"/g) || []).length,
-  3,
+  locales.length,
   'All locales must use the exact Sensor-popup range abbreviations',
 );
 for (const deviceClass of [

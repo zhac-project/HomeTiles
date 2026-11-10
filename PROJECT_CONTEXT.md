@@ -1,142 +1,111 @@
 # HomeTiles shared project context
 
-Last reviewed: 2026-09-28
+Last reviewed: 2026-10-29
 
 ## Sources of truth
 
-- Version: `version.txt`; code: `git status`, recent commits/branch
-- Device support and validation: `docs/index.md` (device status notes)
-- ESP32-P4/ESP-Hosted patches: `tools/esp-hosted-3.3.7-rx-fix/README.md`
-- Release procedure: `RELEASING.md`
-- Live bug status: the current GitHub issue and its newest comments; recheck
-  online before changing an issue status
-- Bridge publishing requires separate authorization.
+- Version: `version.txt`; code: `git status`, recent commits/branch; finished work: git and `docs-dev/project-history.md`
+- Device support and validation: `docs/index.md`; ESP32-P4/ESP-Hosted patches: `tools/esp-hosted-3.3.7-rx-fix/README.md`
+- Release procedure: `RELEASING.md`. Live bug status: newest GitHub issue comments; recheck online before changing an issue status.
+- Bridge publishing requires separate authorization. Docs: `docs/`, `mkdocs.yml`, `overrides/` (gh-pages).
+- This file: below 160 lines and 12 KiB (`test-project-context-size.mjs`); current facts only.
 
-## Firmware baseline
+## Releases and builds
 
-- v0.6.12: `9605b6a`, CI `34353664113`, 15 profiles / 30 images; 102 tests pass. Guition V1/V2 PPA and Weather fixes; V2 confirmed, V1 hardware pending.
-- Stabilization: display/MQTT guards, Light coalescing, incremental Weather (`e3de63c`-`33b4e06`).
-- Guition S3 XIP/`-O2` reverted in `5279456` (risk, no measured gain); do not retry without evidence.
+- FW + Bridge v0.9.7 released 2026-10-30.
+- Pairing by IP, no mDNS (#114, Bridge #16): `GET /api/link`.
+- Test builds stay `v0.6.12bNNN` on purpose (System Update offers releases); beta define in `firmware_version.h`, last b632.
+- Run `node tools/fast-build-check.mjs --build-path <cache>` before every build (warm: only repo headers changed, same LVGL config hash).
+- ZHAC fork (cloud, remote Web Admin, Sunton): `docs-dev/zhac-fork.md`.
+- Factory images carry the icon file (`release-helper/factory-icon-file.js`); test builds need icons on HomeTiles-staging (tag = FW_VERSION).
+
+## Active work
+
+- Vacuum tile 29 (#50, `src/types/vacuum/`), Bridge level 6; V2 HW ok, others pending.
+- Power flow tile 28 ("Leistungsfluss", `src/types/power_flow/`, picture 65): nodes in `/_tile_flow_entities`, options in key_code, node tap = Sensor popup; V2 HW ok b542; smooth lines/dots b568.
+- Media popup: layouts `sensor_display_mode` 0 cover left, 1 centre; controls only with their HA feature bit; menu box: speakers, source, library; tile/head icon state form (`state_icon.h`).
+- #116 (JC4880 camera popup ends after 18-60 min): Bridge waits 45 s per chunk ACK; reporter pending.
+- Issue #119 (Guition V1): own Helix (b501, `src/audio/helix_mp3`): the core's overran on MPEG-2.5; TLS in PSRAM. Speaker audio from the Bridge (`docs-dev/audio-stream.md`): FFmpeg -> mono PCM over the camera tcp-ack listener (`HTAUD/1`); panels announce `"stream":"tcp-ack-v1"`. HW ok. Camera sound: lip-synced live track (b507 HW ok, b508 even gaps HW pending).
+- Voice: mic/wake word off on a new panel (b500), listening its own setting, the word stays; Bridge v0.9.4b6 Listening switch. HW/HA test pending. Mic button + audio settings: mockup first; #91 declined.
+
+## Do not retry (rejected with evidence)
+
+- Guition S3 XIP/`-O2` (`5279456`): risk, no gain; XIP needs 5.4 of the 8 MB PSRAM.
+- LVGL 2 draw threads: shared font RLE state, glyph artifacts.
+- LVGL drawing into PSRAM (b576): frame 385 vs 170 ms.
+- Page pictures by CPU copy (b579): 60 ms copy each way, page turn 350 vs 230 ms.
+- V2 band 100 KB (b588/b589): 14 % faster, but the PPA hung on a 614x71 piece.
+- Page turn in tile columns (b587): flush 85 vs 22 ms, page came up in blocks. PSRAM is not the cost (b586).
+- S3 GT911 (fw 0x1060) steps slow drags and ignores config writes (also esp32-macropad #101).
+- P4 OTA: throttling, PSRAM staging, TLS-to-flash streaming, Hosted restart, permanent SDIO buffers.
+- Issue #30: a8204 markers, 20 MHz, 1-bit alone, 2.9.3 rollback. `JC-C6-slave_v2.3.2.bin` is packet mode: never flash it alone.
+- Camera: `-skip_loop_filter` (drift, PSNR 18.6 dB), key-frame-only fallback (1 FPS), H.264 decoding on the panel (no HW decoder), `-flags low_delay` (one decode thread).
+- Entity picker lists taken from the Bridge (b232-235 loop); b126 cover fade, b128/b582 frame swap (lag); Wi-Fi power saving (P4 Hosted TX asserts, S3 link drops).
 
 ## Hardware validation
 
-- Maintainer hardware: Tab5, Waveshare 4B/8-inch, Guition S3/V2 (JC8012P4A1C_I_W_Y1, SKU10153002-V2). V2 Tested, PPA/SD confirmed; V1 hardware pending.
-- v0.6.9 Binary/Text-State Sensor UI passed hardware tests on 4B, 8-inch and S3.
-- Other revisions need community hardware validation; compilation does not establish support.
-- P4 code is shared; panel/touch initialization, timings, revision and firmware images remain profile-specific.
-- LCD-4 Rev 4.0 has contributor-tested display/touch/Wi-Fi/MQTT/Web OTA;
-  older revisions and SD access are unsupported. See `docs/index.md` for validation.
-- JC4880P443 (PR #46, damianeek): portrait 480x800/4x6, contributor-tested; landscape later. Open: SD DEINIT_ARG, P4 DSI groups, tall popups.
-- WS 10.1 v3 (PR #48, memooox3): separate `waveshare_10_1_rev3`, post_v3 301-399; pre-v3 image unchanged. Chip-id/CI image test pending.
+- Maintainer hardware: Tab5, Waveshare 4B/8-inch, Guition S3 and V2 (JC8012P4A1C_I_W_Y1, SKU10153002-V2; PPA/SD confirmed). Other revisions need community validation; compiling is not support.
+- P4 code is shared; panel/touch init, timings, revision and images stay profile-specific. A new board never changes another board; shared files only get list entries.
+- LCD-4 Rev 4.0 contributor-tested (display/touch/Wi-Fi/MQTT/OTA); older revisions and SD unsupported.
+- JC4880P443 (PR #46): portrait 480x800, contributor-tested; landscape later. Open: SD DEINIT_ARG, P4 DSI groups.
+- JC1060 V2 rotation pair 0/2 (b478, #108); `test-rotation-profiles` checks every profile.
+- P4 v3 images (post_v3 301-399): WS 10.1 (PR #48, v3.2 ok), WS 7B `_rev3` (#41; 30 s Wi-Fi join, PR #120), JC8012 V3 = V2 code (#44), WS 4.3/8 `_rev3` (#135/#140); HW pending.
+- New in v0.9.3, HW pending by the reporters: GS-T3E v2 (#93, S3, relays GPIO45/46/44 at once), Waveshare 5-inch (#76, HX8394, own `dsi_driver`, pre-v3 + `_rev3`).
+- Voice (b477) HW ok 2026-10-16 on V2, Tab5, 8-inch, 4B; per-board `kVolumeLimit` (Guition 0.6, Tab5 0.9); none on S3 and JC1060 V1.
 
-## Issue #30
+## P4 network, issues #37/#38
 
-Issue: https://github.com/GalusPeres/HomeTiles/issues/30
+- Backported ESP-Hosted allocation/PSRAM fixes, synchronous RPC UID routing, Espressif `a8204f9` dropped-RX recovery; `repo-a8204` is the release-safe baseline. Wedge safeguards are recovery, not a transport fix.
+- Issue #30 fix (v0.6.10): exact V1 keeps 1-bit/40 MHz and splits large RX into 512-byte CMD53 reads.
+- Flash-write blue flash: cache-safe DSI/DMA/CSI objects (`tools/esp-idf-3.3.7-p4-cache-safe`).
+- #38: reporter SKU10153001-V2 vs maintainer SKU10153002-V2. Exact-V2 fixes `e1a9297`. SD (#55): reporter card init fails, a failed V2 mount stays final until restart, init cause open. Interrupt-WDT cause unproven.
+- #37: packets up to 65,535 bytes with bounded queues/ACKs; reporter confirmation pending.
+- lwIP TCP buffers sit in internal RAM (64 KB/socket): Web Admin answers pause above 24 KB (`WebSendPacer`, b600).
 
-- External Guition `JC8012P4A1C_I_W_Y` V1, Foscam via HA Generic Camera; normal OTA failed, USB worked. SDIO cascade (CMD53 `0x109`, timeout `0x107`, raw `0xcccccccc`, invalid RX length, `rst:0xc`), also without cameras; recovery restarts leave no panic dump. First DCRC `0x80` on 11-/14-block C6-to-P4 reads. Repeated a8204 markers, 20 MHz (b3, also Issue #167), 1-bit alone (b5) and the 2.9.3 rollback are not fixes; do not retry them.
-- Version RPC `0x15e` also occurs on the stable 8-inch; it does not explain the cascade.
-- SDIO schematics: V1 5.1-kohm pull-ups/no series termination; 8-inch 51-kohm; Tab5 5.1-kohm/22-ohm series/switched WLAN power. Signal margin unproven.
-- Original `JC8012P4A1_C6.bin` and HomeTiles use streaming mode; `JC-C6-slave_v2.3.2.bin` is packet mode, never flash it alone. USB reaches P4 only; C6 flashing needs CN5 and a 3.3 V UART adapter.
-- Fix b6 passed reporter tests (two cameras at 15-20 FPS, Web OTA); reporter confirmed v0.6.9b1, v0.6.10 ships it. Exact V1 keeps 1-bit/40 MHz and splits large RX into 512-byte CMD53 reads; other P4 profiles keep baseline objects, S3 unaffected. Lower camera quality/FPS only as a labeled diagnostic A/B.
+## Memory, flash, performance
 
-## ESP32-P4 network history
+- LVGL PSRAM S3 2 / P4 12 MiB; SRAM band <= 72 KiB = DMA free - 150 KB (big tables in LVGL heap, S3 b606); page caches S3 4 / P4 6; bindings, popup history, Select options, slots, queues, grids in PSRAM.
+- S3 mallocs > 32 B prefer PSRAM (b324): internal free 42 -> ~89 KB, text-heavy steps slower. Open: S3 Web Admin pages block the loop 1-6 s.
+- Icon file: all 7447 MDI icons in LittleFS `/_mdi_icons_<px>.bin` (`tools/generate-icon-files.mjs`), 399 built in, one PSRAM raw cache; icon + text fonts unpack each glyph once (`glyph_cache.c`, P4 512 KB, S3 256, b599); a missing file downloads once from its release; System page Icons card.
+- `-fno-exceptions` (-300 KiB per image), unused LVGL widgets off, Admin CSS minified. LVGL 9.6.0 (lvgl#10306, caches `hometiles-lvgl96-*`).
+- Perf (released): nav preload (S3 max 3 grids), shadow/circle caches, P4 CPU rotation for small areas, S3 PCLK 12 MHz.
+- Cards/discs draw rounded fills and frame lines from kept corner masks (`rounded_corners.h`, b594); clock face one object.
+- Pending: artwork, sleep/wake, camera soak, memory minima.
 
-- Backported: ESP-Hosted allocation/PSRAM fixes, synchronous RPC UID routing, Espressif's `a8204f9` dropped-RX recovery, sparse diagnostics. Patches, variants, hashes, limits: `tools/esp-hosted-3.3.7-rx-fix/README.md`; do not duplicate.
-- `repo-a8204` is the release-safe baseline; the short-tail receive variant was an experimental field path, not a universal fix.
-- Failed P4 OTA approaches: throttling, PSRAM staging, TLS-to-flash streaming, Hosted restart, permanent SDIO buffers. Retry only with new evidence.
-- Network wedge safeguards are recovery, not proof of a transport fix.
+## Camera
 
-## ZHAC Cloud fork
+- Stream: one Bridge FFmpeg per camera/size/fps/quality for all panels (lingers 30 s), thinned to the panel's rate before scaling; tcp-ack-v1 with 32 KB chunks x2, 8 KB x1 after a transport error. P4 decodes JPEG in hardware, S3 with tjpgd (~4.5 FPS popup).
+- Full screen (#65): frames in the panel's framebuffer size and turn, HW JPEG straight into the framebuffer, black until the first frame; V2/Tab5 30 FPS HW ok; "(Vollbild)" View targets (`full_targets`).
+- Camera tile with picture (#50, b377) HW pending. Screensaver SD/HA picture (#69) HW ok.
+- Local camera: core `src/video/local_camera/`, drivers `sensors/*/`, boards `src/devices/*/local_camera_board.*`, opt-in `local_cam_en`. Window rule (b296): Bridge quarter turn = upright centred strip, no turn = whole image. `lcam_rot` (b387): one value for every layout, the mirror never turns. HW pending on most boards (#56). Open: TEST window `kChunkWindow = 4` (`local_camera_stream_contract.h`).
 
-- Sunton 8048S070C: link OK; TLS starved int. RAM after hours: PSRAM TLS fallback, wake resync; HW pending.
+## UI decisions (do not reopen)
 
-## Issue #38
-
-- Reporter: JC8012P4A1 V2, SKU10153001-V2 (2632), `_I_W_Y`; #18 tested SKU10153002-V2 (2627), `_I_W_Y1`. Maintainer received JC8012P4A1C_I_W_Y1, SKU10153002-V2. Labels alone do not establish another panel variant.
-- V2 fixes committed in `e1a9297`: touch bounds, internal I2C atomic-state allocation, slot-aware SD cleanup; exact-V2 only. Beta `HOMETILES_ISSUE38_BETA` reports v0.6.12b1; release version stays v0.6.12.
-- SD: reporter card-init failure (40/20 MHz), then Hosted slot-1 assertion. V2 dropped DEINIT_ARG from default host flags like V1; maintainer SD diagnostic passes (~8 GB). Assertion and card failure causes open (#55). Evidence: `build/issue-38/SD-LOG-ANALYSIS.md`.
-- Touch: maintainer confirms rapid-tap raw-bounds fix works. BIN/ELF: `build/guition-v2-touch/`.
-- Interrupt-WDT dump (touch ELF): I2C atomic-state object was in PSRAM; backport `37758ef327f9` forces internal allocation. Exposure proven, WDT causality unproven. Evidence/hash: `build/guition-v2-crash-20260911/`.
-- Bridge v0.6.47 (`43be012`): HA forecast subscriptions replace minute polling; 134 tests pass, restart validation pending. Released firmware v0.6.12 preserves daily extrema (24 C daily versus partial hourly 11 C).
-
-## Sensor history
-
-- Binary Sensor (20): V7-compatible; localized icons/previews and history shipped.
-- Textual states use timeline/Activity; numeric sensors retain graphs. Missing, unknown and unavailable remain distinct.
-- Bridge v0.6.40 (`581150b`): bounded Recorder paging, categorical history, legacy compatibility.
-
-## Editable tiles
-
-- IDs 21 Number, 22 Select, 23 Date/Time reuse Sensor persistence/popups and five fonts; preview preserves `editableValues`, `PackedTileV7` unchanged.
-- Number/input_number uses the centered Media slider/value, Climate +/- pill or bounded roller, with graph/Activity. Select/input_select uses Settings dropdowns, timeline and Activity.
-- Date/Time: single-row hh/mm/ss rollers, popup-colored pill, no arrows, native 23/00 and 59/00 wrap; date spinboxes without keyboard; HA timezone/DST validation.
-- Additive `/control` preserves legacy clients; sessions/revisions/deadlines reject stale commands.
-- Bridge v0.6.44 (`148dec4`) on HACS: stale icon cache fixed, overrides preserved. v0.6.10 includes `84511da` plus title/color fixes.
-- Controls clear wrapped titles/close area; Number/Select equal height, Time taller. Select has compact history/earlier Activity; status in header. Range changes retain data; offline closes dropdowns.
-- Drafts coalesce steps/rollers for 600 ms, publish sliders on release and survive service ACKs until confirmation/rejection or 30-second timeout.
-- Editable surfaces follow tile color, white text unchanged; selection white with surface-colored text; S3 arrow 20px.
-- Wi-Fi idle/reconnect gaps remain unfixed; findings/probes: `build/wifi-power-audit/VERIFICATION.md`.
-- Titles: two centered/ellipsized lines; 255 UTF-8 bytes in `/_tile_titles`; Settings v4 size unchanged. View labels flatten CR/LF for Bridge. Maintainer approved.
-- S3 froze adding Number to active screensaver: Web responded, save persisted; manual reboot. Older dump, cause unknown.
-
-## Shared-popup/artwork baseline
-
-- v0.6.11: `3b534ab` shared frame/header/close with cached bodies; matching content stays visible, cold content waits for first frame. Close/switch/delete cancel work; PIN retained. Settings forms disposable, Camera preloaded.
-- Artwork: URL-only `state_fast` precedes MQTT; failed replacements retain covers. URL/content pairing prevents S3 redownloads/stale results; deferred Media resolves current descriptors.
-- Memory: LVGL PSRAM S3 2 MiB/P4 12 MiB; internal/DMA band <=72 KiB; page caches S3 4/P4 6. Bindings in PSRAM, no extra framebuffers.
-- Popup/title fixes accepted on 8-inch, Guition S3, 4B and Tab5; native tests cover 17 profiles.
-- PIN popup title fixed (Tab5). Pending: artwork/controls, sleep/wake, camera/Hosted soak, memory minima.
-
-## Radius and half-grid
-
-- NVS radius: old radius to `(cell h - gap)/4`, unset = max; tile color `#1A1A1A`; new icon tiles "From icon" 20 %. Used by tiles, Climate, popups, previews.
-- Half-grid: Sensor/Binary/Energy height 0.5, width >=1 by 0.5; original 2x1. Whole layouts/V7 size unchanged; header fraction bits. Make every tile whole before 0.6.x (`docs/updating.md`).
-- Device/Web: concentric icon radius, original title font, smaller default value font; explicit sizes respected; text gap 0. Masking declined.
-- Reflow/drafts/rollback keep positions; stale GETs preserve edits. Empty 1x1 slots scan both axes by 0.5, no overlaps. Settings/Back: 1x0.5; Settings v4 bits 1-4 store snapshot fractions.
-- Hidden Climate reset crashed on fractional Sensor width; Climate-only integer guard fixes it; browser regression covers switching/autosave.
-- Binary Sensor now shares Sensor value sizes (20/24/32/40); default preserves old layout. Stored in existing V7 field; editor, import and previews retain it.
+- One color rule (b378): color always from the icon; per tile only "Ausfuellen" (`tileFills`); own color only Clock/Text/Pixelanim; Light/Climate/Cover popups never filled; light theme: filled tile kJewel, frame line per `frame_line`.
+- Radius fixed (b378): `tile_radius::kDefault`, circle 25 %, card per theme (dark `#1A1A1A`). Colors from `tone_color.h` (OKLCH); presses without theme recolor.
+- Half-grid: Sensor/Binary/Energy/Switch height 0.5, width >= 1 by 0.5; V7 size unchanged. Open: cross-grid import clamps whole tiles (HTTP 400), value fonts 32/40 clip in half tiles.
+- Titles: two centred/ellipsized lines, 255 UTF-8 bytes in `/_tile_titles`.
 - HW pending (evidence in `build/`): radius reboot, screensaver child-click, Energy compact slots, Clock/Text border.
+- Layouts (`grid_layout.h`): classic, head bar landscape, head bar upright (prepared); NVS `layout`; places `/_tile_grids/layouts.json`; folder storage entries (`grid_slots.h`, max 64), full storage blocks Save (`layoutStorageFull`); backups hold all three, import checks classic places on the stored grid, a start keeps the choice (b509/b510); b479/b480 HW pending.
+- One look (b300): popup card margin 0, tiles one grid gap from the edge; popup header follows the head bar rule (`popup_layout.h`); card shadow width follows the radius to stay in the LVGL shadow cache (`shadow_width_for`, max 28 px).
+- Upright (b294): P4 panels upright under a landscape profile draw the upright UI directly (`drawUpright`); JC1060/7B upright and JC4880 landscape (b368) compile only, HW pending.
+- Light theme: `ui_theme` roles + `SurfaceScope`; popups take the opener's surface. Remembered LVGL objects clear themselves on delete (LVGL 9.6 `lv_obj_is_valid` reads freed objects).
+- Settings: 4 pages (`build/design-mockups/settings`), Display with a Sound group on speaker boards (#123); setup in the popup card.
+- Lights (#130, b554): HA colors in both themes; Fill fills while on (white grey); Switch tiles off unfilled; Light popup = tile without Fill. HW pending.
+- Units (b551): a step smaller after the number, digit tops level, like the weather forecast (`value_unit.h`, `.tile-unit`, `unitTextHtml`): tiles, state lines, popups; two units in one line keep one size.
 
-- Popup-overlapped buttons briefly appear square; deferred by user, no fix.
+## Tiles and Bridge contracts
 
-- Clock/Text per-tile border: V7 display-mode byte 1=hidden; global/screensaver toggles respect it.
-- Open: cross-grid import clamps whole tiles to half steps (HTTP 400), snapshot type accepts halves, value fonts 32/40 clip in half tiles.
-
-## Local camera
-
-- Core `src/video/local_camera/` is device-agnostic; drivers `sensors/*/`, boards `src/devices/*/local_camera_board.*`; opt-in `local_cam_en`.
-- V2 OV02C10 720p. 8-inch OV5647 544x960, Bridge `rotate` 90. Tab5 SC202CS 720p RAW8, mirror+180, BGGR under flips.
-- Camera builds pass; HW pending (#56): WS 7/10.1/7B/4.3/4B OV5647, V1/JC1060 V2 OV02C10, JC4880 quarter turn.
-- Advanced: `lcam_rot` (180 = flip, odd = `rotate` 90), `lcam_rbswap` (Bayer, next start).
-- HW pending: b30 CSI/ISP, q10; b31 gain, q10-90; b32 screenshot; b33 Wi-Fi/AP, kbd, #43; b34 rotation, boards; b35 sleep stream/indicator wake, Tab5 1% wake, S3 150Hz.
-- Open: int WDT fix HW test, TEST `kChunkWindow = 2`.
-
-## v0.7.0 release
-
-- v0.7.0 (`609550a`): public, S3 assets from `c3e0a673`; P4 unchanged. Existing S3 v0.7.0 needs Web Admin update.
-- Bridge v0.7.0 (`1c12eda`): 267 pass/1 skip. Evidence: `build/release-v0.7.0/`.
-- Cache b73 frees queues; V2: 76 cached switches, final 124 KiB. Five owned devices stable.
-- S3 fix `c3e0a673`: PSRAM-first OTA TLS, all three profiles. Guition b74 OTA/boot/MQTT passed; Waveshare HW pending.
-- CI `36334088502`: 17 builds, 152 tests/21 skips; local 173 pass. Six S3 BINs verified.
-- v0.7.1 promised: PR #51 Polish port, #26 S3-4B PCLK (16 vs 10 MHz), P4 v3.2 for 7B (#41) and JC8012 V3 (#44) incl. installer stub crash; French.
-- Tests pending #7 #11 #27 #34 #45; V2 SD restart #55.
-
-## Maintenance
-
-- Docs: `docs/`, `mkdocs.yml`, `overrides/`; gh-pages. Installer esptool-js 0.7.0 (#57) passed Update on five owned devices; P4 v3.x pending (#41/#44).
-
-## Flash and RAM (PR #62)
-
-- C++ uses `-fno-exceptions` via a `compiler.cpp.flags` override in CI and local builds: about -300 KiB per image, Tab5 428 KiB OTA headroom. Unused LVGL widgets/formats off: -49 KiB, IRAM -21 KiB.
-- Renderer slot state, Binary Sensor queue and active/screensaver grids live in PSRAM, allocated in `setup()` (PSRAM is not ready in global constructors). Static DRAM V2 136,632 -> 64,984 B, S3 139,576 -> 80,376 B. HW test pending.
-- The fast build falls back to arduino-cli when library objects are stale (`lv_conf.h`).
-
-## View control and telemetry
-
-- v0.6.10 includes Home/folder/popup navigation from `4c9ea4e`, using existing UI, PIN and camera teardown paths.
-- Visible folders are reused for their popup/descendants; new/locked paths still require access checks (S3 Home detour fix).
-- Stable tile IDs use reserved PackedTileV7 bytes and durable counters; MQTT sessions/sequences/deadlines reject replay.
-- Switch adds input_boolean/automation/fan/humidifier/remote/siren; Scene adds button/input_button. Aliases stay stable.
-- Commands validate targets/availability/features; ignore retained commands. Battery is a stub; unsupported probes stay unregistered.
-- View/editable controls confirmed on 8-inch/S3. HA migration, legacy firmware and lifecycle coverage pending.
-- Issue #37: valid 20,033-byte packet disconnects v0.6.9 at 16 KiB; local reception grows to 65,535 bytes with bounded queues/draining/ACKs/logs. Reporter confirmation pending. Maintainer log: no unplanned MQTT loss over ~8 h.
+- Editable tiles 21 Number, 22 Select, 23 Date/Time reuse Sensor persistence/popups (`PackedTileV7` unchanged); drafts coalesce 600 ms, sliders publish on release. Open: S3 froze adding Number to an active screensaver.
+- Lock/Alarm/Fan (24-26, `src/types/device/`): sealed commands need pairing + Web Admin password; HW ok 2026-10-02.
+- Calendar 27 (PR #127, `docs-dev/calendar.md`): Bridge v0.9.6b1 `events` (`entity_search` 5); V2 HW pending.
+- Sensor graph (#131, mockup sensor-graph-3): pictures (`area_graph.h`), circle-color area fading low, 1 px 8 % lines, labels right; tile 24 h; numeric popup 30D/7D/24H/6H/1H; corners in masks. HW ok b613.
+- Energy: popup Year/Month/Week/Today (Bridge v0.9.6b3); tile mode 2 = today's bars; week start: Localization.
+- Sensor looks (`build/analysis/2026-10-28-analyse.md`): modes 3-14 (`sensor_look.h`, `look_view.cpp`, `admin-look.js`), A8 masks rebuilt on value change; Switch-like menu; b570 HW pending.
+- Rule icons (b574): stop/state colors may carry an MDI icon (`RRGGBB,<icon>`); `tile_rule_icon.h` swaps/restores the glyph (renderers: `set_glyph`), popup head too; Switch & co. own rules b575. HW pending.
+- Switch layouts `sensor_decimals` 0-3, 4-6 upright bar (`bar_orientation.h`; Fan upright = 1; sim ok, HW pending); `command_pacer.h` pacing: reporter test pending (#11).
+- Scene tile is "Button": picker searches scenes/scripts/buttons (`entity_search` 4), entity in `sensor_entity`.
+- Direct link: TCP 8140, Bridge = broker, frames sealed with pairing keys (`docs-dev/bridge-link.md`). The panel declares every entity it uses; without a password only released entities and the Energy Dashboard categories reach it. Picker lists Recent/Favorites/All (b369): V2 HW pending.
+- Security: optional Web Admin password (PBKDF2 300k), sessions, CSRF; command channel pairing v2 (X25519, 6-digit code), `docs-dev/command-encryption.md`.
+- Commands validate targets/availability/features and ignore retained commands; stable tile IDs in reserved PackedTileV7 bytes.
+- Languages en/de/fr/pl/cs/es/sk/ru are data only (Strings + LocaleProfile); `test-i18n-panel-glyphs` checks all text sizes. Russian (PR #124): Cyrillic fallbacks (`generate-cyrillic-fonts.mjs`), JCUKEN keys. Fit cs/es/sk/ru pending.

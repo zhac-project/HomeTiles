@@ -8,7 +8,7 @@ profiles:
       - ArduinoJson (7.4.3)
       - DallasTemperature (4.0.6)
       - GFX Library for Arduino (1.6.5)
-      - lvgl (9.5.0)
+      - lvgl (9.6.0)
       - M5GFX (0.2.25)
       - M5Unified (0.2.14)
       - OneWire (2.3.8)
@@ -23,7 +23,7 @@ profiles:
       - ArduinoJson (7.4.3)
       - DallasTemperature (4.0.6)
       - GFX Library for Arduino (1.6.5)
-      - lvgl (9.5.0)
+      - lvgl (9.6.0)
       - M5GFX (0.2.25)
       - M5Unified (0.2.14)
       - OneWire (2.3.8)
@@ -38,7 +38,52 @@ profiles:
       - ArduinoJson (7.4.3)
       - DallasTemperature (4.0.6)
       - GFX Library for Arduino (1.6.5)
-      - lvgl (9.5.0)
+      - lvgl (9.6.0)
+      - M5GFX (0.2.25)
+      - M5Unified (0.2.14)
+      - OneWire (2.3.8)
+      - PubSubClient (2.8)
+
+  waveshare_4_3_rev3:
+    fqbn: esp32:esp32:esp32p4:UploadSpeed=921600,USBMode=default,CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,FlashFreq=80,FlashMode=qio,FlashSize=32M,PartitionScheme=app13M_data7M_32MB,DebugLevel=none,PSRAM=enabled,EraseFlash=none,JTAGAdapter=default,ChipVariant=postv3
+    platforms:
+      - platform: esp32:esp32 (3.3.7)
+        platform_index_url: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+    libraries:
+      - ArduinoJson (7.4.3)
+      - DallasTemperature (4.0.6)
+      - GFX Library for Arduino (1.6.5)
+      - lvgl (9.6.0)
+      - M5GFX (0.2.25)
+      - M5Unified (0.2.14)
+      - OneWire (2.3.8)
+      - PubSubClient (2.8)
+
+  waveshare_5:
+    fqbn: esp32:esp32:esp32p4:UploadSpeed=921600,USBMode=default,CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,FlashFreq=80,FlashMode=qio,FlashSize=32M,PartitionScheme=app13M_data7M_32MB,DebugLevel=none,PSRAM=enabled,EraseFlash=none,JTAGAdapter=default,ChipVariant=prev3
+    platforms:
+      - platform: esp32:esp32 (3.3.7)
+        platform_index_url: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+    libraries:
+      - ArduinoJson (7.4.3)
+      - DallasTemperature (4.0.6)
+      - GFX Library for Arduino (1.6.5)
+      - lvgl (9.6.0)
+      - M5GFX (0.2.25)
+      - M5Unified (0.2.14)
+      - OneWire (2.3.8)
+      - PubSubClient (2.8)
+
+  waveshare_5_rev3:
+    fqbn: esp32:esp32:esp32p4:UploadSpeed=921600,USBMode=default,CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,FlashFreq=80,FlashMode=qio,FlashSize=32M,PartitionScheme=app13M_data7M_32MB,DebugLevel=none,PSRAM=enabled,EraseFlash=none,JTAGAdapter=default,ChipVariant=postv3
+    platforms:
+      - platform: esp32:esp32 (3.3.7)
+        platform_index_url: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+    libraries:
+      - ArduinoJson (7.4.3)
+      - DallasTemperature (4.0.6)
+      - GFX Library for Arduino (1.6.5)
+      - lvgl (9.6.0)
       - M5GFX (0.2.25)
       - M5Unified (0.2.14)
       - OneWire (2.3.8)
@@ -53,7 +98,7 @@ profiles:
       - ArduinoJson (7.4.3)
       - DallasTemperature (4.0.6)
       - GFX Library for Arduino (1.6.5)
-      - lvgl (9.5.0)
+      - lvgl (9.6.0)
       - M5GFX (0.2.25)
       - M5Unified (0.2.14)
       - OneWire (2.3.8)
@@ -68,7 +113,22 @@ profiles:
       - ArduinoJson (7.4.3)
       - DallasTemperature (4.0.6)
       - GFX Library for Arduino (1.6.5)
-      - lvgl (9.5.0)
+      - lvgl (9.6.0)
+      - M5GFX (0.2.25)
+      - M5Unified (0.2.14)
+      - OneWire (2.3.8)
+      - PubSubClient (2.8)
+
+  waveshare_8_rev3:
+    fqbn: esp32:esp32:esp32p4:UploadSpeed=921600,USBMode=default,CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,FlashFreq=80,FlashMode=qio,FlashSize=32M,PartitionScheme=app13M_data7M_32MB,DebugLevel=none,PSRAM=enabled,EraseFlash=none,JTAGAdapter=default,ChipVariant=postv3
+    platforms:
+      - platform: esp32:esp32 (3.3.7)
+        platform_index_url: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+    libraries:
+      - ArduinoJson (7.4.3)
+      - DallasTemperature (4.0.6)
+      - GFX Library for Arduino (1.6.5)
+      - lvgl (9.6.0)
       - M5GFX (0.2.25)
       - M5Unified (0.2.14)
       - OneWire (2.3.8)
@@ -83,7 +143,7 @@ profiles:
       - ArduinoJson (7.4.3)
       - DallasTemperature (4.0.6)
       - GFX Library for Arduino (1.6.5)
-      - lvgl (9.5.0)
+      - lvgl (9.6.0)
       - M5GFX (0.2.25)
       - M5Unified (0.2.14)
       - OneWire (2.3.8)
@@ -98,7 +158,7 @@ profiles:
       - ArduinoJson (7.4.3)
       - DallasTemperature (4.0.6)
       - GFX Library for Arduino (1.6.5)
-      - lvgl (9.5.0)
+      - lvgl (9.6.0)
       - M5GFX (0.2.25)
       - M5Unified (0.2.14)
       - OneWire (2.3.8)
@@ -113,7 +173,7 @@ profiles:
       - ArduinoJson (7.4.3)
       - DallasTemperature (4.0.6)
       - GFX Library for Arduino (1.6.5)
-      - lvgl (9.5.0)
+      - lvgl (9.6.0)
       - M5GFX (0.2.25)
       - M5Unified (0.2.14)
       - OneWire (2.3.8)
@@ -128,7 +188,7 @@ profiles:
       - ArduinoJson (7.4.3)
       - DallasTemperature (4.0.6)
       - GFX Library for Arduino (1.6.5)
-      - lvgl (9.5.0)
+      - lvgl (9.6.0)
       - M5GFX (0.2.25)
       - M5Unified (0.2.14)
       - OneWire (2.3.8)
@@ -143,7 +203,7 @@ profiles:
       - ArduinoJson (7.4.3)
       - DallasTemperature (4.0.6)
       - GFX Library for Arduino (1.6.5)
-      - lvgl (9.5.0)
+      - lvgl (9.6.0)
       - M5GFX (0.2.25)
       - M5Unified (0.2.14)
       - OneWire (2.3.8)
@@ -158,7 +218,7 @@ profiles:
       - ArduinoJson (7.4.3)
       - DallasTemperature (4.0.6)
       - GFX Library for Arduino (1.6.5)
-      - lvgl (9.5.0)
+      - lvgl (9.6.0)
       - M5GFX (0.2.25)
       - M5Unified (0.2.14)
       - OneWire (2.3.8)
@@ -173,13 +233,13 @@ profiles:
       - ArduinoJson (7.4.3)
       - DallasTemperature (4.0.6)
       - GFX Library for Arduino (1.6.5)
-      - lvgl (9.5.0)
+      - lvgl (9.6.0)
       - M5GFX (0.2.25)
       - M5Unified (0.2.14)
       - OneWire (2.3.8)
       - PubSubClient (2.8)
 
-  waveshare_7b_rev3_1:
+  waveshare_7b_rev3:
     fqbn: esp32:esp32:esp32p4:UploadSpeed=921600,USBMode=default,CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,FlashFreq=80,FlashMode=qio,FlashSize=32M,PartitionScheme=app13M_data7M_32MB,DebugLevel=none,PSRAM=enabled,EraseFlash=none,JTAGAdapter=default,ChipVariant=postv3
     platforms:
       - platform: esp32:esp32 (3.3.7)
@@ -188,7 +248,7 @@ profiles:
       - ArduinoJson (7.4.3)
       - DallasTemperature (4.0.6)
       - GFX Library for Arduino (1.6.5)
-      - lvgl (9.5.0)
+      - lvgl (9.6.0)
       - M5GFX (0.2.25)
       - M5Unified (0.2.14)
       - OneWire (2.3.8)
@@ -203,7 +263,22 @@ profiles:
       - ArduinoJson (7.4.3)
       - DallasTemperature (4.0.6)
       - GFX Library for Arduino (1.6.5)
-      - lvgl (9.5.0)
+      - lvgl (9.6.0)
+      - M5GFX (0.2.25)
+      - M5Unified (0.2.14)
+      - OneWire (2.3.8)
+      - PubSubClient (2.8)
+
+  guition_jc8012p4a1_v3:
+    fqbn: esp32:esp32:esp32p4:UploadSpeed=921600,USBMode=hwcdc,CDCOnBoot=cdc,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,FlashFreq=80,FlashMode=qio,FlashSize=16M,PartitionScheme=custom,DebugLevel=none,PSRAM=enabled,EraseFlash=none,JTAGAdapter=default,ChipVariant=postv3
+    platforms:
+      - platform: esp32:esp32 (3.3.7)
+        platform_index_url: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+    libraries:
+      - ArduinoJson (7.4.3)
+      - DallasTemperature (4.0.6)
+      - GFX Library for Arduino (1.6.5)
+      - lvgl (9.6.0)
       - M5GFX (0.2.25)
       - M5Unified (0.2.14)
       - OneWire (2.3.8)
@@ -218,7 +293,7 @@ profiles:
       - ArduinoJson (7.4.3)
       - DallasTemperature (4.0.6)
       - GFX Library for Arduino (1.6.5)
-      - lvgl (9.5.0)
+      - lvgl (9.6.0)
       - M5GFX (0.2.25)
       - M5Unified (0.2.14)
       - OneWire (2.3.8)
@@ -233,7 +308,7 @@ profiles:
       - ArduinoJson (7.4.3)
       - DallasTemperature (4.0.6)
       - GFX Library for Arduino (1.6.5)
-      - lvgl (9.5.0)
+      - lvgl (9.6.0)
       - M5GFX (0.2.25)
       - M5Unified (0.2.14)
       - OneWire (2.3.8)
@@ -248,7 +323,22 @@ profiles:
       - ArduinoJson (7.4.3)
       - DallasTemperature (4.0.6)
       - GFX Library for Arduino (1.6.5)
-      - lvgl (9.5.0)
+      - lvgl (9.6.0)
+      - M5GFX (0.2.25)
+      - M5Unified (0.2.14)
+      - OneWire (2.3.8)
+      - PubSubClient (2.8)
+
+  golden_security_gs_t3e_v2:
+    fqbn: esp32:esp32:esp32s3:UploadSpeed=921600,USBMode=hwcdc,CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=custom,DebugLevel=none,PSRAM=opi,LoopCore=1,EventsCore=1,EraseFlash=none,JTAGAdapter=default,ZigbeeMode=default
+    platforms:
+      - platform: esp32:esp32 (3.3.7)
+        platform_index_url: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+    libraries:
+      - ArduinoJson (7.4.3)
+      - DallasTemperature (4.0.6)
+      - GFX Library for Arduino (1.6.5)
+      - lvgl (9.6.0)
       - M5GFX (0.2.25)
       - M5Unified (0.2.14)
       - OneWire (2.3.8)
@@ -263,7 +353,7 @@ profiles:
       - ArduinoJson (7.4.3)
       - DallasTemperature (4.0.6)
       - GFX Library for Arduino (1.6.5)
-      - lvgl (9.5.0)
+      - lvgl (9.6.0)
       - M5GFX (0.2.25)
       - M5Unified (0.2.14)
       - OneWire (2.3.8)
@@ -278,7 +368,7 @@ profiles:
       - ArduinoJson (7.4.3)
       - DallasTemperature (4.0.6)
       - GFX Library for Arduino (1.6.5)
-      - lvgl (9.5.0)
+      - lvgl (9.6.0)
       - M5GFX (0.2.25)
       - M5Unified (0.2.14)
       - OneWire (2.3.8)
@@ -293,7 +383,7 @@ profiles:
       - ArduinoJson (7.4.3)
       - DallasTemperature (4.0.6)
       - GFX Library for Arduino (1.6.5)
-      - lvgl (9.5.0)
+      - lvgl (9.6.0)
       - M5GFX (0.2.25)
       - M5Unified (0.2.14)
       - OneWire (2.3.8)

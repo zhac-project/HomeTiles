@@ -1,0 +1,190 @@
+// The Settings Display page of the approved mockup
+// (build/design-mockups/settings/settings-menu.html): sections Screen and
+// Screensaver, slider rows without colons, the rotation segment, and the
+// category lines. Every text comes from the central translations, in every
+// language; sizes come from the mockup's per-class values.
+import assert from 'node:assert/strict';
+
+import {readRepoFile} from '../../lib/admin-source.mjs';
+import {maskCpp} from '../../lib/cpp-source.mjs';
+
+const header = readRepoFile('src/core/i18n/i18n.h');
+const i18n = readRepoFile('src/core/i18n/i18n.cpp');
+const rawScreen = readRepoFile('src/ui/tabs/settings/settings_screen.cpp');
+const screen = maskCpp(rawScreen);
+const parts = readRepoFile('src/ui/tabs/settings/settings_parts.cpp');
+const style = readRepoFile('src/ui/tabs/settings/settings_style.h');
+const model = maskCpp(readRepoFile('src/ui/tabs/settings/tab_settings.cpp'));
+
+// --- Translations ---------------------------------------------------------------------
+const keys = ['settings_screen', 'settings_brightness', 'settings_sleep', 'settings_rotation',
+  'settings_screensaver', 'settings_starts_after', 'settings_sound', 'settings_volume', 'settings_microphone',
+  'settings_display_sound',
+  'settings_sleep_summary_fmt',
+  'settings_not_connected', 'settings_access_point_on', 'settings_update_available'];
+const expected = {
+  kStringsEn: ['Screen', 'Brightness', 'Sleep', 'Rotation', 'Screensaver', 'Starts after', 'Sound', 'Volume', 'Microphone', 'Display & Sound', 'Sleep %s',
+    'Not connected', 'Access point on', 'Update available'],
+  kStringsDe: ['Bildschirm', 'Helligkeit', 'Standby', 'Drehung', 'Screensaver', 'Startet nach', 'Ton', 'Lautstärke', 'Mikrofon', 'Anzeige & Ton', 'Standby %s',
+    'Nicht verbunden', 'Hotspot an', 'Update verfügbar'],
+  kStringsFr: ['Écran', 'Luminosité', 'Veille', 'Rotation', 'Écran de veille', 'Démarre après', 'Son', 'Volume', 'Microphone', 'Écran et son', 'Veille %s',
+    'Non connecté', "Point d'accès actif", 'Mise à jour disponible'],
+  kStringsPl: ['Ekran', 'Jasność', 'Uśpienie', 'Obrót', 'Wygaszacz ekranu', 'Start po', 'Dźwięk', 'Głośność', 'Mikrofon', 'Ekran i dźwięk', 'Uśpienie %s',
+    'Brak połączenia', 'Punkt dostępu włączony', 'Dostępna aktualizacja'],
+  kStringsCs: ['Obrazovka', 'Jas', 'Uspání', 'Otočení', 'Spořič obrazovky', 'Spustit po', 'Zvuk', 'Hlasitost', 'Mikrofon', 'Displej a zvuk', 'Uspání %s',
+    'Nepřipojeno', 'Přístupový bod zapnut', 'Je dostupná aktualizace'],
+  kStringsEs: ['Pantalla', 'Brillo', 'Reposo', 'Rotación', 'Salvapantallas', 'Empieza tras', 'Sonido', 'Volumen', 'Micrófono', 'Pantalla y sonido', 'Reposo %s',
+    'No conectado', 'Punto de acceso activo', 'Actualización disponible'],
+  kStringsSk: ['Obrazovka', 'Jas', 'Spánok', 'Otočenie', 'Šetrič obrazovky', 'Spustí sa po', 'Zvuk', 'Hlasitosť', 'Mikrofón', 'Displej a zvuk', 'Spánok %s',
+    'Nie je pripojené', 'Prístupový bod zapnutý', 'Dostupná aktualizácia'],
+  kStringsRu: ['Экран', 'Яркость', 'Сон', 'Поворот', 'Заставка', 'Запуск через', 'Звук', 'Громкость', 'Микрофон', 'Экран и звук', 'Сон %s',
+    'Не подключено', 'Точка доступа вкл.', 'Доступно обновление'],
+};
+const struct = header.slice(header.indexOf('struct Strings {'), header.indexOf('\n};', header.indexOf('struct Strings {')));
+const fields = [...struct.replace(/\/\/[^\n]*/g, '').matchAll(/const char\*\s+(\w+);/g)].map(match => match[1]);
+const first = fields.indexOf(keys[0]);
+assert.deepEqual(fields.slice(first, first + keys.length), keys, 'the Settings strings sit together in the Strings struct');
+const tables = [...new Set([...i18n.matchAll(/\{&(kStrings\w+), &kLocale\w+\}/g)].map(match => match[1]))];
+assert.deepEqual([...tables].sort(), Object.keys(expected).sort(), 'every registered language is checked');
+for (const table of tables) {
+  const start = i18n.indexOf(`static const Strings ${table} = {`);
+  const values = [...i18n.slice(start, i18n.indexOf('};', start)).matchAll(/"((?:\\.|[^"\\])*)"/g)]
+    .map(match => match[1]);
+  assert.equal(values.length, fields.length, `${table} has one value per field`);
+  assert.deepEqual(values.slice(first, first + keys.length), expected[table], `${table} Settings strings`);
+}
+
+// --- Display page -----------------------------------------------------------------------
+const between = (source, from, to) => {
+  const start = source.indexOf(from);
+  const end = source.indexOf(to, start);
+  assert.ok(start >= 0 && end > start, `${from} .. ${to}`);
+  return source.slice(start, end);
+};
+const page = between(screen, 'void build_display_page(lv_obj_t* page) {', 'void clear_locale_refs() {');
+for (const key of ['settings_screen', 'settings_brightness', 'settings_sleep', 'settings_rotation',
+  'settings_screensaver', 'settings_starts_after']) {
+  assert.match(page, new RegExp(`s\\.${key}\\b`), `the page shows ${key}`);
+}
+const rawPage = between(rawScreen, 'void build_display_page(lv_obj_t* page) {', '// ---------- Localization page ----------');
+assert.doesNotMatch(rawPage, /"[A-Z][a-z]+/, 'no display text in the page code');
+assert.match(page, /section\(page, s\.settings_screen, true\)/);
+assert.match(page, /section\(page, s\.settings_screensaver, false\)/);
+// Sound (#123, user 2026-10-22): a third group between Screen and
+// Screensaver on the boards with a speaker, the volume with the usual slider
+// and the microphone with the hotspot's switch; nothing else moves.
+assert.match(page, /settings_model::theme_selected\(index\); \}\);\s*const settings_model::SoundValues sound = settings_model::sound_values\(\);\s*if \(sound\.speaker\) \{\s*settings_parts::section\(page, s\.settings_sound, false\);\s*lv_obj_t\* audio = settings_parts::group\(page, palette\);/,
+  'the Sound group follows the Screen group, only with a speaker');
+assert.match(rawPage, /display_slider_row\(audio, "volume-high", s\.settings_volume, width, 0, 100, sound\.volume, on_volume,\s*&g_volume_value\);\s*set_percent_text\(g_volume_value, sound\.volume\);/);
+assert.match(rawPage, /if \(sound\.microphone\) \{\s*settings_parts::Row mic = settings_parts::row\(audio, "microphone", s\.settings_microphone\);\s*settings_parts::toggle\(mic\.row, sound\.mic_on, settings_style::kDisplayColor, palette\.group, true, on_microphone,\s*nullptr\);\s*\}\s*\}\s*settings_parts::section\(page, s\.settings_screensaver, false\);/,
+  'the microphone switch only with a microphone, then the Screensaver group');
+const soundHandlers = between(rawScreen, 'void on_volume(lv_obj_t*, int32_t value, bool final) {', '}  // namespace');
+assert.match(soundHandlers, /set_percent_text\(g_volume_value, value\);\s*settings_model::volume_changed\(value, final\);/);
+// The switch rebuilds the page after its own event, at the same scroll position.
+assert.match(soundHandlers, /settings_model::microphone_selected\(!settings_model::sound_values\(\)\.mic_on\);\s*\/\/[^\n]*\n\s*lv_async_call\(rebuild_display_async, nullptr\);/);
+assert.match(soundHandlers, /const int32_t scroll = lv_obj_get_scroll_y\(g_page\);\s*build_page\(\);\s*lv_obj_update_layout\(g_page\);\s*lv_obj_scroll_to_y\(g_page, scroll, LV_ANIM_OFF\);/);
+assert.match(screen, /void clear_display_refs\(\) \{\s*g_volume_value = nullptr;/);
+// The model uses the speaker's own values, as Home Assistant sets them: the
+// volume follows the finger at most every 250 ms and always on release.
+const rawModel = readRepoFile('src/ui/tabs/settings/tab_settings.cpp');
+assert.match(rawModel, /values\.speaker = speaker::supported\(\);\s*values\.microphone = speaker::micCapability\(\);/);
+assert.match(rawModel, /if \(!final && now - last_ms < 250\) return;\s*last_ms = now;\s*speaker::setVolume\(static_cast<float>\(percent\) \/ 100\.0f\);/);
+assert.match(rawModel, /void microphone_selected\(bool on\) \{ speaker::setMicEnabled\(on, "panel settings"\); \}/);
+
+// With the Sound group the category is "Display & Sound" with a speaker
+// beside the monitor; boards without a speaker keep "Display" and the monitor.
+assert.match(screen, /case Category::Display:\s*return settings_model::sound_values\(\)\.speaker \? s\.settings_display_sound : s\.display_label;/);
+assert.match(rawScreen, /case Category::Display:\s*return settings_model::sound_values\(\)\.speaker \? "monitor-speaker" : "monitor";/);
+const soundNames = {kStringsEn: 'Display & Sound', kStringsDe: 'Anzeige & Ton', kStringsFr: '\u00c9cran et son',
+  kStringsPl: 'Ekran i d\u017awi\u0119k', kStringsCs: 'Displej a zvuk', kStringsEs: 'Pantalla y sonido', kStringsSk: 'Displej a zvuk',
+  kStringsRu: '\u042d\u043a\u0440\u0430\u043d \u0438 \u0437\u0432\u0443\u043a'};
+const soundIndex = fields.indexOf('settings_display_sound');
+assert.ok(soundIndex > 0, 'settings_display_sound is a field');
+for (const table of tables) {
+  const start = i18n.indexOf(`static const Strings ${table} = {`);
+  const values = [...i18n.slice(start, i18n.indexOf('};', start)).matchAll(/"((?:\\.|[^"\\])*)"/g)].map(match => match[1]);
+  assert.equal(values[soundIndex], soundNames[table], `${table} names the category with sound`);
+}
+
+// Quarter turns on panels that support them, else normal and flipped (the
+// setup's first step shares the segment).
+assert.match(page, /g_rotation_segment = rotation_segment\(rotation\.row, palette\.group\);/);
+// The look below the rotation (user 2026-10-14): Dark, Light, Automatic as
+// stored, like the Web Admin's Design.
+assert.match(page, /g_rotation_segment = rotation_segment\(rotation\.row, palette\.group\);[\s\S]{0,400}settings_parts::Row design = settings_parts::row\(screen,\s+, s\.theme_label\);\s*const char\* const themes\[\] = \{s\.theme_dark, s\.theme_light, s\.theme_auto\};\s*settings_parts::segment\(design\.row, themes, 3, settings_model::theme_choice\(\), palette\.group,\s*\[\]\(lv_obj_t\*, uint8_t index\) \{ settings_model::theme_selected\(index\); \}\);/);
+const rotation = between(screen, 'lv_obj_t* rotation_segment(lv_obj_t* row, uint32_t track) {', 'const char* locale_title(');
+assert.match(rotation, /if \(settings_model::quarter_turns\(\)\) \{[\s\S]*?kQuarterTurns, 4,[\s\S]*?\}[\s\S]*?kFlip, 2,/);
+// The slider track is the control fill computed for the "From icon" card,
+// like the Light popup's brightness track (popup_shell.cpp header_fill).
+const sliderRow = between(screen, 'lv_obj_t* display_slider_row(', 'void build_display_page(');
+assert.match(sliderRow, /settings_style::kDisplayColor,\s*tone\.control, palette\.card, on_change\)/);
+assert.match(style, /const uint32_t circle_card = hue \? from_icon_card\(card, color\) : card;/);
+assert.match(style, /tone_color::g_from_icon_card\(color & 0xFFFFFF, pressed, 0\)/);
+// The slider rows share one length: the longest name x 1.3 (mockup applyProfile).
+const width = between(screen, 'int display_slider_width(int page_width) {', 'lv_obj_t* display_slider_row(');
+assert.match(width, /\{s\.settings_brightness, s\.settings_volume, s\.settings_sleep, s\.settings_starts_after\}/,
+  'the volume slider starts at the same x');
+assert.match(width, /name = name \* 13 \/ 10;/);
+assert.match(width, /3 \* settings_style::kRowGap -\s*settings_style::kValueWidth - name/);
+// Steps read like the mockup: "30 s", "5 min", "1 h", Never.
+const step = between(rawScreen, 'void format_step(', 'void category_line(');
+assert.match(step, /seconds < 60[\s\S]*?"%u s"[\s\S]*?seconds < 3600[\s\S]*?"%u min"[\s\S]*?"%u h"/);
+// Rows have the mockup's fixed height, so LVGL centers their content.
+assert.match(parts, /lv_obj_set_size\(r\.row, LV_PCT\(100\), kRowHeight\);/);
+// Text sits on the browser's baselines (Inter: ascender 1984, line 2478 per 2048).
+assert.match(parts, /constexpr float kInterAscent = 1984\.0f \/ 2048\.0f;/);
+assert.match(parts, /constexpr float kInterLine = \(1984\.0f \+ 494\.0f\) \/ 2048\.0f;/);
+for (const call of [/browser_line\(label, kSmallFontPx, kHeadingInsideTop, 0\)/,
+  /browser_line\(r\.title, kRowFontPx\)/, /browser_line\(r\.sub, kSmallFontPx, kSubTop\)/]) {
+  assert.match(parts, call);
+}
+// Headings sit inside their group (mockup secin): group() takes in the
+// heading made just before it; a row after the heading draws no separator.
+assert.match(parts, /if \(is_heading\(heading\)\) lv_obj_set_parent\(heading, g\);/);
+assert.match(parts, /const bool first = before == 0 \|\| \(before == 1 && is_heading\(lv_obj_get_child\(group, 0\)\)\);/);
+// The groups are surfaces like tiles with the tile radius, but without a
+// border, like everything inside a popup (user 2026-10-07); so are the
+// category tiles.
+assert.match(parts, /settings_style::apply_tile_radius\(g\);/);
+assert.doesNotMatch(screen, /apply_global_tile_border\((g|view\.box|b)\)/);
+// The head is the popup head: the X in the corner of the box one grid gap
+// inside the popup card margin, the circle mirroring it, the body one gap
+// below the X.
+assert.match(style, /inline int head_center_y\(\) \{ return popup_layout::kCardMargin \+ GRID_GAP \+ popup_layout::kCloseButtonSize \/ 2; \}/);
+assert.match(style, /return inner_left\(\) \+ \(popup_layout::kCloseButtonSize - popup_layout::kHeaderIconDiscSize\) \/ 2;/);
+assert.match(style, /inline int body_top\(\) \{ return popup_layout::kCardMargin \+ 2 \* GRID_GAP \+ popup_layout::kCloseButtonSize; \}/);
+const frame = between(screen, 'void build_frame() {', 'void select_category(Category category) {');
+assert.doesNotMatch(frame, /page_title_font|g_card_title/, 'no large page title: the selected category names the page');
+assert.match(frame, /lv_obj_set_style_pad_row\(g_page, GRID_GAP, 0\);/, 'one grid gap between the groups');
+// The firmware saves through the model: the screensaver brightness starts at
+// the device floor.
+assert.match(model, /values\.saver_brightness_min = Device::kConfiguredBrightnessPercentMin;/);
+
+// --- Category lines -----------------------------------------------------------------------
+const lines = between(screen, 'void category_line(', 'void on_lines_timer(');
+for (const key of ['settings_sleep_summary_fmt', 'settings_access_point_on', 'settings_not_connected',
+  'settings_update_available']) {
+  assert.match(lines, new RegExp(`s\\.${key}\\b`), `the category lines use ${key}`);
+}
+
+// --- Mockup sizes (PROFILES.vars: 1280x800 values, x 5/6 on 1024x600, own 480 values) ---------
+for (const [name, big, small] of [['kSectionTop', 22, 14], ['kSectionBottom', 10, 7], ['kSectionLeft', 24, 16],
+  ['kHeadingInsideTop', 16, 11],
+  ['kGroupRadius', 28, 19], ['kRowHeight', 88, 59], ['kRowPadLeft', 28, 19], ['kRowPadRight', 24, 16],
+  ['kRowGap', 20, 12], ['kSegmentHeight', 48, 32], ['kSegmentInset', 4, 3], ['kSegmentMinWidth', 104, 64],
+  ['kSegmentPad', 18, 12], ['kSliderHeight', 48, 32], ['kSliderMaxWidth', 420, 160], ['kSliderThumbWidth', 4, 3],
+  ['kValueWidth', 118, 64]]) {
+  assert.match(style, new RegExp(`constexpr int ${name} = pick\\(${big}, ${small}\\);`), name);
+}
+// Roundings follow the global radius: the mockup's value at the maximum radius.
+assert.match(style, /int baseline = at_maximum - \(tile_radius::kMaximum - tile_radius::kMinimum\);/);
+// The bar's circles are the half-height tiles' (tile_icon_disc inset and diameter).
+const disc = readRepoFile('src/tiles/runtime/tile_icon_disc.h');
+assert.match(disc, /inline int inset\(\) \{ return tile_layout::scale_480\(4\); \}/);
+assert.match(disc, /inline int diameter\(\) \{ return row_height\(\) - inset\(\) \* 2; \}/);
+assert.match(style, /inline int tile_inset\(\) \{ return popup_layout::scale480\(4\); \}/);
+// Settings keeps the profile's grid (grid_layout.h) whatever the tiles show.
+assert.match(style, /constexpr grid_layout::Shown kGrid = grid_layout::profile_grid\(\);/);
+assert.match(style, /inline int half_tile_disc\(\) \{ return \(kGrid\.cell_h - GRID_GAP\) \/ 2 - 2 \* tile_inset\(\); \}/);
+
+console.log('Settings Display page: translated texts, mockup sizes and rotation steps');

@@ -1,5 +1,9 @@
 #include "src/network/network_manager.h"
+#include "src/network/secure/command_channel.h"
+#include "src/network/link/link_config.h"
+#include "src/core/security/ht_crypto.h"
 #include "src/network/transport/network_transport.h"
+#include "src/network/wifi_event_log_limit.h"
 #include "src/core/config/config_manager.h"
 #include "src/network/mqtt/mqtt_handlers.h"
 #include "src/network/mqtt/mqtt_topics.h"
@@ -12,8 +16,10 @@
 #include "src/core/diagnostics/crash_log.h"
 #include "src/video/camera_stream.h"
 #include "src/video/local_camera/local_camera.h"
+#include "src/audio/speaker.h"
 #include <atomic>
 #include <esp_heap_caps.h>
+#include <esp_random.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
@@ -92,6 +98,87 @@ static constexpr uint32_t kMqttSdioControlQuietMs = 50;
 // new cloud settings reconnects at once.
 static constexpr uint32_t kCloudRefusalRetryMs = 15UL * 60UL * 1000UL;
 
+// A Wi-Fi join over ESP-Hosted (all-channel scan, association, 4-way
+// handshake, DHCP) can take longer than the 5 s retry period on the P4, and
+// with auto-reconnect off every retry is a new WiFi.begin() that aborts the
+// attempt in progress (Waveshare 7B, issue #41: IP after 5.9 to 7.3 s; with
+// 5 s the station left at each retry, reason 8 ASSOC_LEAVE, and never got an
+// IP). Give each attempt this long before the next WiFi.begin().
+static constexpr uint32_t kWifiJoinWindowMs = 30000;
+static std::atomic<uint32_t> wifi_join_started_ms{0};
+
+// A join the station gives up on before the window ends (access point not
+// found while the router restarts, handshake refused) is retried after the
+// usual 5 s instead. ASSOC_LEAVE is the station leaving on its own, for
+// example the attempt aborted by the next WiFi.begin(): it does not count,
+// as in the core's own reconnect (STA.cpp). The event task records the
+// failure; update() on the loop task moves wifi_retry_at.
+static constexpr uint32_t kWifiRetryAfterFailureMs = 5000;
+static std::atomic<bool> wifi_join_window_open{false};
+static std::atomic<uint32_t> wifi_join_failed_ms{0};  // millis() | 1, 0 = none
+
+// One line per station event, with the disconnect reason: without it a
+// failed join only shows "WiFi: Connecting to ..." every few seconds. A join
+// that keeps failing repeats the same events, so each kind of line prints at
+// most once a minute (wifi_event_log_limit.h); the failure itself is always
+// recorded for update().
+static wifi_event_log::Limiter wifi_event_log_limiter;
+
+static void logWifiEvent(arduino_event_id_t event, arduino_event_info_t info) {
+  const unsigned long since =
+      static_cast<unsigned long>(millis() - wifi_join_started_ms.load());
+  unsigned reason = 0;
+  if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+    reason = info.wifi_sta_disconnected.reason;
+    if (reason != WIFI_REASON_ASSOC_LEAVE && wifi_join_window_open.load()) {
+      wifi_join_failed_ms = millis() | 1u;
+    }
+  }
+  char line[160];
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_STA_START:
+      snprintf(line, sizeof(line), "station started");
+      break;
+    case ARDUINO_EVENT_WIFI_STA_STOP:
+      snprintf(line, sizeof(line), "station stopped");
+      break;
+    case ARDUINO_EVENT_WIFI_SCAN_DONE:
+      snprintf(line, sizeof(line), "scan done, %u networks (+%lu ms)",
+               static_cast<unsigned>(info.wifi_scan_done.number), since);
+      break;
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+      snprintf(line, sizeof(line), "associated, channel %u, auth mode %u (+%lu ms)",
+               static_cast<unsigned>(info.wifi_sta_connected.channel),
+               static_cast<unsigned>(info.wifi_sta_connected.authmode), since);
+      break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      snprintf(line, sizeof(line), "disconnected, reason %u (%s), RSSI %d (+%lu ms)",
+               reason, WiFi.disconnectReasonName(static_cast<wifi_err_reason_t>(reason)),
+               static_cast<int>(info.wifi_sta_disconnected.rssi), since);
+      break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      snprintf(line, sizeof(line), "got IP %s (+%lu ms)",
+               IPAddress(info.got_ip.ip_info.ip.addr).toString().c_str(), since);
+      break;
+    case ARDUINO_EVENT_WIFI_STA_LOST_IP:
+      snprintf(line, sizeof(line), "lost IP");
+      break;
+    default:
+      return;
+  }
+  uint32_t skipped = 0;
+  if (!wifi_event_log_limiter.allow(
+          wifi_event_log::key(static_cast<uint32_t>(event), reason), millis(), &skipped)) {
+    return;
+  }
+  if (skipped) {
+    Serial.printf("[WiFi] Event: %s, %lu more like it since the last one\n", line,
+                  static_cast<unsigned long>(skipped));
+  } else {
+    Serial.printf("[WiFi] Event: %s\n", line);
+  }
+}
+
 static void applyWifiAutoReconnectPolicy() {
 #if defined(CONFIG_ESP_WIFI_REMOTE_ENABLED) && CONFIG_ESP_WIFI_REMOTE_ENABLED
   // ESP32-P4 uses ESP-Hosted control RPCs. HomeTiles owns normal reconnects;
@@ -160,10 +247,10 @@ static void initMqttDmaReserve() {
       MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
   if (g_mqtt_dma_reserve) {
     g_mqtt_dma_reserve_held = true;
-    Serial.printf("[MQTT] DMA reserve allocated: %u KB\n",
+    Serial.printf("[%s] DMA reserve allocated: %u KB\n", networkManager.bridgeLogName(),
                   static_cast<unsigned>(kMqttDmaReserveBytes / 1024));
   } else {
-    Serial.println("[MQTT] WARNING: Could not allocate DMA reserve");
+    Serial.printf("[%s] WARNING: Could not allocate DMA reserve\n", networkManager.bridgeLogName());
   }
 #endif
 }
@@ -175,7 +262,7 @@ static void releaseMqttDmaReserve(const char* reason) {
   heap_caps_free(g_mqtt_dma_reserve);
   g_mqtt_dma_reserve = nullptr;
   g_mqtt_dma_reserve_rearm_since = 0;
-  Serial.printf("[MQTT] DMA reserve released (%s), largest=%u KB\n",
+  Serial.printf("[%s] DMA reserve released (%s), largest=%u KB\n", networkManager.bridgeLogName(),
                 reason ? reason : "?",
                 static_cast<unsigned>(
                     heap_caps_get_largest_free_block(
@@ -226,7 +313,7 @@ static size_t serviceMqttDmaHeadroom(uint32_t now_ms) {
           g_mqtt_dma_reserve_held = true;
           largest = heap_caps_get_largest_free_block(
               MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
-          Serial.printf("[MQTT] DMA reserve allocated again, largest=%u KB\n",
+          Serial.printf("[%s] DMA reserve allocated again, largest=%u KB\n", networkManager.bridgeLogName(),
                         static_cast<unsigned>(largest / 1024));
         }
         g_mqtt_dma_reserve_rearm_since = 0;
@@ -299,6 +386,26 @@ static bool enqueueOutboundCmd(MqttCmdKind kind,
                                bool retain,
                                bool priority = false,
                                uint32_t large_buffer_hold_ms = 0) {
+  // With an active Bridge pairing, panel commands travel sealed on the secure
+  // topic instead (src/network/secure/command_channel.h). Everything else,
+  // and every command without pairing, is published unchanged.
+  command_channel::SealedPublish sealed;
+  if (kind == MqttCmdKind::PUBLISH) {
+    switch (command_channel::prepareOutbound(topic, payload, payload_len, &sealed)) {
+      case command_channel::OutboundResult::Plain:
+        break;
+      case command_channel::OutboundResult::Sealed:
+        topic = sealed.topic();
+        payload = sealed.payload();
+        payload_len = sealed.length();
+        retain = false;
+        break;
+      case command_channel::OutboundResult::Held:
+        return true;
+      case command_channel::OutboundResult::Dropped:
+        return false;
+    }
+  }
   const bool large_publish =
       kind == MqttCmdKind::PUBLISH && large_buffer_hold_ms > 0;
   QueueHandle_t queue = kind == MqttCmdKind::PUBLISH
@@ -309,7 +416,7 @@ static bool enqueueOutboundCmd(MqttCmdKind kind,
   MqttOutboundCmd* cmd = mqttAllocOutbound(
       kind, topic, payload, payload_len, retain, large_buffer_hold_ms);
   if (!cmd) {
-    Serial.println("[MQTT] Outbound allocation failed -> command dropped");
+    Serial.printf("[%s] Outbound allocation failed -> command dropped\n", networkManager.bridgeLogName());
     return false;
   }
   const BaseType_t queued = priority
@@ -318,7 +425,7 @@ static bool enqueueOutboundCmd(MqttCmdKind kind,
   if (queued != pdTRUE) {
     heap_caps_free(cmd);
     ++g_mqtt_outbound_dropped;
-    Serial.printf("[MQTT] Outbound %s queue full -> dropped (#%u)\n",
+    Serial.printf("[%s] Outbound %s queue full -> dropped (#%u)\n", networkManager.bridgeLogName(),
                   kind != MqttCmdKind::PUBLISH
                       ? "Control"
                       : (large_publish ? "Large-Publish" : "Publish"),
@@ -393,9 +500,11 @@ static bool streamLogDue(uint32_t now_ms) {
 
 // Retained commands would replay a snapshot request after every reconnect.
 // The flag is only visible inside the client callback, so filter there.
-static bool dropRetainedLocalCameraCommand(TopicClient& client,
+static bool dropRetainedLocalCameraCommand(BridgeTransportClient& client,
                                            const char* topic) {
-  if (!client.lastPublishRetained() || !local_camera::isCommandTopic(topic)) {
+  if (!client.lastPublishRetained() ||
+      !(local_camera::isCommandTopic(topic) || speaker::isCommandTopic(topic) ||
+        speaker::isAssistCommandTopic(topic))) {
     return false;
   }
   static uint32_t dropped = 0;
@@ -644,6 +753,11 @@ void HomeTilesNetworkManager::init() {
   networkTransport.update();
   transport_generation_seen = networkTransport.generation();
   Serial.println("🌐 Initializing Network Manager...");
+  static bool wifi_event_log_registered = false;
+  if (!wifi_event_log_registered) {
+    WiFi.onEvent(logWifiEvent);
+    wifi_event_log_registered = true;
+  }
 
   if (!configManager.isConfigured()) {
     Serial.println("⚠️ No network configuration available");
@@ -688,23 +802,31 @@ void HomeTilesNetworkManager::init() {
   energy_response_topic_ = base + "/energy/response";
   bridge_icons_topic_ = base + "/bridge/icons";
 
-  mqtt_enabled = configManager.hasMqttConfig();
+  // A stored Bridge address replaces MQTT (docs-dev/bridge-link.md).
+  link_configured_ = link_config::configured();
+  if (link_configured_) {
+    const link_config::Settings& link = link_config::current();
+    strncpy(link_host_, link.host, sizeof(link_host_) - 1);
+    link_port_ = link.port;
+    if (link.pair_requested) requestLinkPairing(true);
+    mqtt_client.useLink(true);
+  }
+  mqtt_enabled = link_configured_ || configManager.hasMqttConfig();
   if (mqtt_enabled) {
     // MQTT setup precedes worker startup, so direct client access is safe.
     selectTopicTransport(cfg);
     mqtt_client.setClient(net_client);
-    mqtt_client.setServer(cfg.mqtt_host, cfg.mqtt_port);
+    if (link_configured_) {
+      mqtt_client.setServer(link_host_, link_port_);
+      Serial.printf("[Link] Direct Bridge link to %s:%u\n",
+                    link_host_, static_cast<unsigned>(link_port_));
+    } else {
+      mqtt_client.setServer(cfg.mqtt_host, cfg.mqtt_port);
+    }
     setMqttBufferSize(mqttNormalBufferSize(), "init");
-    mqtt_client.setCallback([this](char* topic, uint8_t* payload, unsigned int length) {
-      // Receive growth happens inside readPacket, before the queue validates
-      // callback bounds. Publish its actual capacity before copying the data.
-      mqtt_buffer_size = mqtt_client.getBufferSize();
-      mqtt_receive_buffer_floor = mqtt_client.getReceiveBufferSize();
-      if (dropRetainedLocalCameraCommand(mqtt_client, topic)) return;
-      mqttCallback(topic, payload, length);
-    });
+    installMessageCallback();
   } else {
-    Serial.println("MQTT: No configuration available - skipping connection");
+    Serial.println("[Network] No connection to Home Assistant set up; not connecting");
   }
   updateCloudStatus();
 
@@ -714,6 +836,7 @@ void HomeTilesNetworkManager::init() {
 // ========== Connect Wi-Fi ==========
 void HomeTilesNetworkManager::connectWifi() {
   wifi_retry_at = millis() + 5000UL;  // Retry in 5s
+  wifi_join_window_open = false;
 
   // Fixed Ethernet mode keeps Wi-Fi off regardless of retries, reconnects
   // or UI requests. Returning to Wi-Fi requires changing the network mode
@@ -775,7 +898,18 @@ void HomeTilesNetworkManager::connectWifi() {
     }
     Serial.printf("WiFi: Connecting to %s\n", cfg.wifi_ssid);
     applyWifiAddressing(cfg);
+    // Join the strongest access point with this SSID. The Arduino default
+    // (fast scan) joins the first one found, and the station never roams:
+    // the Guition S3 stayed at -71 dBm on the far one of two UniFi APs while
+    // the near one gave the P4 panels beside it -47 dBm. The full scan adds
+    // about one to two seconds per connection attempt.
+    wifi_join_started_ms = millis();
+    wifi_join_failed_ms = 0;
+    wifi_join_window_open = true;
+    WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+    WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
     WiFi.begin(cfg.wifi_ssid, cfg.wifi_pass);
+    wifi_retry_at = millis() + kWifiJoinWindowMs;
 
     // A slow call can signal a stuck transport even without a formal error.
     // Healthy calls take milliseconds; an unresponsive C6 reaches the
@@ -792,6 +926,7 @@ void HomeTilesNetworkManager::connectWifi() {
       const uint32_t shift =
           wifi_start_failures < 4 ? wifi_start_failures : 4;
       wifi_retry_at = millis() + (5000UL << shift);
+      wifi_join_window_open = false;  // Keep the backoff.
       if (wifi_start_failures >= kWifiStartWedgeThreshold) {
         handleWifiDriverWedge();
       }
@@ -942,26 +1077,8 @@ void HomeTilesNetworkManager::connectMqtt() {
   }
 
   if (!configManager.isConfigured()) {
-    Serial.println("MQTT: No configuration available");
+    Serial.println("[Network] Not configured yet; not connecting");
     return;
-  }
-
-  const DeviceConfig& cfg = configManager.getConfig();
-
-  char client_id[CONFIG_MQTT_CLIENT_ID_MAX];
-  if (cfg.mqtt_client_id[0]) {
-    snprintf(client_id, sizeof(client_id), "%s", cfg.mqtt_client_id);
-  } else {
-    const unsigned long long mac = static_cast<unsigned long long>(ESP.getEfuseMac() & 0xFFFFFFFFFFFFULL);
-    snprintf(client_id, sizeof(client_id), "Tab5_LVGL-%012llX", mac);
-  }
-
-  if (mqtt_client.isSelected(cloud_transport)) {
-    Serial.printf("Cloud: Connecting to %s as %s\n", cloud_transport.host(),
-                  client_id);
-  } else {
-    Serial.printf("MQTT: Connecting to %s:%u as %s\n", cfg.mqtt_host,
-                  cfg.mqtt_port, client_id);
   }
 
   const char* stat_topic = mqttTopics.topic(TopicKey::STAT_CONN);
@@ -970,12 +1087,15 @@ void HomeTilesNetworkManager::connectMqtt() {
   }
 
   bool ok = false;
-  if (cfg.mqtt_user && cfg.mqtt_user[0]) {
-    ok = mqtt_client.connect(client_id, cfg.mqtt_user, cfg.mqtt_pass,
-                             stat_topic, 0, true, "0");
+  if (mqtt_client.linkMode()) {
+    if (!bridgeConnectionWanted()) {
+      // Unpaired and no pairing requested: nothing to connect to yet.
+      mqtt_retry_at = millis() + 1000UL;
+      return;
+    }
+    ok = connectLink();
   } else {
-    ok = mqtt_client.connect(client_id, nullptr, nullptr,
-                             stat_topic, 0, true, "0");
+    ok = connectMqttBroker(stat_topic);
   }
 
   if (!ok) {
@@ -986,28 +1106,197 @@ void HomeTilesNetworkManager::connectMqtt() {
     if (mqtt_connect_failures < 255) ++mqtt_connect_failures;
     const uint32_t shift =
         mqtt_connect_failures < 5 ? mqtt_connect_failures : 5;
-    const uint32_t retry_ms =
-        cloudRefused() ? kCloudRefusalRetryMs : (3000UL << shift);  // 6s..96s
-    mqtt_retry_at = millis() + retry_ms;
-    Serial.printf("MQTT: Connection failed, state=%d (retry in %lus)\n",
+    mqtt_retry_at = millis() + (3000UL << shift);  // 6s..96s
+    // A refused cloud handshake (token, plan) cannot succeed soon.
+    if (cloudRefused()) mqtt_retry_at = millis() + kCloudRefusalRetryMs;
+    Serial.printf("%s: Connection failed, state=%d (retry in %lus)\n",
+                  mqtt_client.linkMode() ? "[Link]"
+                  : mqtt_client.cloudMode() ? "[Cloud]"
+                                            : "MQTT",
                   mqtt_client.state(),
-                  static_cast<unsigned long>(retry_ms / 1000));
+                  static_cast<unsigned long>((mqtt_retry_at - millis()) / 1000));
     updateCloudStatus();
     return;
   }
 
   mqtt_connect_failures = 0;
-  Serial.println("✓ MQTT connected");
+  if (mqtt_client.linkMode()) {
+    Serial.printf("[Link] Connected to the Bridge%s\n",
+                  link_pair_mode_flag ? " in pair mode" : "");
+  } else {
+    Serial.println("[MQTT] Connected to the broker");
+  }
   mqtt_connected_at = millis();
-  logNetworkHeap("after-MQTT-connect");
-  if (mqtt_client.isSelected(cloud_transport)) {
+  logNetworkHeap("after-connect");
+  if (mqtt_client.cloudMode()) {
     // Evidence for the TLS memory gate: the handshake ran on this worker.
     Serial.printf("[Cloud] Connected to %s (worker stack free min %u B)\n",
-                  cloud_transport.host(),
+                  mqtt_client.cloud().host(),
                   static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
   }
   updateCloudStatus();
+  finishMqttConnect(stat_topic);
+}
 
+// Worker only: connects to the MQTT broker with the last will on stat_topic.
+bool HomeTilesNetworkManager::connectMqttBroker(const char* stat_topic) {
+  const DeviceConfig& cfg = configManager.getConfig();
+
+  char client_id[CONFIG_MQTT_CLIENT_ID_MAX];
+  if (cfg.mqtt_client_id[0]) {
+    snprintf(client_id, sizeof(client_id), "%s", cfg.mqtt_client_id);
+  } else {
+    const unsigned long long mac = static_cast<unsigned long long>(ESP.getEfuseMac() & 0xFFFFFFFFFFFFULL);
+    snprintf(client_id, sizeof(client_id), "Tab5_LVGL-%012llX", mac);
+  }
+
+  if (mqtt_client.cloudMode()) {
+    Serial.printf("[Cloud] Connecting to %s as %s\n", mqtt_client.cloud().host(), client_id);
+  } else {
+    Serial.printf("[MQTT] Connecting to %s:%u as %s\n", cfg.mqtt_host, cfg.mqtt_port, client_id);
+  }
+
+  if (cfg.mqtt_user && cfg.mqtt_user[0]) {
+    return mqtt_client.mqtt().connect(client_id, cfg.mqtt_user, cfg.mqtt_pass,
+                                      stat_topic, 0, true, "0");
+  }
+  return mqtt_client.mqtt().connect(client_id, nullptr, nullptr,
+                                    stat_topic, 0, true, "0");
+}
+
+// Worker only: connects to the Bridge in session mode with the pairing key,
+// or in pair mode while a pairing is requested (docs-dev/bridge-link.md).
+bool HomeTilesNetworkManager::connectLink() {
+  LinkCredentials credentials;
+  portENTER_CRITICAL(&link_mux_);
+  credentials = link_credentials_;
+  link_changed_ = false;
+  portEXIT_CRITICAL(&link_mux_);
+  char did[24];
+  buildDeviceId(did, sizeof(did));
+  Serial.printf("[Link] Connecting to the Bridge at %s:%u (%s)\n", link_host_,
+                static_cast<unsigned>(link_port_),
+                credentials.has_key ? "encrypted session" : "pair mode");
+  const bool ok = mqtt_client.link().connect(
+      did, mqttTopics.deviceBase().c_str(), credentials.has_key ? credentials.key : nullptr,
+      credentials.has_key ? credentials.key_id : nullptr);
+  link_pair_mode_flag = ok && mqtt_client.link().pairMode();
+  // The Bridge has no entry with this key any more (deleted in Home
+  // Assistant). After three refusals in a row the loop task starts the panel
+  // again like a new one, so Pair sets it up again. One refusal can be the
+  // moment between pairing and the new entry.
+  if (credentials.has_key && !ok && mqtt_client.link().state() == BridgeLinkClient::kRefused &&
+      strcmp(mqtt_client.link().refuseReason(), "unknown") == 0) {
+    if (++link_unknown_refusals_ >= 3) {
+      link_unknown_refusals_ = 0;
+      link_forgotten_flag_ = true;
+    }
+  } else if (ok) {
+    link_unknown_refusals_ = 0;
+  }
+  ht_crypto::secureZero(&credentials, sizeof(credentials));
+  return ok;
+}
+
+// Worker only, after init(): the socket and the message callback of the
+// active client (MQTT or the link).
+void HomeTilesNetworkManager::installMessageCallback() {
+  mqtt_client.setClient(net_client);
+  mqtt_client.setCallback([this](char* topic, uint8_t* payload, unsigned int length) {
+    // Receive growth happens inside readPacket, before the queue validates
+    // callback bounds. Publish its actual capacity before copying the data.
+    mqtt_buffer_size = mqtt_client.getBufferSize();
+    mqtt_receive_buffer_floor = mqtt_client.getReceiveBufferSize();
+    if (dropRetainedLocalCameraCommand(mqtt_client, topic)) return;
+    mqttCallback(topic, payload, length);
+  });
+  // Pictures above the normal message size (covers, the screensaver image)
+  // come over the link as streams, collected in PSRAM.
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+  constexpr size_t kStreamReceiveLimit = 512 * 1024;
+#else
+  constexpr size_t kStreamReceiveLimit = 256 * 1024;
+#endif
+  mqtt_client.setStreamReceive(kStreamReceiveLimit,
+                               [](const char* topic, uint8_t* data, size_t length, bool) {
+                                 mqttStreamCallback(topic, data, length);
+                               });
+}
+
+// Worker only: moves the client to the link or away from it. Queued messages
+// (an unpair, a pairing abort) leave over the old connection first.
+void HomeTilesNetworkManager::applyLinkTransport(const LinkTransportRequest& request) {
+  if (mqtt_client.connected()) {
+    drainOutboundQueues(kMqttOutboundDrainNormal);
+    // Leaving the broker for the link: the panel will not announce itself
+    // there again, so its retained identity would offer it as a new panel.
+    if (request.enable && !mqtt_client.linkMode()) clearMqttLeftovers();
+    mqtt_client.disconnect();
+  }
+  purgeOutboundQueue();
+  failPendingStreamPublish("transport change");
+  mqtt_post_connect_pending = false;
+  mqtt_post_connect_ready_at = 0;
+  mqtt_large_until = 0;
+  mqtt_connected_flag = false;
+  link_pair_mode_flag = false;
+  link_changed_ = false;
+  link_unknown_refusals_ = 0;
+  mqtt_receive_buffer_floor = 0;
+  mqtt_retry_at = 0;
+  mqtt_connect_failures = 0;
+  if (request.enable) {
+    memcpy(link_host_, request.host, sizeof(link_host_));
+    link_host_[sizeof(link_host_) - 1] = '\0';
+    link_port_ = request.port;
+    mqtt_client.useLink(true);
+    installMessageCallback();
+    mqtt_client.setServer(link_host_, link_port_);
+    mqtt_enabled = true;
+    Serial.printf("[Link] Switched to the direct Bridge link at %s:%u\n", link_host_,
+                  static_cast<unsigned>(link_port_));
+    updateCloudStatus();
+    return;
+  }
+  mqtt_client.useLink(false);
+  mqtt_enabled = configManager.hasMqttConfig();
+  if (mqtt_enabled) {
+    const DeviceConfig& cfg = configManager.getConfig();
+    selectTopicTransport(cfg);
+    installMessageCallback();
+    mqtt_client.setServer(cfg.mqtt_host, cfg.mqtt_port);
+  }
+  Serial.printf("[Link] Direct Bridge link removed%s\n",
+                mqtt_enabled ? "; back to MQTT" : "; waiting for Pair");
+}
+
+// Worker only, while connected to the MQTT broker. Empty retained messages
+// delete the announcement, the connection state and the address; a clean
+// DISCONNECT then sends no last will. The Bridge also clears the
+// announcement for panels that left without this (reset, new firmware).
+void HomeTilesNetworkManager::clearMqttLeftovers() {
+  const String announcement = bridgeConfigTopic();
+  const char* topics[] = {announcement.c_str(), mqttTopics.topic(TopicKey::STAT_CONN),
+                          mqttTopics.topic(TopicKey::STAT_IP)};
+  uint8_t cleared = 0;
+  for (const char* topic : topics) {
+    if (topic && *topic && mqtt_client.publish(topic, "", true)) ++cleared;
+  }
+  Serial.printf("[Link] Cleared %u retained MQTT messages before leaving the broker\n",
+                static_cast<unsigned>(cleared));
+}
+
+String HomeTilesNetworkManager::bridgeConfigTopic() const {
+  char did[24];
+  buildDeviceId(did, sizeof(did));
+  String topic = "tab5_lvgl/config/";
+  topic += did;
+  topic += "/bridge";
+  return topic;
+}
+
+// Worker only: shared steps after either transport connected.
+void HomeTilesNetworkManager::finishMqttConnect(const char* stat_topic) {
   // Publish status and subscribe to reply topics directly. Client access
   // is safe because connectMqtt() runs only on the owning worker.
   mqtt_client.publish(stat_topic, "1", true);
@@ -1018,24 +1307,24 @@ void HomeTilesNetworkManager::connectMqtt() {
   }
   if (!bridge_apply_topic_.isEmpty()) {
     if (mqtt_client.subscribe(bridge_apply_topic_.c_str())) {
-      Serial.printf("[MQTT] Listening for bridge config on %s\n",
+      Serial.printf("[%s] Listening for bridge config on %s\n", networkManager.bridgeLogName(),
                     bridge_apply_topic_.c_str());
     } else {
-      Serial.printf("[MQTT] ERROR subscribing to bridge config on %s\n",
+      Serial.printf("[%s] ERROR subscribing to bridge config on %s\n", networkManager.bridgeLogName(),
                     bridge_apply_topic_.c_str());
     }
   }
   if (!history_response_topic_.isEmpty()) {
     mqtt_client.subscribe(history_response_topic_.c_str());
-    Serial.printf("[MQTT] Listening for history responses on %s\n", history_response_topic_.c_str());
+    Serial.printf("[%s] Listening for history responses on %s\n", networkManager.bridgeLogName(), history_response_topic_.c_str());
   }
   if (!energy_response_topic_.isEmpty()) {
     mqtt_client.subscribe(energy_response_topic_.c_str());
-    Serial.printf("[MQTT] Listening for energy responses on %s\n", energy_response_topic_.c_str());
+    Serial.printf("[%s] Listening for energy responses on %s\n", networkManager.bridgeLogName(), energy_response_topic_.c_str());
   }
   if (!bridge_icons_topic_.isEmpty()) {
     mqtt_client.subscribe(bridge_icons_topic_.c_str());
-    Serial.printf("[MQTT] Listening for icon updates on %s\n", bridge_icons_topic_.c_str());
+    Serial.printf("[%s] Listening for icon updates on %s\n", networkManager.bridgeLogName(), bridge_icons_topic_.c_str());
   }
 
   // Discard stale interactive commands after an ordinary disconnect.
@@ -1044,7 +1333,7 @@ void HomeTilesNetworkManager::connectMqtt() {
   // topics subscribed above.
   if (mqtt_preserve_outbound_on_connect) {
     mqtt_preserve_outbound_on_connect = false;
-    Serial.println("[MQTT] DMA recovery: pending requests preserved");
+    Serial.printf("[%s] DMA recovery: pending requests preserved\n", networkManager.bridgeLogName());
   } else {
     purgeOutboundQueue();
   }
@@ -1075,7 +1364,7 @@ void HomeTilesNetworkManager::beginMqttWorker() {
     g_mqtt_publish_queue =
         xQueueCreate(kMqttPublishQueueDepth, sizeof(MqttOutboundCmd*));
     if (!g_mqtt_publish_queue) {
-      Serial.println("[MQTT] Could not create outbound publish queue");
+      Serial.printf("[%s] Could not create outbound publish queue\n", networkManager.bridgeLogName());
     }
   }
   if (!g_mqtt_large_publish_queue) {
@@ -1090,13 +1379,13 @@ void HomeTilesNetworkManager::beginMqttWorker() {
     g_mqtt_control_queue =
         xQueueCreate(kMqttControlQueueDepth, sizeof(MqttOutboundCmd*));
     if (!g_mqtt_control_queue) {
-      Serial.println("[MQTT] Could not create outbound control queue");
+      Serial.printf("[%s] Could not create outbound control queue\n", networkManager.bridgeLogName());
     }
   }
   if (!g_stream_done) {
     g_stream_done = xSemaphoreCreateBinary();
     if (!g_stream_done) {
-      Serial.println("[MQTT] Could not create stream-publish semaphore");
+      Serial.printf("[%s] Could not create stream-publish semaphore\n", networkManager.bridgeLogName());
     }
   }
   initMqttDmaReserve();
@@ -1136,7 +1425,7 @@ void HomeTilesNetworkManager::serviceMqttWorker() {
         mqtt_client.publish(stat_topic, "0", true);
       }
       mqtt_client.disconnect();
-      Serial.println("[MQTT] Disconnect for reconfiguration");
+      Serial.printf("[%s] Disconnect for reconfiguration\n", networkManager.bridgeLogName());
     }
     purgeOutboundQueue();
     mqtt_post_connect_pending = false;
@@ -1147,30 +1436,67 @@ void HomeTilesNetworkManager::serviceMqttWorker() {
     }
     mqtt_connected_flag = false;
 
-    mqtt_enabled = configManager.hasMqttConfig();
+    // With a direct link, MQTT settings saved in Web Admin are kept but not
+    // used; the link only reconnects.
+    mqtt_enabled = mqtt_client.linkMode() || configManager.hasMqttConfig();
     if (mqtt_enabled) {
       const DeviceConfig& cfg = configManager.getConfig();
       selectTopicTransport(cfg);
       mqtt_client.setClient(net_client);
-      mqtt_client.setServer(cfg.mqtt_host, cfg.mqtt_port);
-      mqtt_client.setCallback([this](char* topic, uint8_t* payload, unsigned int length) {
-        mqtt_buffer_size = mqtt_client.getBufferSize();
-        mqtt_receive_buffer_floor = mqtt_client.getReceiveBufferSize();
-        if (dropRetainedLocalCameraCommand(mqtt_client, topic)) return;
-        mqttCallback(topic, payload, length);
-      });
+      if (mqtt_client.linkMode()) {
+        mqtt_client.setServer(link_host_, link_port_);
+      } else {
+        mqtt_client.setServer(cfg.mqtt_host, cfg.mqtt_port);
+      }
+      installMessageCallback();
       mqtt_retry_at = 0;  // Connect immediately on the next iteration.
       mqtt_connect_failures = 0;  // Fresh transport, fresh backoff.
-      Serial.println("[MQTT] Reconfigure: new settings applied");
+      Serial.printf("[%s] Reconfigure: new settings applied\n", networkManager.bridgeLogName());
     } else {
-      Serial.println("[MQTT] Reconfigure: no host configured, remaining disconnected");
+      Serial.printf("[%s] Reconfigure: no host configured, remaining disconnected\n", networkManager.bridgeLogName());
     }
     updateCloudStatus();
     return;
   }
 
   if (mqtt_transport_recovery_requested) return;
+
+  // The panel was set up for the direct link or left it (switchToLink(),
+  // leaveLink()); handled before the gate because it changes mqtt_enabled.
+  {
+    LinkTransportRequest request;
+    portENTER_CRITICAL(&link_mux_);
+    request = link_request_;
+    link_request_.pending = false;
+    portEXIT_CRITICAL(&link_mux_);
+    if (request.pending) {
+      applyLinkTransport(request);
+      return;
+    }
+  }
+
   if (!mqtt_enabled) return;
+
+  // The pairing changed (paired, unpaired, or a pairing was requested or
+  // ended): leave the current link session and connect again right away.
+  if (link_changed_ && mqtt_client.linkMode()) {
+    link_changed_ = false;
+    if (mqtt_client.connected()) {
+      // Send what is already queued first: an unpair or a pairing abort
+      // must still reach the Bridge over the old session.
+      drainOutboundQueues(kMqttOutboundDrainNormal);
+      mqtt_client.disconnect();
+      Serial.println("[Link] Reconnecting for the new pairing state");
+    }
+    purgeOutboundQueue();
+    mqtt_post_connect_pending = false;
+    mqtt_post_connect_ready_at = 0;
+    mqtt_connected_flag = false;
+    link_pair_mode_flag = false;
+    mqtt_retry_at = 0;
+    mqtt_connect_failures = 0;
+    return;
+  }
 
   // Process request flags even while suspended so restoreMqttBufferNormal()
   // can wake the worker after an aborted OTA.
@@ -1178,7 +1504,7 @@ void HomeTilesNetworkManager::serviceMqttWorker() {
     mqtt_large_until = 0;
     if (mqtt_client.connected()) {
       mqtt_client.disconnect();
-      Serial.println("[OTA] MQTT disconnected for OTA");
+      Serial.printf("[OTA] %s disconnected for OTA\n", networkManager.bridgeLogName());
     }
     setMqttBufferSize(kMqttBufferOta, "ota");
     // This reserve protects MQTT publishes only. While OTA suspends the
@@ -1200,7 +1526,7 @@ void HomeTilesNetworkManager::serviceMqttWorker() {
   if (mqtt_disconnect_requested) {
     if (mqtt_client.connected()) {
       mqtt_client.disconnect();
-      Serial.println("[MQTT] Disconnect requested (hotspot mode)");
+      Serial.printf("[%s] Disconnect requested (hotspot mode)\n", networkManager.bridgeLogName());
     }
     purgeOutboundQueue();
     mqtt_post_connect_pending = false;
@@ -1227,7 +1553,7 @@ void HomeTilesNetworkManager::serviceMqttWorker() {
   if (hold_until != 0 && (int32_t)(now_ms - hold_until) < 0) {
     if (mqtt_client.connected()) {
       mqtt_client.disconnect();
-      Serial.println("[MQTT] Disconnect during reconnect quiet period");
+      Serial.printf("[%s] Disconnect during reconnect quiet period\n", networkManager.bridgeLogName());
     }
     if (mqtt_connected_flag) mqtt_connected_flag = false;
     mqtt_post_connect_pending = false;
@@ -1241,9 +1567,10 @@ void HomeTilesNetworkManager::serviceMqttWorker() {
   serviceBufferHousekeeping(now_ms);
 
   if (!mqtt_client.connected()) {
+    link_pair_mode_flag = false;
     if (mqtt_connected_flag) {
       mqtt_connected_flag = false;
-      Serial.println("[MQTT] Connection lost");
+      Serial.printf("[%s] Connection lost\n", networkManager.bridgeLogName());
     }
     if ((int32_t)(now_ms - mqtt_retry_at) >= 0) {
       connectMqtt();
@@ -1265,9 +1592,10 @@ void HomeTilesNetworkManager::serviceMqttWorker() {
   mqtt_buffer_size = mqtt_client.getBufferSize();
   mqtt_receive_buffer_floor = mqtt_client.getReceiveBufferSize();
   if (!mqtt_client.connected()) {
-    Serial.printf("[MQTT] Connection lost in loop, state=%d\n",
+    Serial.printf("[%s] Connection lost in loop, state=%d\n", networkManager.bridgeLogName(),
                   mqtt_client.state());
     mqtt_connected_flag = false;
+    link_pair_mode_flag = false;
     // Closed by the cloud with 1008 (token revoked) or 4402 (plan required).
     if (cloudRefused()) mqtt_retry_at = millis() + kCloudRefusalRetryMs;
     updateCloudStatus();
@@ -1297,7 +1625,7 @@ void HomeTilesNetworkManager::drainOutboundQueues(uint8_t max_commands) {
 #if defined(CONFIG_IDF_TARGET_ESP32P4)
     if ((uint32_t)(now_ms - g_mqtt_last_tx_guard_log_ms) >= 2000) {
       g_mqtt_last_tx_guard_log_ms = now_ms;
-      Serial.printf("[MQTT] %s waiting: DMA largest only %u KB\n",
+      Serial.printf("[%s] %s waiting: DMA largest only %u KB\n", networkManager.bridgeLogName(),
                     lane,
                     static_cast<unsigned>(largest / 1024));
     }
@@ -1327,7 +1655,7 @@ void HomeTilesNetworkManager::drainOutboundQueues(uint8_t max_commands) {
           ok = mqtt_client.unsubscribe(cmd->topic);
         }
         if (!ok) {
-          Serial.printf("[MQTT] Worker: %s '%s' failed\n",
+          Serial.printf("[%s] Worker: %s '%s' failed\n", networkManager.bridgeLogName(),
                         verb, cmd->topic);
         }
         heap_caps_free(cmd);
@@ -1377,7 +1705,7 @@ void HomeTilesNetworkManager::drainOutboundQueues(uint8_t max_commands) {
       const bool ok = mqtt_client.publish(
           cmd->topic, cmd->payload, cmd->payload_len, cmd->retain);
       if (!ok) {
-        Serial.printf("[MQTT] Worker: publish '%s' failed\n", cmd->topic);
+        Serial.printf("[%s] Worker: publish '%s' failed\n", networkManager.bridgeLogName(), cmd->topic);
       }
       heap_caps_free(cmd);
 
@@ -1477,7 +1805,7 @@ void HomeTilesNetworkManager::drainOutboundQueues(uint8_t max_commands) {
     const bool ok = mqtt_client.publish(
         cmd->topic, cmd->payload, cmd->payload_len, cmd->retain);
     if (!ok) {
-      Serial.printf("[MQTT] Worker: publish '%s' failed\n", cmd->topic);
+      Serial.printf("[%s] Worker: publish '%s' failed\n", networkManager.bridgeLogName(), cmd->topic);
     }
     heap_caps_free(cmd);
 
@@ -1488,6 +1816,9 @@ void HomeTilesNetworkManager::drainOutboundQueues(uint8_t max_commands) {
 // Keep the former update() receive-buffer grow/shrink policy on the
 // worker because setBufferSize() accesses the client.
 void HomeTilesNetworkManager::serviceBufferHousekeeping(uint32_t now_ms) {
+  // The direct link's buffer is fixed: every resize attempt would only log
+  // "65535 -> 65535" again on each worker pass.
+  if (!mqtt_client.resizableBuffer()) return;
   const uint32_t large_until = mqtt_large_until;
   if (large_until == 0) {
     // Without an active large-response window, match the normal buffer to
@@ -1514,6 +1845,13 @@ void HomeTilesNetworkManager::serviceBufferHousekeeping(uint32_t now_ms) {
     // until the window ends, as the former update() "large-deferred" path did.
     setMqttBufferSize(kMqttBufferLarge, "large");
   }
+}
+
+// No subscribe/unsubscribe waits for the worker: every subscription queued so
+// far has been sent. The worker sends a dequeued subscription before it takes
+// any later publish, so a publish queued now goes out after them.
+bool HomeTilesNetworkManager::mqttControlIdle() const {
+  return !g_mqtt_control_queue || uxQueueMessagesWaiting(g_mqtt_control_queue) == 0;
 }
 
 // ========== Single-owner MQTT: API for other tasks ==========
@@ -1631,7 +1969,7 @@ void HomeTilesNetworkManager::failPendingStreamPublish(const char* reason) {
   if (g_stream_done) xSemaphoreGive(g_stream_done);
   const uint32_t now_ms = millis();
   if (streamLogDue(now_ms)) {
-    Serial.printf("[MQTT] Stream publish failed: %s (sent=%u failed=%u)\n",
+    Serial.printf("[%s] Stream publish failed: %s (sent=%u failed=%u)\n", networkManager.bridgeLogName(),
                   reason ? reason : "?",
                   static_cast<unsigned>(g_stream_sent_count),
                   static_cast<unsigned>(g_stream_failed_count));
@@ -1760,7 +2098,7 @@ void HomeTilesNetworkManager::disconnectMqtt() {
     delay(5);
   }
   if (mqtt_disconnect_requested) {
-    Serial.println("[MQTT] WARNING: Worker did not acknowledge disconnect request");
+    Serial.printf("[%s] WARNING: Worker did not acknowledge disconnect request\n", networkManager.bridgeLogName());
   }
 }
 
@@ -1773,7 +2111,7 @@ void HomeTilesNetworkManager::requestMqttReconfigure() {
     delay(5);
   }
   if (mqtt_reconfig_requested) {
-    Serial.println("[MQTT] WARNING: Worker did not acknowledge reconfigure request");
+    Serial.printf("[%s] WARNING: Worker did not acknowledge reconfigure request\n", networkManager.bridgeLogName());
   }
 }
 
@@ -1781,13 +2119,14 @@ void HomeTilesNetworkManager::prepareMqttForOta() {
   // Release the camera pipeline first; a snapshot upload in progress can still
   // finish or fail while MQTT is up.
   local_camera::shutdown("ota");
+  speaker::shutdown("ota");
   if (!mqtt_enabled) return;
   mqtt_ota_prep_requested = true;
   for (int i = 0; i < 100 && mqtt_ota_prep_requested; ++i) {
     delay(5);
   }
   if (mqtt_ota_prep_requested) {
-    Serial.println("[OTA] WARNING: MQTT worker did not acknowledge OTA preparation");
+    Serial.println("[OTA] WARNING: Network worker did not acknowledge OTA preparation");
   }
 }
 
@@ -1799,7 +2138,7 @@ void HomeTilesNetworkManager::deferMqttReconnect(uint32_t hold_ms) {
   mqtt_post_connect_ready_at = 0;
   mqtt_large_until = 0;
   purgeOutboundQueue();
-  Serial.printf("[MQTT] Reconnect paused for %u ms\n",
+  Serial.printf("[%s] Reconnect paused for %u ms\n", networkManager.bridgeLogName(),
                 static_cast<unsigned>(hold_ms));
 }
 
@@ -1814,13 +2153,13 @@ uint16_t HomeTilesNetworkManager::mqttNormalBufferSize() const {
 bool HomeTilesNetworkManager::setMqttBufferSize(uint16_t size, const char* reason) {
   if (size == 0) return false;
   const uint16_t before = mqtt_client.getBufferSize();
-  if (before == size) {
-    mqtt_buffer_size = size;
+  if (before == size || !mqtt_client.resizableBuffer()) {
+    mqtt_buffer_size = before;
     return true;
   }
 
   if (!mqtt_client.setBufferSize(size)) {
-    Serial.printf("[MQTT] Buffer resize failed: %u -> %u bytes (%s)\n",
+    Serial.printf("[%s] Buffer resize failed: %u -> %u bytes (%s)\n", networkManager.bridgeLogName(),
                   static_cast<unsigned>(before),
                   static_cast<unsigned>(size),
                   reason ? reason : "?");
@@ -1828,7 +2167,7 @@ bool HomeTilesNetworkManager::setMqttBufferSize(uint16_t size, const char* reaso
   }
 
   mqtt_buffer_size = mqtt_client.getBufferSize();
-  Serial.printf("[MQTT] Buffer: %u -> %u bytes (%s, %s)\n",
+  Serial.printf("[%s] Buffer: %u -> %u bytes (%s, %s)\n", networkManager.bridgeLogName(),
                 static_cast<unsigned>(before),
                 static_cast<unsigned>(mqtt_buffer_size),
                 reason ? reason : "?",
@@ -1837,33 +2176,27 @@ bool HomeTilesNetworkManager::setMqttBufferSize(uint16_t size, const char* reaso
 }
 
 void HomeTilesNetworkManager::selectTopicTransport(const DeviceConfig& cfg) {
-  TopicClient& wanted =
-      cfg.transport == kTransportCloud
-          ? static_cast<TopicClient&>(cloud_transport)
-          : static_cast<TopicClient&>(mqtt_transport);
-  if (&wanted == &cloud_transport &&
-      !cloud_transport.configure(cfg.cloud_url, cfg.cloud_token)) {
+  const bool cloud = cfg.transport == kTransportCloud;
+  if (cloud && !mqtt_client.cloud().configure(cfg.cloud_url, cfg.cloud_token)) {
     // Web Admin validates both before saving; connect() keeps failing with
     // the normal backoff until the settings are corrected.
     Serial.println("[Cloud] Invalid cloud URL or token in the settings");
   }
-  if (mqtt_client.isSelected(wanted)) return;
-  mqtt_client.select(wanted);
+  if (!mqtt_client.useCloud(cloud)) return;
   // The new transport starts with its own buffer bookkeeping.
   setMqttBufferSize(mqttNormalBufferSize(), "transport");
-  Serial.printf("[Network] Topic transport: %s\n",
-                &wanted == &cloud_transport ? "ZHAC Cloud" : "MQTT");
+  Serial.printf("[Network] Topic transport: %s\n", cloud ? "ZHAC Cloud" : "broker");
 }
 
 bool HomeTilesNetworkManager::cloudRefused() {
-  return mqtt_client.isSelected(cloud_transport) &&
-         cloud_transport.refusal() != CloudTopicClient::Refusal::None;
+  return mqtt_client.cloudMode() &&
+         mqtt_client.cloud().refusal() != CloudTopicClient::Refusal::None;
 }
 
 void HomeTilesNetworkManager::updateCloudStatus() {
   CloudStatus status = CloudStatus::Off;
-  if (mqtt_enabled && mqtt_client.isSelected(cloud_transport)) {
-    switch (cloud_transport.refusal()) {
+  if (mqtt_enabled && mqtt_client.cloudMode()) {
+    switch (mqtt_client.cloud().refusal()) {
       case CloudTopicClient::Refusal::Unauthorized:
         status = CloudStatus::Unauthorized;
         break;
@@ -1928,18 +2261,24 @@ void HomeTilesNetworkManager::publishBridgeConfig() {
   String payload = haBridgeConfig.buildJsonPayload(did, cfg.mqtt_base_topic, cfg.ha_prefix);
   if (payload.isEmpty()) return;
 
-  String topic = "tab5_lvgl/config/";
-  topic += did;
-  topic += "/bridge";
-  const size_t packet_estimate = payload.length() + topic.length() + 16;
+  const String topic = bridgeConfigTopic();
+  // With a Bridge pairing code the announcement carries a signature, so a
+  // paired Bridge ignores forged announcements for this panel.
+  char* signed_payload =
+      command_channel::signAnnouncement(topic.c_str(), payload.c_str(), payload.length());
+  const bool is_signed = signed_payload != nullptr;
+  const char* publish_payload = is_signed ? signed_payload : payload.c_str();
+  const size_t packet_estimate = strlen(publish_payload) + topic.length() + 16;
   if (packet_estimate > kMqttBufferLarge) {
-    Serial.printf("[Network] Bridge config too large for MQTT buffer: %u > %u bytes\n",
+    Serial.printf("[Network] Bridge config too large for the send buffer: %u > %u bytes\n",
                   static_cast<unsigned>(packet_estimate),
                   static_cast<unsigned>(kMqttBufferLarge));
   }
   mqttEnqueuePublishWithLargeBuffer(
-      topic.c_str(), payload.c_str(), true, 15000);
-  Serial.println("[Network] Home Assistant Bridge configuration published");
+      topic.c_str(), publish_payload, true, 15000);
+  if (signed_payload) heap_caps_free(signed_payload);
+  Serial.printf("[Network] Home Assistant Bridge configuration published%s\n",
+                is_signed ? " (signed)" : "");
 }
 
 const char* HomeTilesNetworkManager::getBridgeApplyTopic() const {
@@ -2007,35 +2346,126 @@ void HomeTilesNetworkManager::startMdns() {
     return;
   }
   MDNS.addService("hometiles", "tcp", 80);
-
-  // addServiceTxt() has char*, const char* and String overloads. Mixing
-  // string literals and char[] can make overload resolution ambiguous
-  // through the deprecated literal-to-char* conversion. Pass all four
-  // arguments as named const char* values to select that overload.
-  const char* svc_name = "hometiles";
-  const char* svc_proto = "tcp";
-  const char* key_txtvers = "txtvers";
-  const char* val_txtvers = "1";
-  const char* key_device_id = "device_id";
-  const char* val_device_id = did;
-  const char* key_name = "name";
-  const char* val_name = Device::displayName();
-  const char* key_model = "model";
-  const char* val_model = Device::profile().key;
-  const DeviceConfig& cfg = configManager.getConfig();
-  const char* key_base_topic = "base_topic";
-  const char* val_base_topic = cfg.mqtt_base_topic;
-  const char* key_ha_prefix = "ha_prefix";
-  const char* val_ha_prefix = cfg.ha_prefix;
-
-  MDNS.addServiceTxt(svc_name, svc_proto, key_txtvers, val_txtvers);
-  MDNS.addServiceTxt(svc_name, svc_proto, key_device_id, val_device_id);
-  MDNS.addServiceTxt(svc_name, svc_proto, key_name, val_name);
-  MDNS.addServiceTxt(svc_name, svc_proto, key_model, val_model);
-  MDNS.addServiceTxt(svc_name, svc_proto, key_base_topic, val_base_topic);
-  MDNS.addServiceTxt(svc_name, svc_proto, key_ha_prefix, val_ha_prefix);
+  if (!mdns_txt_seq_) mdns_txt_seq_ = esp_random() | 1u;
+  if (!applyMdnsTxt()) {
+    Serial.println("[mDNS] TXT records could not be set");
+  }
   mdns_active = true;
   logMdnsHeap("after-begin");
+}
+
+// The whole TXT set in one call, so one announcement carries it. seq changes
+// with every change (random start per boot): Home Assistant's mDNS cache keeps
+// a replaced record for up to 10 s and ignores a record that equals one still
+// in it, so pair on, off and on again within seconds showed no card, or kept
+// a stale one. Bridges that do not know seq ignore it.
+bool HomeTilesNetworkManager::applyMdnsTxt() {
+  char did[24];
+  buildDeviceId(did, sizeof(did));
+  char seq[9];
+  snprintf(seq, sizeof(seq), "%08lx", static_cast<unsigned long>(mdns_txt_seq_));
+  const DeviceConfig& cfg = configManager.getConfig();
+  mdns_txt_item_t txt[] = {
+      {"txtvers", "1"},
+      {"device_id", did},
+      {"name", Device::displayName()},
+      {"model", Device::profile().key},
+      {"base_topic", cfg.mqtt_base_topic},
+      {"ha_prefix", cfg.ha_prefix},
+      // This firmware can be added without MQTT (docs-dev/bridge-link.md).
+      {"link", "1"},
+      {"seq", seq},
+      // Pair was pressed: Home Assistant offers to add the panel (or to switch
+      // an MQTT entry to the link) only while this entry is present. Last, so
+      // it can be left out.
+      {"pair", "1"},
+  };
+  const uint8_t count =
+      static_cast<uint8_t>(sizeof(txt) / sizeof(txt[0]) - (pairing_advertised_ ? 0u : 1u));
+  if (mdns_service_txt_set("_hometiles", "_tcp", txt, count) != ESP_OK) return false;
+  mdns_pair_flag_ = pairing_advertised_;
+  return true;
+}
+
+// Pair pressed, or its window ended: replace the TXT set in place; the mDNS
+// component announces it at once, also while it still probes or announces.
+// A restart (goodbye, probe, announce) took seconds, and a second change
+// within them never reached Home Assistant (Unpair, then Pair at once); each
+// cycle also costs P4 DMA memory (see startMdns()).
+void HomeTilesNetworkManager::updateMdnsPairFlag() {
+  ++mdns_txt_seq_;
+  if (!applyMdnsTxt()) {
+    // startMdns() advertises the current flag on the same update.
+    Serial.println("[mDNS] Pair flag update failed; restarting the advertisement");
+    stopMdns();
+    return;
+  }
+  Serial.printf("[mDNS] Pair flag %s\n", pairing_advertised_ ? "announced" : "withdrawn");
+}
+
+// ========== Direct Bridge link ==========
+void HomeTilesNetworkManager::setLinkPairing(const uint8_t* pairing_key, const char* key_id) {
+  const bool has_key = pairing_key != nullptr && key_id != nullptr && strlen(key_id) == 16;
+  portENTER_CRITICAL(&link_mux_);
+  const bool changed =
+      link_credentials_.has_key != has_key ||
+      (has_key && memcmp(link_credentials_.key, pairing_key, sizeof(link_credentials_.key)) != 0);
+  link_credentials_.has_key = has_key;
+  if (has_key) {
+    memcpy(link_credentials_.key, pairing_key, sizeof(link_credentials_.key));
+    memcpy(link_credentials_.key_id, key_id, sizeof(link_credentials_.key_id) - 1);
+    link_credentials_.key_id[sizeof(link_credentials_.key_id) - 1] = '\0';
+  } else {
+    ht_crypto::secureZero(link_credentials_.key, sizeof(link_credentials_.key));
+    link_credentials_.key_id[0] = '\0';
+  }
+  if (changed && link_configured_) link_changed_ = true;
+  portEXIT_CRITICAL(&link_mux_);
+}
+
+void HomeTilesNetworkManager::requestLinkPairing(bool requested) {
+  portENTER_CRITICAL(&link_mux_);
+  const bool changed = link_credentials_.pair_requested != requested;
+  link_credentials_.pair_requested = requested;
+  // Only an unpaired panel connects in pair mode; a paired one stays as it is.
+  if (changed && link_configured_ && !link_credentials_.has_key) link_changed_ = true;
+  portEXIT_CRITICAL(&link_mux_);
+}
+
+void HomeTilesNetworkManager::switchToLink(const char* host, uint16_t port) {
+  if (!host || !*host || port == 0) return;
+  portENTER_CRITICAL(&link_mux_);
+  link_request_.pending = true;
+  link_request_.enable = true;
+  memset(link_request_.host, 0, sizeof(link_request_.host));
+  strncpy(link_request_.host, host, sizeof(link_request_.host) - 1);
+  link_request_.port = port;
+  portEXIT_CRITICAL(&link_mux_);
+  link_configured_ = true;
+}
+
+void HomeTilesNetworkManager::leaveLink() {
+  portENTER_CRITICAL(&link_mux_);
+  link_request_.pending = true;
+  link_request_.enable = false;
+  link_request_.port = 0;
+  link_credentials_.pair_requested = false;
+  portEXIT_CRITICAL(&link_mux_);
+  link_configured_ = false;
+}
+
+bool HomeTilesNetworkManager::consumeLinkForgotten() {
+  if (!link_forgotten_flag_) return false;
+  link_forgotten_flag_ = false;
+  return true;
+}
+
+bool HomeTilesNetworkManager::bridgeConnectionWanted() {
+  if (!mqtt_client.linkMode()) return true;
+  portENTER_CRITICAL(&link_mux_);
+  const bool wanted = link_credentials_.has_key || link_credentials_.pair_requested;
+  portEXIT_CRITICAL(&link_mux_);
+  return wanted;
 }
 
 void HomeTilesNetworkManager::stopMdns() {
@@ -2067,7 +2497,8 @@ void HomeTilesNetworkManager::update() {
   // timeout is evidence of an unresponsive C6.
   const bool wifi_claims_connected = networkTransport.isWifiConnected();
   if (mqtt_enabled && !mqtt_suspended && !wifi_manual_disconnect &&
-      wifi_claims_connected && !isMqttConnected() && !wifi_wedge_latched) {
+      wifi_claims_connected && !isMqttConnected() && !wifi_wedge_latched &&
+      bridgeConnectionWanted()) {
     if (wifi_mqtt_offline_since == 0) {
       wifi_mqtt_offline_since = now_ms;
       wifi_health_probe_at = now_ms + kWifiHealthProbeDelayMs;
@@ -2138,11 +2569,15 @@ void HomeTilesNetworkManager::update() {
     Serial.printf("[Network] Active transport: %s (generation=%u)\n",
                   networkTransport.activeName(),
                   static_cast<unsigned>(current_generation));
+    // The first transport since boot has no socket to rebind. A reconfigure
+    // there raced the worker's first connection and dropped it once (b300
+    // boot log: Bridge connected, disconnected, connected again).
+    const bool first_transport = transport_generation_seen == 0;
     transport_generation_seen = current_generation;
 
     // Recreate sockets after a default-route switch. Existing sockets can
     // otherwise stay bound to the interface that just disappeared.
-    if (mqtt_enabled) {
+    if (mqtt_enabled && !first_transport) {
       mqtt_reconfig_requested = true;
     }
     if (webAdminServer.isRunning()) {
@@ -2159,6 +2594,14 @@ void HomeTilesNetworkManager::update() {
   // Shared connectivity plus WiFi fallback management.
   if (!is_connected) {
     wifi_ps_state_known = false;
+
+    // A join that failed before its window ended: next attempt 5 s after
+    // the failure rather than at the end of the window.
+    const uint32_t join_failed_ms = wifi_join_failed_ms.exchange(0);
+    if (join_failed_ms != 0 && wifi_join_window_open.load()) {
+      const uint32_t early = join_failed_ms + kWifiRetryAfterFailureMs;
+      if ((int32_t)(wifi_retry_at - early) > 0) wifi_retry_at = early;
+    }
 
     // Retry a lost connection unless the user disconnected manually.
     // connectWifi() itself blocks attempts in fixed Ethernet mode.
@@ -2179,10 +2622,24 @@ void HomeTilesNetworkManager::update() {
 
     // A live Wi-Fi connection proves Hosted is responsive; earlier isolated
     // slow attempts reflected load rather than a stuck transport.
-    if (networkTransport.isWifiConnected()) wifi_start_failures = 0;
+    if (networkTransport.isWifiConnected()) {
+      wifi_start_failures = 0;
+      wifi_join_window_open = false;  // A later drop is not a failed join.
+    }
 
     if (!was_connected) {
       logNetworkHeap(networkTransport.activeName());
+    }
+
+    if (!was_connected && networkTransport.isWifiConnected()) {
+      // Full power from the start of every Wi-Fi connection. The power
+      // manager calls the setter only on an active/idle change, so the
+      // driver default (modem sleep) stayed until the first idle change,
+      // about 20 s after boot.
+      setWifiPowerSaving(false);
+      Serial.printf("[Network] Wi-Fi access point %s, channel %d, RSSI %d dBm\n",
+                    WiFi.BSSIDstr().c_str(), static_cast<int>(WiFi.channel()),
+                    static_cast<int>(WiFi.RSSI()));
     }
 
     // Start Web Admin on connection.
@@ -2193,9 +2650,17 @@ void HomeTilesNetworkManager::update() {
     // mDNS serves initial pairing only. Once MQTT is configured, keep it off
     // even across broker reconnects to avoid begin/end cycles and DMA heap
     // fragmentation on every brief interruption.
-    if (configManager.hasMqttConfig()) {
+    // A panel with a direct Bridge link needs no discovery either. Pair on
+    // the panel announces it for two minutes (TXT pair=1), also with MQTT;
+    // a running advertisement only changes that entry.
+    const bool discoverable =
+        pairing_advertised_ || (!configManager.hasMqttConfig() && !link_configured_);
+    if (mdns_active && !discoverable) {
       stopMdns();
-    } else if (webAdminServer.isRunning()) {
+    } else if (mdns_active && mdns_pair_flag_ != pairing_advertised_) {
+      updateMdnsPairFlag();
+    }
+    if (discoverable && webAdminServer.isRunning()) {
       startMdns();
     }
 
@@ -2224,11 +2689,14 @@ void HomeTilesNetworkManager::setWifiPowerSaving(bool enable) {
     return;
   }
 
-#if defined(CONFIG_IDF_TARGET_ESP32P4)
-  // ESP32-P4 uses an SDIO/esp-hosted WiFi transport. Modem sleep can trigger
-  // transport TX asserts under WebUI, MQTT, or media-cover traffic.
+  // Every panel keeps the radio awake at full power. On the ESP32-P4 (SDIO/
+  // esp-hosted transport) modem sleep triggered transport TX asserts under
+  // WebUI, MQTT or media-cover traffic. On the Guition S3 the idle saving
+  // (modem sleep, 11 dBm, signal about -72 dBm) came with Web Admin pages
+  // holding the loop for 2.5 s and link drops of 20 s and more (MQTT lost,
+  // loop stalled up to 44 s). The saving dates from the battery Tab5 and
+  // brought hardly any gain; display dimming and sleep stay unchanged.
   enable = false;
-#endif
 
   if (wifi_ps_state_known && wifi_ps_enabled == enable) {
     return;

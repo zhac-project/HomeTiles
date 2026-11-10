@@ -16,13 +16,21 @@
       button.removeAttribute('aria-current');
     });
     const active = buttons.find(button => button.dataset.tabTarget === tabName);
-    if (!active) return;
-    active.classList.add('active');
-    active.setAttribute('aria-current', 'page');
+    if (active) {
+      active.classList.add('active');
+      active.setAttribute('aria-current', 'page');
+    }
   }
 
+
   async function switchTab(tabName) {
+    // I/O became a Settings page; a remembered or linked I/O tab opens it.
+    if (tabName === 'tab-hardware') {
+      tabName = 'tab-network';
+      showSettingsPage('io');
+    }
     const sequence = ++tabSwitchSequence;
+    const picks = tileSelectionSeq;
     let target = document.getElementById(tabName);
     if (!target) {
       const folderId = folderIdFromAdminTabName(tabName);
@@ -82,11 +90,17 @@
       }
       if (tileTab === 'screensaver') {
         initScreensaverEditor();
-      } else {
-        const rememberedIndex = getRememberedTileIndex(tileTab);
-        selectTile(rememberedIndex === null ? getTopLeftConfiguredTileIndex(tileTab) : rememberedIndex, tileTab);
+      } else if (tileSelectionSeq === picks || currentTileTab !== tileTab) {
+        // The tab's own pick first (user 2026-10-22: an empty cell or a
+        // page field came back as the top left tile).
+        if (!restoreTabSelection(tileTab)) {
+          const rememberedIndex = getRememberedTileIndex(tileTab);
+          selectTile(rememberedIndex === null ? getTopLeftConfiguredTileIndex(tileTab) : rememberedIndex, tileTab);
+        }
         window.requestAnimationFrame(restoreCurrentTileSelectionUi);
       }
+      // Else something was picked here while its grid loaded (user
+      // 2026-10-22: the pick jumped to the top left tile): it stays.
       // Let the browser paint the selected tab before cached/live values are
       // reconciled. This also keeps a cache hit from extending click latency.
       window.requestAnimationFrame(() => window.setTimeout(() => {
@@ -95,48 +109,18 @@
         }
       }, 0));
     }
-    if (tabName === 'tab-network') {
-      window.setTimeout(() => {
-        if (typeof loadFileManager === 'function' && !fileManagerLoaded) loadFileManager();
-      }, 0);
-    }
-    if (tabName === 'tab-hardware') {
-      window.setTimeout(initHardwareIo, 0);
-    }
+    if (tabName === 'tab-network') runSettingsPageWork();
   }
 
-  // Caps the tile settings panel at exactly the space below header and tabs so
-  // that it scrolls internally instead of stretching the page.
+  // The Tile settings panel takes the height of the tile editor row, which
+  // fills the card on wide windows (admin.css); narrow windows stack it below
+  // the grid. Only an inline cap from an earlier layout is cleared here.
   function updateTileSettingsMaxHeight() {
-    document.querySelectorAll('.tile-settings').forEach(panel => {
-      panel.style.maxHeight = '';
-      if (window.innerWidth <= 1180) return;
-      const tab = panel.closest('.tab-content');
-      if (!tab || !tab.classList.contains('active')) return;
-      const top = panel.getBoundingClientRect().top + window.scrollY;
-      // Only card padding and wrapper spacing sit below the panel. Read those
-      // from the styles instead of measuring scrollHeight: on large windows
-      // scrollHeight is at least the viewport height and would cap the panel
-      // far too small.
-      let below = 24;
-      const card = panel.closest('.card');
-      if (card) {
-        const ccs = getComputedStyle(card);
-        below = (parseFloat(ccs.paddingBottom) || 0) + (parseFloat(ccs.borderBottomWidth) || 0);
-        const wrapper = card.parentElement;
-        if (wrapper) {
-          const wcs = getComputedStyle(wrapper);
-          below += (parseFloat(wcs.paddingBottom) || 0) + (parseFloat(wcs.marginBottom) || 0);
-        }
-      }
-      const h = window.innerHeight - top - below;
-      if (h > 240) panel.style.maxHeight = h + 'px';
-    });
+    document.querySelectorAll('.tile-settings').forEach(panel => { panel.style.maxHeight = ''; });
   }
-  // Resize fires many times per second while a window is dragged, and both
-  // handlers below are expensive: one forces a layout and reads computed styles
-  // per panel, the other re-renders the whole screensaver editor. Coalescing to
-  // one call per frame keeps that work off every single event.
+  // Resize fires many times per second while a window is dragged, and the
+  // screensaver handler below re-renders the whole screensaver editor.
+  // Coalescing to one call per frame keeps that work off every single event.
   function perFrame(callback) {
     let frame = 0;
     return () => {
@@ -158,13 +142,13 @@
     document.querySelectorAll('.tile-clock-time').forEach(el => {
       if (el.dataset.autoClock === '1' || el.textContent.trim() === '--:--') {
         el.dataset.autoClock = '1';
-        el.textContent = getClockPreviewTime(0);
+        setClockDigits(el, getClockPreviewTime(0));
       }
     });
     document.querySelectorAll('.tile-clock-date').forEach(el => {
       if (el.dataset.autoClock === '1' || el.textContent.trim() === '--.--.----') {
         el.dataset.autoClock = '1';
-        el.textContent = getClockPreviewDate(0);
+        setClockDigits(el, getClockPreviewDate(0));
       }
     });
     if (typeof fitCompactClockPreview === 'function') {
@@ -173,7 +157,7 @@
     if (screensaverDraft) {
       const time = document.getElementById('screensaverClockTime');
       const date = document.getElementById('screensaverClockDate');
-      if (time) time.textContent = getClockPreviewTime(screensaverDraft.time_format);
-      if (date) date.textContent = getScreensaverClockPreviewDate(screensaverDraft);
+      if (time) setClockDigits(time, getClockPreviewTime(screensaverDraft.time_format));
+      if (date) setClockDigits(date, getScreensaverClockPreviewDate(screensaverDraft));
     }
   }

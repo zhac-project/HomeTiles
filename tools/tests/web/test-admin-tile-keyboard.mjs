@@ -55,12 +55,14 @@ const productionFunctions = [
   extractDeliveredFunction('isEditablePreview'),
   extractDeliveredFunction('editablePreviewText'),
   extractDeliveredFunction('updateTilePreview'),
+  extractDeliveredFunction('resetTileClasses'),
   extractDeliveredFunction('applyCompactSensorPreview'),
   extractDeliveredFunction('compactValueSize'),
   extractDeliveredFunction('syncCompactValueFontOptions'),
   extractDeliveredFunction('isCompactSensorType'),
-  extractDeliveredFunction('tileTypeHasDiscToggle'),
-  extractDeliveredFunction('tileTypeHasColoredIcon'),
+  extractDeliveredFunction('isEditableValueType'),
+  extractDeliveredFunction('editableCompactValueFont'),
+  extractDeliveredFunction('syncEditableValueFontOptions'),
   extractDeliveredFunction('renderTileFromData')
 ].join('\n\n');
 
