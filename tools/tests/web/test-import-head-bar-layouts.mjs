@@ -264,7 +264,11 @@ const carried = {
   settings: 'layouts.settings_parked', parked: 'layouts.settings_parked', hidden: 'settings_tile.hidden',
   tile: 'layouts.parked_settings_view',
   view_id: 'layouts.parked_settings_view', type: 'settings_tile', title: 'settings_tile', icon_name: 'settings_tile',
-  bg_color: 'settings_tile', col: 'settings_tile', row: 'settings_tile', span_w: 'settings_tile', span_h: 'settings_tile'
+  bg_color: 'settings_tile', col: 'settings_tile', row: 'settings_tile', span_w: 'settings_tile', span_h: 'settings_tile',
+  // ZHAC fork: each layout's grid for the cloud editor, a fact of the panel's
+  // screen, not data a backup carries.
+  grids: 'not data', cols: 'not data', rows: 'not data', bar: 'not data', portrait: 'not data',
+  available: 'not data', switchable: 'not data', screen_w: 'not data', screen_h: 'not data'
 };
 for (const key of reported) assert.ok(carried[key], `GET /api/layouts reports "${key}": decide how a backup carries it`);
 for (const key of ['stored', 'classic', 'places', 'clock', 'settings', 'tile']) assert.ok(reported.has(key), key);

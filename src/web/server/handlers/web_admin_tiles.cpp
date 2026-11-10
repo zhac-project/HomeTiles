@@ -1708,6 +1708,23 @@ void WebAdminServer::handleGetLayouts() {
     json += "\",\"bg_color\":" + String(kept.bg_color) + ",\"col\":" + String(kept.col) + ",\"row\":" +
             String(kept.row) + ",\"span_w\":" + String(kept.span_w) + ",\"span_h\":" + String(kept.span_h) + "}";
   }
+  json += "}";
+  // ZHAC fork: the cloud layout editor has no page script (LAYOUTS in
+  // web_admin_scripts.cpp): each layout's grid, the same values.
+  json += ",\"grids\":{";
+  for (uint8_t i = 0; i < grid_layout::kLayoutCount; ++i) {
+    const grid_layout::Layout layout = grid_layout::from_index(i);
+    const grid_layout::Shown grid = grid_layout::layout_grid(layout);
+    if (i) json += ",";
+    json += "\"";
+    json += grid_layout::key(layout);
+    json += "\":{\"cols\":" + String(grid.cols) + ",\"rows\":" + String(grid.rows) + (grid.half_row ? ".5" : "");
+    json += String(",\"bar\":") + (grid.head_bar ? "true" : "false");
+    json += String(",\"portrait\":") + (grid.portrait ? "true" : "false");
+    json += String(",\"available\":") + (grid_layout::available(layout) ? "true" : "false");
+    json += String(",\"switchable\":") + (grid_layout::switchable(layout) ? "true" : "false");
+    json += ",\"screen_w\":" + String(grid.screen_w) + ",\"screen_h\":" + String(grid.screen_h) + "}";
+  }
   json += "}}";
   sendChunkedResponse(server, 200, "application/json", json);
 }

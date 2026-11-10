@@ -16,6 +16,9 @@ HomeTiles. Upstream state lives in `PROJECT_CONTEXT.md`.
   local-only routes answer 403 in a remote session (`localOnly` inside the
   upstream password guards). Every same-origin URL of the Web Admin and the
   login page is relative (the proxy serves it under a path prefix).
+- Cloud layout editor: `GET /api/layouts` adds `"grids"` (each layout's cols,
+  rows, head bar, portrait, available, switchable, screen size; the Web Admin
+  page script's `LAYOUTS`), since the editor has no page script.
 - TLS: ESP-IDF's common CA set (`cloud_ca_bundle.cpp`), so the Tab5 image fits.
 - Updates check `zhac-project/HomeTiles` releases. The icon file comes from
   upstream's release of the same FW_VERSION (built-in icons unchanged).
