@@ -878,6 +878,37 @@ static inline bool tileFills(const Tile& tile) {
   return !tileTypeKeepsOwnColor(tile.type) && tile_icon_colors::fills(tile.icon_colors.c_str());
 }
 
+// ZHAC fork: a fixed icon color replaces the on/off color of tiles whose icon
+// follows their own state (Light/Switch, Cover, Climate, Media, Weather,
+// device controls, Binary sensor). Those keep their state color.
+static constexpr bool legacyTileColorStaysFixed(int type) {
+  return type != TILE_BINARY_SENSOR && (tileTypeIconColorsByValue(type) || tileTypeIconColorsByState(type) ||
+                                        tileTypeIsEditableValue(type) || tileTypeHasFixedIconColorOnly(type));
+}
+
+// ZHAC fork: v0.7 panels kept an own background color on any tile; v0.9
+// colors a tile from its icon and ignores that color. A tile with an icon
+// color record, an old own color and no record yet gets Fill (the Web Admin's
+// strength), and the old color as its fixed icon color where the icon has no
+// state color (legacyTileColorStaysFixed; owner 2026-11-10: a Light follows
+// the light). The old color is cleared, so loadGrid stores the change once
+// and a later save keeps the user's own choice.
+static inline bool migrateLegacyTileColor(Tile& tile) {
+  if (!tileTypeHasIconColors(tile.type) || tileTypeKeepsOwnColor(tile.type) || tile.icon_colors.length() ||
+      !tileBgColorIsSet(tile) || tileBgColorFollowsDefault(tile.bg_color)) {
+    return false;
+  }
+  char color[8] = "";
+  if (legacyTileColorStaysFixed(tile.type)) {
+    snprintf(color, sizeof(color), "%06lX", static_cast<unsigned long>(tileBgColorRgb(tile)));
+  }
+  char record[24];
+  snprintf(record, sizeof(record), "v2\n%s\nfill %u", color, static_cast<unsigned>(tile_icon_colors::kTintDefault));
+  tile.icon_colors = normalizeTileIconColors(tile.type, record);
+  tile.bg_color = 0;
+  return true;
+}
+
 static inline bool tileHasOwnColor(const Tile& tile) {
   return tileBgColorIsSet(tile) && !tileBgColorFollowsDefault(tile.bg_color) && tileTypeKeepsOwnColor(tile.type);
 }

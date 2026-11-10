@@ -4300,6 +4300,10 @@ bool TileConfig::loadGrid(uint16_t folder_id, TileGridConfig& grid,
   applyIconColorsFromSd(folder_id, grid);
   applyWeatherSensorsFromSd(folder_id, grid);
   applyFlowEntitiesFromSd(folder_id, grid);
+  // ZHAC fork: v0.7 tile colors become filled icon colors (tile_config.h).
+  for (size_t i = 0; i < TILES_PER_GRID; ++i) {
+    if (migrateLegacyTileColor(grid.tiles[i])) changed = true;
+  }
 
   // Retired tile types become empty without renumbering the persisted enum.
   // Empty tiles saved before deletion cleared them still carry the deleted

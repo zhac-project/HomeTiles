@@ -35,6 +35,17 @@ HomeTiles. Upstream state lives in `PROJECT_CONTEXT.md`.
   on the 8 MB S3 boards the card file streams into the cover (no whole-file
   buffer). 4.2 MP cap: LVGL's TJpgDec cannot scale (JD_USE_SCALE 0).
 
+## Tile colors from v0.7
+
+- Upstream v0.9 colors a tile from its icon and ignores the old own tile
+  color. `migrateLegacyTileColor` (`tile_config.h`, run by `loadGrid`) gives
+  such a tile Fill, once, and the old color as fixed icon color where the
+  icon has no state color (`legacyTileColorStaysFixed`: Folder, Scene,
+  Sensor, ...). Light/Switch, Cover, Climate, Media, Binary sensor and other
+  state tiles drop it, since a fixed color hides on/off. Tiles that already
+  have an icon color record keep it. Clock, Text and Animation keep their own
+  color as upstream.
+
 ## Sunton ESP32-8048S070C (fork-only profile)
 
 - Runs on the Guition S3 code with its own driver; link OK. TLS starved
