@@ -3144,6 +3144,17 @@ void mqttPublishWeatherRequest(const char* entity_id) {
   Serial.printf("Weather request -> '%s' (%s)\n", weather_topic, queued ? "queued" : "queue-full");
 }
 
+// ZHAC fork: the panel's offset from UTC now, in seconds (local minus UTC).
+static long local_utc_offset_seconds() {
+  const time_t now = time(nullptr);
+  struct tm local = {};
+  struct tm utc = {};
+  localtime_r(&now, &local);
+  gmtime_r(&now, &utc);
+  const int days = local.tm_year != utc.tm_year ? local.tm_year - utc.tm_year : local.tm_yday - utc.tm_yday;
+  return days * 86400L + (local.tm_hour - utc.tm_hour) * 3600L + (local.tm_min - utc.tm_min) * 60L;
+}
+
 bool mqttPublishEnergyRequest(const char* period) {
   const char* p = (period && *period) ? period : "day";
   if (strcmp(p, "week") != 0 && strcmp(p, "month") != 0 && strcmp(p, "year") != 0) {
@@ -3169,6 +3180,12 @@ bool mqttPublishEnergyRequest(const char* period) {
   if (strcmp(p, "week") == 0) {
     payload += ",\"week_start\":";
     payload += String(week_start::panel());
+  }
+  // ZHAC fork: the ZHAC Cloud plugin knows no time zone and cuts the periods
+  // at the panel's midnight from this offset. The Bridge ignores it.
+  if (has_valid_local_time_for_history()) {
+    payload += ",\"utc_offset\":";
+    payload += String(local_utc_offset_seconds());
   }
   payload += "}";
 

@@ -19,6 +19,8 @@ HomeTiles. Upstream state lives in `PROJECT_CONTEXT.md`.
 - Cloud layout editor: `GET /api/layouts` adds `"grids"` (each layout's cols,
   rows, head bar, portrait, available, switchable, screen size; the Web Admin
   page script's `LAYOUTS`), since the editor has no page script.
+- Energy: `energy/request` adds `"utc_offset"` (seconds, only with a set clock):
+  the cloud plugin cuts Today/Week/Month/Year at the panel's midnight from it.
 - TLS: ESP-IDF's common CA set (`cloud_ca_bundle.cpp`), so the Tab5 image fits.
 - Updates check `zhac-project/HomeTiles` releases. The icon file comes from
   upstream's release of the same FW_VERSION (built-in icons unchanged).
