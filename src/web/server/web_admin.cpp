@@ -287,6 +287,12 @@ bool WebAdminServer::start() {
               guarded(withStorageHold([this]() { this->handleSaveHomeHead(); })));
     server.on("/api/display/theme", HTTP_POST,
               guarded(withStorageHold([this]() { this->handleSaveTheme(); })));
+    // Settings only, so the cloud's remote Web Admin may use them; photo uploads
+    // stay in the local-only file manager.
+    server.on("/api/display/background", HTTP_GET,
+              guarded(withStorageHold([this]() { this->handleGetBackground(); })));
+    server.on("/api/display/background", HTTP_POST,
+              guarded(withStorageHold([this]() { this->handleSaveBackground(); })));
     server.on("/api/local-camera", HTTP_GET,
               guarded([this]() { this->handleLocalCamera(); }));
     server.on("/api/local-camera", HTTP_POST,

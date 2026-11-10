@@ -296,6 +296,17 @@ SoundValues sound_values() {
 }
 void volume_changed(int, bool) {}
 void microphone_selected(bool) {}
+// ZHAC fork: the Background group without a photo.
+BackgroundValues background_values() { return {false, 60, 0, 25, 60}; }
+int background_step() { return 5; }
+void background_line(char* buf, size_t len) { snprintf(buf, len, "%s", text().background_none); }
+void background_list_read() {}
+uint8_t background_option_count() { return 1; }
+const char* background_option(uint8_t) { return text().background_none; }
+uint8_t background_selected() { return 0; }
+void background_selected_changed(uint8_t) {}
+void background_opacity_changed(int, bool) {}
+void background_dim_changed(int, bool) {}
 uint8_t theme_index() { return 0; }
 uint8_t theme_choice() { return 0; }
 void theme_selected(uint8_t) {}

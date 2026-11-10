@@ -19,6 +19,7 @@
     prepareFolderTabSessionCache();
     restoreInitialFolderTabSessionFragment(initialTab);
     loadSelectedTileStates();
+    loadBackgroundSettings();
     loadDraftsFromStorage();
     loadTileClipboard();
     // Stay on the admin tab that was open before a browser reload. Fall back to

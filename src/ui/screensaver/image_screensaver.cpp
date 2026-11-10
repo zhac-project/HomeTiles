@@ -47,6 +47,7 @@
 #include "src/tiles/runtime/tile_icon_source.h"
 #include "src/ui/shared/ui_surface_style.h"
 #include "src/core/config/tile_radius.h"
+#include "src/ui/background/background_rules.h"
 
 namespace {
 
@@ -58,6 +59,12 @@ constexpr size_t kMaxFileBytes = 8U * 1024U * 1024U;
 // writes MCU blocks directly into the 480x480 cover, so it does not need
 // a source-sized RGB565 intermediate buffer.
 constexpr uint32_t kMaxDecodePixels = 2048U * 2048U;
+static_assert(background_rules::kMaxSourcePixels == kMaxDecodePixels,
+              "the background photo list refuses what the decoder refuses");
+static_assert(background_rules::kMaxFileBytes == kMaxFileBytes,
+              "the background photo list and the decoder share one file cap");
+// Why the last decode failed; the background photo reports it.
+ImageDecodeFailure g_last_decode_failure = ImageDecodeFailure::None;
 
 // Leave enough PSRAM after allocating decode buffers for the rest of the
 // UI: the cover worker, popups and LVGL intermediate buffers.
@@ -340,12 +347,13 @@ bool is_jpeg(const uint8_t* data, size_t len) {
   return data && len >= 3 && data[0] == 0xFF && data[1] == 0xD8;
 }
 
-// Read an SD file into a PSRAM buffer in chunks.
-uint8_t* read_wallpaper_file(const String& file_name, size_t& out_len) {
-  out_len = 0;
+// Open an SD image for decoding; an empty File when it is missing or its size
+// is out of range.
+fs::File open_wallpaper_file(const String& file_name) {
   if (!Device::sdReadyCached()) {
     Serial.println("[Screensaver] microSD not ready");
-    return nullptr;
+    g_last_decode_failure = ImageDecodeFailure::NotFound;
+    return fs::File();
   }
   String path = String(kImageDir) + "/" + file_name;
   // v0.5.0 uses /images. Existing cards/configurations from older releases
@@ -357,19 +365,32 @@ uint8_t* read_wallpaper_file(const String& file_name, size_t& out_len) {
   fs::File f = Device::sdFS().open(path, FILE_READ);
   if (!f) {
     Serial.printf("[Screensaver] open fail: '%s'\n", path.c_str());
-    return nullptr;
+    g_last_decode_failure = ImageDecodeFailure::NotFound;
+    return fs::File();
   }
   const size_t len = f.size();
   if (len < 32 || len > kMaxFileBytes) {
     Serial.printf("[Screensaver] Invalid file size: %u bytes\n",
                   static_cast<unsigned>(len));
     f.close();
-    return nullptr;
+    g_last_decode_failure = ImageDecodeFailure::Unreadable;
+    return fs::File();
   }
+  return f;
+}
+
+#if !defined(DEVICE_ESP32_S3_RGB_480)
+// Read an SD file into a PSRAM buffer in chunks.
+uint8_t* read_wallpaper_file(const String& file_name, size_t& out_len) {
+  out_len = 0;
+  fs::File f = open_wallpaper_file(file_name);
+  if (!f) return nullptr;
+  const size_t len = f.size();
   uint8_t* buf = static_cast<uint8_t*>(alloc_prefer_psram(len));
   if (!buf) {
     Serial.println("[Screensaver] File buffer allocation failed");
     f.close();
+    g_last_decode_failure = ImageDecodeFailure::NoMemory;
     return nullptr;
   }
   size_t pos = 0;
@@ -385,11 +406,13 @@ uint8_t* read_wallpaper_file(const String& file_name, size_t& out_len) {
     Serial.printf("[Screensaver] Short read: %u/%u bytes\n",
                   static_cast<unsigned>(pos), static_cast<unsigned>(len));
     free(buf);
+    g_last_decode_failure = ImageDecodeFailure::Unreadable;
     return nullptr;
   }
   out_len = len;
   return buf;
 }
+#endif
 
 #if defined(CONFIG_IDF_TARGET_ESP32P4) && SOC_JPEG_DECODE_SUPPORTED
 // Hardware decoding like media covers (tile_renderer.cpp): RGB order =
@@ -432,6 +455,7 @@ uint16_t* hw_decode_jpeg(const uint8_t* data, size_t len,
   if (!psram_budget_ok(requested_bytes)) {
     Serial.printf("[Screensaver] PSRAM budget too small for %u bytes\n",
                   static_cast<unsigned>(requested_bytes));
+    g_last_decode_failure = ImageDecodeFailure::NoMemory;
     return nullptr;
   }
 
@@ -444,6 +468,7 @@ uint16_t* hw_decode_jpeg(const uint8_t* data, size_t len,
     free(decoded);
     Serial.printf("[Screensaver] HW JPEG PSRAM buffer missing: %u bytes\n",
                   static_cast<unsigned>(requested_bytes));
+    g_last_decode_failure = ImageDecodeFailure::NoMemory;
     return nullptr;
   }
 
@@ -598,6 +623,7 @@ uint16_t* sw_decode_jpeg(const uint8_t* data, size_t len,
                   static_cast<unsigned>(jd.width),
                   static_cast<unsigned>(jd.height));
     free(work);
+    g_last_decode_failure = ImageDecodeFailure::TooLarge;
     return nullptr;
   }
 
@@ -606,11 +632,13 @@ uint16_t* sw_decode_jpeg(const uint8_t* data, size_t len,
     Serial.printf("[Screensaver] PSRAM budget too small for %u bytes\n",
                   static_cast<unsigned>(bytes));
     free(work);
+    g_last_decode_failure = ImageDecodeFailure::NoMemory;
     return nullptr;
   }
   uint16_t* out = static_cast<uint16_t*>(alloc_prefer_psram(bytes));
   if (!out) {
     free(work);
+    g_last_decode_failure = ImageDecodeFailure::NoMemory;
     return nullptr;
   }
   memset(out, 0, bytes);
@@ -640,6 +668,7 @@ using wallpaper_cover::rounded_pixel_coverage;
 #if defined(DEVICE_ESP32_S3_RGB_480)
 struct S3DirectJpegCtx {
   const uint8_t* data = nullptr;
+  fs::File* file = nullptr;  // ZHAC fork: or the card file, streamed
   size_t len = 0;
   size_t pos = 0;
   uint16_t* output = nullptr;
@@ -658,6 +687,14 @@ struct S3DirectJpegCtx {
 
 size_t s3_direct_jpeg_input(JDEC* jd, uint8_t* buffer, size_t bytes) {
   S3DirectJpegCtx* ctx = static_cast<S3DirectJpegCtx*>(jd->device);
+  // ZHAC fork: a card file streams; a null buffer asks TJpgDec to skip.
+  if (ctx && ctx->file) {
+    if (buffer) return ctx->file->read(buffer, bytes);
+    const size_t position = ctx->file->position();
+    if (position >= ctx->len) return 0;
+    const size_t skip = bytes < ctx->len - position ? bytes : ctx->len - position;
+    return ctx->file->seek(position + skip) ? skip : 0;
+  }
   if (!ctx || !ctx->data || ctx->pos >= ctx->len) return 0;
   const size_t remaining = ctx->len - ctx->pos;
   const size_t take = min(bytes, remaining);
@@ -738,17 +775,22 @@ int s3_direct_jpeg_output(JDEC* jd, void* bitmap, JRECT* rect) {
 lv_image_dsc_t* s3_decode_jpeg_direct_cover(
     const uint8_t* data, size_t len, uint16_t target_w, uint16_t target_h,
     uint16_t focus_x, uint16_t focus_y, uint16_t zoom,
-    uint16_t& source_w, uint16_t& source_h, uint16_t corner_radius) {
+    uint16_t& source_w, uint16_t& source_h, uint16_t corner_radius,
+    fs::File* file = nullptr) {
   source_w = 0;
   source_h = 0;
   uint8_t* work =
       static_cast<uint8_t*>(heap_caps_malloc(4096, MALLOC_CAP_8BIT));
-  if (!work) return nullptr;
+  if (!work) {
+    g_last_decode_failure = ImageDecodeFailure::NoMemory;
+    return nullptr;
+  }
 
   S3DirectJpegCtx ctx{};
   ctx.corner_radius = corner_radius;
   ctx.data = data;
   ctx.len = len;
+  ctx.file = file;
   JDEC decoder{};
   const JRESULT prepare_result =
       jd_prepare(&decoder, s3_direct_jpeg_input, work, 4096, &ctx);
@@ -757,6 +799,7 @@ lv_image_dsc_t* s3_decode_jpeg_direct_cover(
     Serial.printf("[Screensaver] S3 direct JPEG prepare failed: %d\n",
                   static_cast<int>(prepare_result));
     free(work);
+    g_last_decode_failure = ImageDecodeFailure::Unreadable;
     return nullptr;
   }
 
@@ -769,6 +812,7 @@ lv_image_dsc_t* s3_decode_jpeg_direct_cover(
                   static_cast<unsigned>(source_w),
                   static_cast<unsigned>(source_h));
     free(work);
+    g_last_decode_failure = ImageDecodeFailure::TooLarge;
     return nullptr;
   }
 
@@ -816,12 +860,14 @@ lv_image_dsc_t* s3_decode_jpeg_direct_cover(
         "[Screensaver] S3 direct JPEG PSRAM budget too small: %u bytes\n",
         static_cast<unsigned>(output_bytes));
     free(work);
+    g_last_decode_failure = ImageDecodeFailure::NoMemory;
     return nullptr;
   }
   ctx.output = static_cast<uint16_t*>(
       alloc_aligned_prefer_psram(output_bytes));
   if (!ctx.output) {
     free(work);
+    g_last_decode_failure = ImageDecodeFailure::NoMemory;
     return nullptr;
   }
   memset(ctx.output, 0, output_bytes);
@@ -839,6 +885,7 @@ lv_image_dsc_t* s3_decode_jpeg_direct_cover(
         static_cast<unsigned long>(ctx.written_pixels),
         static_cast<unsigned long>(expected_pixels));
     free(ctx.output);
+    g_last_decode_failure = ImageDecodeFailure::Unreadable;
     return nullptr;
   }
 
@@ -846,6 +893,7 @@ lv_image_dsc_t* s3_decode_jpeg_direct_cover(
       static_cast<lv_image_dsc_t*>(malloc(sizeof(lv_image_dsc_t)));
   if (!descriptor) {
     free(ctx.output);
+    g_last_decode_failure = ImageDecodeFailure::NoMemory;
     return nullptr;
   }
   memset(descriptor, 0, sizeof(*descriptor));
@@ -889,7 +937,10 @@ lv_image_dsc_t* make_cover_dsc(const uint16_t* src, uint16_t src_w,
   // 64-byte alignment also meets the cache/DMA requirement; the format
   // stays unchanged for LVGL and the other targets.
   uint16_t* out = static_cast<uint16_t*>(alloc_aligned_prefer_psram(bytes));
-  if (!out) return nullptr;
+  if (!out) {
+    g_last_decode_failure = ImageDecodeFailure::NoMemory;
+    return nullptr;
+  }
   // Every image pixel is written below; only an inset leaves a black frame.
   if (image_inset) memset(out, 0, bytes);
 
@@ -908,6 +959,7 @@ lv_image_dsc_t* make_cover_dsc(const uint16_t* src, uint16_t src_w,
   lv_image_dsc_t* dsc = static_cast<lv_image_dsc_t*>(malloc(sizeof(lv_image_dsc_t)));
   if (!dsc) {
     free(out);
+    g_last_decode_failure = ImageDecodeFailure::NoMemory;
     return nullptr;
   }
   memset(dsc, 0, sizeof(*dsc));
@@ -976,6 +1028,7 @@ lv_image_dsc_t* decode_jpeg_to_size(const char* name, const uint8_t* data,
         static_cast<uint32_t>(target_w) * sizeof(uint16_t), "none", false,
         read_ms, 0, 0);
     release();
+    g_last_decode_failure = ImageDecodeFailure::Unreadable;
     return nullptr;
   }
 
@@ -1061,6 +1114,34 @@ lv_image_dsc_t* decode_wallpaper_to_size(const String& file_name,
                                          uint16_t focus_x, uint16_t focus_y,
                                          uint16_t zoom, uint16_t corner_radius) {
   const uint32_t pipeline_started_ms = millis();
+#if defined(DEVICE_ESP32_S3_RGB_480)
+  // ZHAC fork: stream the card file into the cover. A whole-file PSRAM buffer
+  // can fail on 8 MB boards well below the 8 MB file cap (background photo).
+  const uint32_t stride = static_cast<uint32_t>(target_w) * sizeof(uint16_t);
+  fs::File file = open_wallpaper_file(file_name);
+  if (!file) {
+    GuitionS3Diagnostics::logSlideshowDecode(file_name.c_str(), 0, 0, 0, target_w, target_h, stride,
+                                             "none", false, millis() - pipeline_started_ms, 0, 0);
+    return nullptr;
+  }
+  const size_t len = file.size();
+  uint16_t w = 0;
+  uint16_t h = 0;
+  const uint32_t decode_started_ms = millis();
+  lv_image_dsc_t* dsc = s3_decode_jpeg_direct_cover(nullptr, len, target_w, target_h, focus_x,
+                                                    focus_y, zoom, w, h, corner_radius, &file);
+  file.close();
+  GuitionS3Diagnostics::logSlideshowDecode(file_name.c_str(), len, w, h, target_w, target_h, stride,
+                                           "SW-direct", dsc != nullptr, 0,
+                                           millis() - decode_started_ms, 0);
+  if (dsc) {
+    Serial.printf("[Screensaver] SW-direct Decode %ux%u -> %ux%u in %u ms\n",
+                  static_cast<unsigned>(w), static_cast<unsigned>(h),
+                  static_cast<unsigned>(target_w), static_cast<unsigned>(target_h),
+                  static_cast<unsigned>(millis() - pipeline_started_ms));
+  }
+  return dsc;
+#else
   size_t len = 0;
   uint8_t* file = read_wallpaper_file(file_name, len);
   if (!file) {
@@ -1073,6 +1154,7 @@ lv_image_dsc_t* decode_wallpaper_to_size(const String& file_name,
   return decode_jpeg_to_size(file_name.c_str(), file, len, true, target_w,
                              target_h, focus_x, focus_y, zoom, corner_radius,
                              pipeline_started_ms, millis() - pipeline_started_ms);
+#endif
 }
 
 // The cache holds this picture in the screen's size and corners.
@@ -2240,4 +2322,48 @@ void image_screensaver_set_scene_callback(void (*callback)(const char*)) {
 
 const Tile* image_screensaver_get_slot_tile(uint8_t index) {
   return screensaverConfig.tile(index);
+}
+
+lv_image_dsc_t* image_screensaver_decode_full_cover(const char* name, uint16_t w, uint16_t h,
+                                                    uint8_t orientation,
+                                                    ImageDecodeFailure* failure) {
+  g_last_decode_failure = ImageDecodeFailure::None;
+  if (orientation < 1 || orientation > 8) orientation = 1;
+  // EXIF 5-8 store the photo a quarter turn away from upright.
+  const uint16_t dw = orientation >= 5 ? h : w;
+  const uint16_t dh = orientation >= 5 ? w : h;
+  lv_image_dsc_t* dsc = nullptr;
+  if (name && name[0] && w && h) {
+    dsc = decode_wallpaper_to_size(String(name), dw, dh, 500, 500, 1000, 0);
+  }
+  if (dsc && orientation != 1) {
+    const size_t bytes = static_cast<size_t>(w) * h * sizeof(uint16_t);
+    uint16_t* upright = psram_budget_ok(bytes)
+        ? static_cast<uint16_t*>(alloc_aligned_prefer_psram(bytes))
+        : nullptr;
+    if (upright) {
+      background_rules::orient(reinterpret_cast<const uint16_t*>(dsc->data), dw, dh,
+                               orientation, upright);
+      free(const_cast<uint8_t*>(dsc->data));
+      dsc->data = reinterpret_cast<const uint8_t*>(upright);
+      dsc->header.w = w;
+      dsc->header.h = h;
+      dsc->header.stride = w * sizeof(uint16_t);
+      dsc->data_size = bytes;
+    } else {
+      g_last_decode_failure = ImageDecodeFailure::NoMemory;
+      free_screensaver_dsc(dsc);
+    }
+  }
+  if (failure) {
+    *failure = dsc ? ImageDecodeFailure::None
+               : g_last_decode_failure != ImageDecodeFailure::None
+                   ? g_last_decode_failure
+                   : ImageDecodeFailure::Unreadable;
+  }
+  return dsc;
+}
+
+void image_screensaver_free_decoded(lv_image_dsc_t* dsc) {
+  free_screensaver_dsc(dsc);
 }

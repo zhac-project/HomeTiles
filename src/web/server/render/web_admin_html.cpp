@@ -33,6 +33,7 @@
 #include "src/tiles/icons/mdi_icons.h"
 #include "src/tiles/icons/mdi_icon_store.h"
 #include "src/tiles/runtime/tile_icon_disc.h"
+#include "src/ui/background/background_photo.h"
 #include "src/ui/screensaver/screensaver_config.h"
 #include "src/core/config/swipe_gestures.h"
 #include "src/ui/tabs/settings/settings_model.h"
@@ -1131,6 +1132,32 @@ static void appendTileTabHTML(
     global_panel += "> ";
     appendHtmlEscaped(global_panel, tr.screensaver_tile_border);
     global_panel += "</label>";
+    // Background photo, as Settings › Display › Background on the panel. The
+    // photo list and the status arrive from loadBackgroundSettings().
+    const String photo_id = tab_id + "_global_background_photo";
+    const String opacity_id = tab_id + "_global_tile_opacity";
+    const String dim_id = tab_id + "_global_background_dim";
+    const String opacity_value = String(background_photo::effective_tile_opacity());
+    const String dim_value = String(background_rules::clamp_dim(display.background_dim));
+    global_panel += "<div class=\"global-settings-field global-background-field\"><label for=\"" + photo_id + "\">";
+    appendHtmlEscaped(global_panel, tr.admin_background_photo);
+    global_panel += "</label><select class=\"global-background-photo\" id=\"" + photo_id +
+            "\" onchange=\"saveBackgroundSettings({photo: this.value})\"></select>"
+            "<span class=\"global-background-status\"></span></div>";
+    global_panel += "<div class=\"global-settings-field\"><label for=\"" + opacity_id + "\">";
+    appendHtmlEscaped(global_panel, tr.admin_tile_opacity);
+    global_panel += "</label><div class=\"global-background-range\"><input class=\"global-background-opacity\" id=\"" + opacity_id +
+            "\" type=\"range\" min=\"" + String(Device::kTileOpacityPercentMin) + "\" max=\"100\" step=\"" +
+            String(background_rules::kStep) + "\" value=\"" + opacity_value +
+            "\" oninput=\"previewBackgroundValue(this)\" onchange=\"saveBackgroundSettings({opacity: this.value})\">"
+            "<output class=\"global-background-opacity-value\">" + opacity_value + " %</output></div></div>";
+    global_panel += "<div class=\"global-settings-field\"><label for=\"" + dim_id + "\">";
+    appendHtmlEscaped(global_panel, tr.admin_background_dim);
+    global_panel += "</label><div class=\"global-background-range\"><input class=\"global-background-dim\" id=\"" + dim_id +
+            "\" type=\"range\" min=\"0\" max=\"" + String(background_rules::kMaxDim) + "\" step=\"" +
+            String(background_rules::kStep) + "\" value=\"" + dim_value +
+            "\" oninput=\"previewBackgroundValue(this)\" onchange=\"saveBackgroundSettings({dim: this.value})\">"
+            "<output class=\"global-background-dim-value\">" + dim_value + " %</output></div></div>";
 
     // The layout (grid_layout.h): a field like the tile color, its pen opens
     // the layout window (tiles/layout-window.js).

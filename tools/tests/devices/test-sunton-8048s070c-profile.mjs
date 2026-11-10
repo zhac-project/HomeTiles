@@ -1,6 +1,7 @@
 import { getBuildProfile } from '../../device-catalog.js';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { cppFunctionDefinitions } from '../../lib/cpp-source.mjs';
 
 function read(path) {
   return fs.readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
@@ -54,6 +55,14 @@ requireMarker(driver, 'constexpr int8_t kBacklightPin = 2;', 'backlight pin');
 requireMarker(driver, 'constexpr int8_t kTouchSda = 19;\nconstexpr int8_t kTouchScl = 20;', 'touch bus');
 requireMarker(driver, 'constexpr int8_t kTouchRst = 38;', 'touch reset');
 assert.ok(!/Arduino_SWSPI|st7701/i.test(driver), 'RGB-only panel: no command bus or ST7701 table');
-assert.ok(driver.includes('bool DeviceSuntonESP328048S070C::sdReady() { return false; }'), 'SD stays off until its pins are verified');
+// microSD on the S3's native FSPI pins (board definition esp32-8048S070C.json).
+for (const [name, value] of [['kSdCs', 10], ['kSdMosi', 11], ['kSdSck', 12], ['kSdMiso', 13]]) {
+  assert.match(driver, new RegExp(`\\b${name}\\s*=\\s*${value}\\b`), `${name} = ${value}`);
+}
+assert.match(driver, /\bkSdFrequency\s*=\s*20000000\b/, 'SD at 20 MHz');
+assert.match(driver, /\bkSdFallbackFrequency\s*=\s*4000000\b/, 'SD fallback 4 MHz');
+assert.ok(driver.includes('return g_sd_available && SD.cardType() != CARD_NONE;'), 'sdReady follows the card');
+const migrate = cppFunctionDefinitions(driver).find((f) => f.name.endsWith('::migrateStorageFromSD'));
+assert.ok(migrate && !/\bSD\.|sdFS\(/.test(migrate.body), 'the Sunton never migrates from the card');
 
 console.log('Sunton ESP32-8048S070C profile contract: PASS');

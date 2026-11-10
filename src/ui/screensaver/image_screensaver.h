@@ -62,3 +62,12 @@ void image_screensaver_set_scene_callback(void (*callback)(const char*));
 // The tile renderer needs the matching slot configuration for its
 // separate screensaver widget context; no special MQTT handling.
 const Tile* image_screensaver_get_slot_tile(uint8_t index);
+
+// The background photo reuses the screensaver decoder.
+enum class ImageDecodeFailure : uint8_t { None, NotFound, NoMemory, Unreadable, TooLarge };
+// The card's /images/<name> decoded to exactly w x h: cover fit, centred, no
+// inset, no corners. orientation is EXIF 1-8; 5-8 decode at h x w and are
+// turned upright with background_rules::orient. Returns nullptr and sets
+// *failure on error. Free with image_screensaver_free_decoded.
+lv_image_dsc_t* image_screensaver_decode_full_cover(const char* name, uint16_t w, uint16_t h, uint8_t orientation, ImageDecodeFailure* failure);
+void image_screensaver_free_decoded(lv_image_dsc_t* dsc);

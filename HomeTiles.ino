@@ -49,6 +49,8 @@
 #include "src/ui/tabs/tiles/tab_tiles_unified.h"
 #include "src/ui/screensaver/image_screensaver.h"
 #include "src/types/camera/picture.h"
+#include "src/ui/background/background_photo.h"
+#include "src/core/diagnostics/frame_bench.h"
 #include "src/ui/screensaver/screensaver_config.h"
 #include "src/io/hardware_io.h"
 #include "src/video/local_camera/local_camera.h"
@@ -1060,6 +1062,8 @@ void setup() {
 #if defined(HOMETILES_TEXT_FIT_PROBE)
   text_fit_probe::start();
 #endif
+  background_photo::begin();
+  frame_bench::begin();
 
   uiManager.updateStatusbar();
   Serial.println("[Setup] Statusbar updated");

@@ -20,8 +20,21 @@ HomeTiles. Upstream state lives in `PROJECT_CONTEXT.md`.
 - Updates check `zhac-project/HomeTiles` releases. The icon file comes from
   upstream's release of the same FW_VERSION (built-in icons unchanged).
 
+## Background photo
+
+- `src/ui/background/`: one JPEG from the card's `/images` behind every page
+  (the screen's first child); tile cards take `tile_opacity` in `render_tile`.
+  Settings › Display › Background group (`settings_model` background_*), Web
+  Admin global settings and `/api/display/background`.
+- Decoded by the screensaver decoder (`image_screensaver_decode_full_cover`);
+  on the 8 MB S3 boards the card file streams into the cover (no whole-file
+  buffer). 4.2 MP cap: LVGL's TJpgDec cannot scale (JD_USE_SCALE 0).
+
 ## Sunton ESP32-8048S070C (fork-only profile)
 
 - Runs on the Guition S3 code with its own driver; link OK. TLS starved
   internal RAM after hours: PSRAM TLS fallback (`tls_memory.cpp`) and a wake
   resync; hardware soak pending.
+- microSD: SPI CS10/MOSI11/SCK12/MISO13, 20 MHz (4 MHz fallback), media only.
+  HW pending: card, photo decode time, speed gate
+  (`EXTRA_FLAGS=-DHOMETILES_BENCH_FRAMES`).

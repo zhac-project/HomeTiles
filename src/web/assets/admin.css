@@ -907,6 +907,18 @@
        Settings, so the block stays low enough for the page height. */
     .global-settings-field { display:flex; align-items:center; gap:10px; min-width:0; }
     .global-settings-panel .global-settings-field > label { flex:0 0 auto; margin:0; }
+    .global-background-range { flex:1 1 auto; min-width:0; display:flex; align-items:center; gap:8px; height:32px; }
+    .global-background-range input[type="range"] { flex:1 1 auto; min-width:0; height:18px; margin:0; accent-color:var(--accent); }
+    /* The photo field spans both columns; its status line wraps below it.
+       The select is as compact as the Hardware I/O fields. */
+    .global-background-field { grid-column:1 / -1; flex-wrap:wrap; }
+    .global-background-field > select {
+      flex:1 1 0; width:auto; min-width:0; height:32px; margin:0;
+      padding:6px 32px 6px 10px; font-size:12px; line-height:20px;
+      background-position:right 10px center;
+      overflow:hidden; white-space:nowrap; text-overflow:ellipsis;
+    }
+    .global-background-status { flex:1 0 100%; color:var(--text-3); font-size:12px; }
 
     @media (max-width:520px) { .global-settings-grid { grid-template-columns:minmax(0, 1fr); } }
     .btn-delete-folder { padding:8px 16px; font-size:13px; flex:0 0 auto; }
@@ -3059,7 +3071,7 @@
     .tile-radius-control input[type="range"]:focus { outline:none; box-shadow:none; }
     .tile-radius-control input[type="range"]:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
     /* Slider values in the label size of Tile Settings. */
-    .global-tile-opacity-value {
+    .global-tile-opacity-value, .global-background-opacity-value, .global-background-dim-value {
       font-size:12px; font-weight:600; color:var(--text-2); text-align:right;
       white-space:nowrap; font-variant-numeric:tabular-nums; min-width:4.5ch;
     }

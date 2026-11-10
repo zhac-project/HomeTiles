@@ -83,6 +83,8 @@ public:
   void handleSaveHomeHead();
   void handleGestures();
   void handleSaveTheme();
+  void handleGetBackground();
+  void handleSaveBackground();
   void handleLocalCamera();
   void handleGetScreensaverWallpaper();
   void handleGetSdImages();

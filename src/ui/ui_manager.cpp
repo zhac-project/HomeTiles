@@ -138,7 +138,8 @@ void UIManager::buildUI(scene_publish_cb_t scene_cb, hotspot_start_cb_t hotspot_
 
   tab_content_container = lv_obj_create(scr);
   lv_obj_set_style_bg_color(tab_content_container, lv_color_hex(ui_theme::screen()), 0);
-  lv_obj_set_style_bg_opa(tab_content_container, LV_OPA_COVER, 0);
+  // ZHAC fork: transparent over the background photo (the screen's first child).
+  ui_surface_style::apply_backdrop(tab_content_container);
   lv_obj_set_style_border_width(tab_content_container, 0, 0);
   lv_obj_set_style_pad_all(tab_content_container, 0, 0);
   lv_obj_clear_flag(tab_content_container, LV_OBJ_FLAG_SCROLLABLE);

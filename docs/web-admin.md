@@ -74,6 +74,9 @@ The **Global** tab next to **Tile** applies to the whole display:
 | **Layout** | Shows the active layout and its grid; a click opens the [layout window](#layouts). |
 | **Theme** | **Dark**, **Light** or **Automatic** (light by day, dark at night), for the display and the Web Admin. |
 | **Edge swipes** | One action per screen edge: **Settings**, **Home**, **Back**, or the **screensaver**. New displays open Settings from the top and go Home from the bottom. |
+| **Background photo** | A photo from the microSD card's `/images` folder behind every page; see [Background photo](device-ui.md#background-photo). |
+| **Tile opacity** | How solid the tiles are over the photo, from 0 to 100 %. |
+| **Dim photo** | Darkens the photo, from 0 to 60 %. |
 
 Corners, circles and the tile cards follow the theme; there is no separate radius or tile color setting.
 

@@ -35,6 +35,7 @@ const owners = {
   'web_admin_local_camera.cpp': ['LocalCamera'],
   'web_admin_icon_file.cpp': ['IconFileDownload', 'IconFileUpload', 'IconFileUploadDone'],
   'web_admin_auth_handlers.cpp': ['AuthChallenge', 'AuthLogin', 'AuthLogout', 'AuthPassword'],
+  'web_admin_background.cpp': ['GetBackground', 'SaveBackground'],
 };
 const sources = new Map(serverFiles.filter(name => name.endsWith('.cpp'))
   .map(file => [file.split('/').at(-1), read(file.split('/').at(-1))]));

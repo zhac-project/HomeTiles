@@ -23,5 +23,10 @@ Hardware check on the owner's unit (2026-09-25): display, touch, WiFi and the
 ZHAC Cloud transport (tile states, taps to commands, remote Web Admin) work.
 Not soak-tested yet.
 
-Not supported yet: the microSD slot (pins not verified) and the speaker
-output. The backlight's 1 % floor (`backlight_input_min`) is not calibrated.
+microSD: SPI on CS 10, MOSI 11, SCK 12, MISO 13 (board definition
+`esp32-8048S070C.json`); 20 MHz, 4 MHz fallback. The card holds media only
+(screensaver and background photos); settings stay on LittleFS and are never
+migrated from the card. Hardware check on the owner's unit: pending.
+
+Not supported yet: the speaker output. The backlight's 1 % floor
+(`backlight_input_min`) is not calibrated.

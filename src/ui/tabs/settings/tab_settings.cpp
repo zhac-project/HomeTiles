@@ -33,6 +33,9 @@
 #include "src/core/memory/psram_static.h"
 #include "src/ui/popups/weather/weather_popup.h"
 #include "src/ui/tabs/settings/settings_model.h"
+#include "src/ui/background/background_photo.h"
+#include "src/ui/background/background_rules.h"
+#include <vector>
 #include "src/ui/tabs/settings/settings_screen.h"
 #include "src/ui/shared/ui_theme.h"
 #include "src/ui/shared/theme_schedule.h"
@@ -1311,3 +1314,95 @@ void settings_refresh_language() {
   settings_screen::texts_changed();
   weather_popup_refresh_language();
 }
+
+// ---------- ZHAC fork: Settings › Display › Background ----------
+// The photo list read when it opens; option texts point into it.
+namespace {
+std::vector<background_photo::Entry> g_background_entries;
+bool g_background_card = true;
+String g_background_option;
+
+// Saves and applies at once, so "Loading photo…" shows before the decode
+// blocks the UI thread 50 ms later.
+void background_save(const char* photo, uint8_t opacity, uint8_t dim) {
+  if (!configManager.saveBackground(photo, opacity, dim)) return;
+  background_photo::request_apply();
+  background_photo::process_pending();
+}
+}  // namespace
+
+namespace settings_model {
+
+BackgroundValues background_values() {
+  const DeviceConfig& cfg = configManager.getConfig();
+  return {cfg.background_photo[0] != '\0',
+          background_rules::clamp_opacity(cfg.tile_opacity, Device::kTileOpacityPercentMin),
+          Device::kTileOpacityPercentMin, background_rules::clamp_dim(cfg.background_dim),
+          background_rules::kMaxDim};
+}
+
+int background_step() { return background_rules::kStep; }
+
+void background_line(char* buf, size_t len) {
+  const char* photo = configManager.getConfig().background_photo;
+  const char* status = background_photo::status_text(tr());
+  if (!photo[0]) {
+    strlcpy(buf, tr().background_none, len);
+  } else if (status[0]) {
+    snprintf(buf, len, "%s \xC2\xB7 %s", photo, status);
+  } else {
+    strlcpy(buf, photo, len);
+  }
+}
+
+void background_list_read() { g_background_card = background_photo::list(g_background_entries); }
+
+uint8_t background_option_count() {
+  return static_cast<uint8_t>(1 + (g_background_card ? g_background_entries.size() : 1));
+}
+
+const char* background_option(uint8_t index) {
+  if (index == 0) return tr().background_none;
+  if (!g_background_card) return tr().background_no_card;
+  if (index > g_background_entries.size()) return "";
+  const background_photo::Entry& entry = g_background_entries[index - 1];
+  if (entry.reason == background_rules::Reason::Usable) return entry.name.c_str();
+  g_background_option = entry.name + " \xC2\xB7 " + background_photo::reason_text(entry.reason, tr());
+  return g_background_option.c_str();
+}
+
+uint8_t background_selected() {
+  const char* photo = configManager.getConfig().background_photo;
+  if (!photo[0]) return 0;
+  for (size_t i = 0; i < g_background_entries.size(); ++i) {
+    if (g_background_entries[i].name == photo) return static_cast<uint8_t>(i + 1);
+  }
+  return UINT8_MAX;  // not on the card: no row is marked
+}
+
+void background_selected_changed(uint8_t index) {
+  // The No-card line and unusable photos only explain; they are not taken.
+  if (index > 0 && (!g_background_card || index > g_background_entries.size() ||
+                    g_background_entries[index - 1].reason != background_rules::Reason::Usable)) {
+    return;
+  }
+  char photo[background_rules::kMaxPhotoName] = "";
+  if (index > 0) strlcpy(photo, g_background_entries[index - 1].name.c_str(), sizeof(photo));
+  const DeviceConfig& cfg = configManager.getConfig();
+  background_save(photo, cfg.tile_opacity, cfg.background_dim);
+}
+
+void background_opacity_changed(int percent, bool final) {
+  if (!final) return;
+  const DeviceConfig& cfg = configManager.getConfig();
+  background_save(cfg.background_photo, background_rules::clamp_opacity(percent, Device::kTileOpacityPercentMin),
+                  cfg.background_dim);
+}
+
+void background_dim_changed(int percent, bool final) {
+  if (!final) return;
+  const DeviceConfig& cfg = configManager.getConfig();
+  background_save(cfg.background_photo, cfg.tile_opacity, background_rules::clamp_dim(percent));
+}
+
+}  // namespace settings_model

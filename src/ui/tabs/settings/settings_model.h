@@ -74,6 +74,30 @@ void theme_selected(uint8_t index);
 bool layout_choice();
 uint8_t layout_index();
 void layout_selected(uint8_t index);
+// ZHAC fork: the Background group, a photo from the card's /images behind the
+// tiles, the tile opacity over it and its dim (background_photo.h). The
+// sliders move in background_step() percent and rest, dimmed, without a photo.
+struct BackgroundValues {
+  bool photo;  // a photo is chosen
+  int opacity;
+  int opacity_min;
+  int dim;
+  int dim_max;
+};
+BackgroundValues background_values();
+int background_step();
+// The photo row's second line: the name, None, or why it does not show.
+void background_line(char* buf, size_t len);
+// The photo list, read from the card when it opens: None, then each JPEG.
+// Unusable ones (and No card) name why and are not taken when picked.
+void background_list_read();
+uint8_t background_option_count();
+const char* background_option(uint8_t index);
+uint8_t background_selected();
+// Saved and applied right away; the sliders on release (`final`).
+void background_selected_changed(uint8_t index);
+void background_opacity_changed(int percent, bool final);
+void background_dim_changed(int percent, bool final);
 
 // ---------- Localization page ----------
 // The option lists, in the page's order: language, time zone, time format,

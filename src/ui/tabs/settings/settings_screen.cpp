@@ -80,6 +80,12 @@ lv_obj_t* g_sleep_value = nullptr;
 lv_obj_t* g_saver_value = nullptr;
 lv_obj_t* g_saver_brightness_value = nullptr;
 lv_obj_t* g_rotation_segment = nullptr;
+// ZHAC fork: the Background group.
+lv_obj_t* g_background_row = nullptr;
+lv_obj_t* g_background_line = nullptr;
+lv_obj_t* g_background_chevron = nullptr;
+lv_obj_t* g_background_opacity_value = nullptr;
+lv_obj_t* g_background_dim_value = nullptr;
 
 // Localization page: one dropdown row per list.
 struct LocaleRow {
@@ -354,6 +360,11 @@ void clear_display_refs() {
   g_saver_value = nullptr;
   g_saver_brightness_value = nullptr;
   g_rotation_segment = nullptr;
+  g_background_row = nullptr;
+  g_background_line = nullptr;
+  g_background_chevron = nullptr;
+  g_background_opacity_value = nullptr;
+  g_background_dim_value = nullptr;
 }
 
 void set_percent_text(lv_obj_t* label, int percent) {
@@ -415,6 +426,62 @@ void on_microphone(lv_event_t*) {
   lv_async_call(rebuild_display_async, nullptr);
 }
 
+// ZHAC fork: the photo's line follows its state ("Loading photo…" first);
+// unchanged text is not set again.
+void background_tick() {
+  if (!g_background_line) return;
+  char line[96];
+  settings_model::background_line(line, sizeof(line));
+  if (strcmp(lv_label_get_text(g_background_line), line) != 0) lv_label_set_text(g_background_line, line);
+}
+
+void on_background_opacity(lv_obj_t*, int32_t value, bool final) {
+  const int percent = value * settings_model::background_step();
+  set_percent_text(g_background_opacity_value, percent);
+  settings_model::background_opacity_changed(percent, final);
+  if (final) background_tick();
+}
+
+void on_background_dim(lv_obj_t*, int32_t value, bool final) {
+  const int percent = value * settings_model::background_step();
+  set_percent_text(g_background_dim_value, percent);
+  settings_model::background_dim_changed(percent, final);
+  if (final) background_tick();
+}
+
+const char* background_option_text(uint8_t, uint8_t index) { return settings_model::background_option(index); }
+
+void set_background_chevron(bool up) {
+  if (g_background_chevron) lv_label_set_text(g_background_chevron, getMdiChar(up ? "chevron-up" : "chevron-down").c_str());
+}
+
+void on_background_closed(uint8_t, const lv_point_t*) { set_background_chevron(false); }
+
+void on_background_picked(uint8_t, uint8_t index) {
+  settings_model::background_selected_changed(index);
+  // The sliders follow the photo (dimmed without one): after the event.
+  lv_async_call(rebuild_display_async, nullptr);
+}
+
+void on_background_row_clicked(lv_event_t*) {
+  if (!g_background_row || !g_page) return;
+  settings_model::background_list_read();
+  settings_parts::OptionList spec = {};
+  spec.host = g_panel;
+  spec.row = g_background_row;
+  lv_obj_update_layout(g_panel);
+  lv_obj_get_coords(g_page, &spec.bounds);
+  spec.tag = settings_model::kLocaleListCount;  // not a locale list
+  spec.count = settings_model::background_option_count();
+  spec.selected = settings_model::background_selected();
+  spec.card = g_built_card;
+  spec.selected_color = settings_style::tone(g_built_card, settings_style::kDisplayColor).disc;
+  spec.text_x = settings_style::kRowPadLeft + settings_parts::icon_width() + settings_style::kRowGap;
+  spec.handler = {background_option_text, on_background_picked, on_background_closed};
+  settings_parts::open_options(spec);
+  set_background_chevron(true);
+}
+
 }  // namespace
 
 lv_obj_t* rotation_segment(lv_obj_t* row, uint32_t track) {
@@ -436,10 +503,13 @@ namespace {
 int display_slider_width(int page_width) {
   const i18n::Strings& s = settings_model::text();
   int name = 0;
-  for (const char* text : {s.settings_brightness, s.settings_volume, s.settings_sleep, s.settings_starts_after}) {
+  auto widen = [&name](const char* text) {
     const int width = settings_parts::text_width(settings_style::row_font(), text);
     if (width > name) name = width;
-  }
+  };
+  for (const char* text : {s.settings_brightness, s.settings_volume, s.settings_sleep, s.settings_starts_after}) widen(text);
+  // ZHAC fork: the Background group's sliders start at the same x.
+  for (const char* text : {s.admin_tile_opacity, s.admin_background_dim}) widen(text);
   name = name * 13 / 10;
   const int room = page_width - settings_style::kRowPadLeft - settings_style::kRowPadRight -
                    settings_parts::icon_width() - 3 * settings_style::kRowGap -
@@ -513,6 +583,31 @@ void build_display_page(lv_obj_t* page) {
                      values.saver_brightness_max, values.saver_brightness, on_saver_brightness,
                      &g_saver_brightness_value);
   set_percent_text(g_saver_brightness_value, values.saver_brightness);
+
+  // ZHAC fork: Background, a photo from the card behind the tiles; the photo
+  // row opens its list like the Localization dropdowns.
+  const settings_model::BackgroundValues back = settings_model::background_values();
+  const int step = settings_model::background_step();
+  char line[96];
+  settings_model::background_line(line, sizeof(line));
+  settings_parts::section(page, s.background_label, false);
+  lv_obj_t* background = settings_parts::group(page, palette);
+  settings_parts::Row photo = settings_parts::row(background, "image", s.admin_background_photo, line);
+  g_background_row = photo.row;
+  g_background_line = photo.sub;
+  g_background_chevron = settings_parts::trailing_icon(photo.row, "chevron-down");
+  settings_parts::make_tap(photo.row, palette.button, on_background_row_clicked, nullptr);
+  lv_obj_t* opacity = display_slider_row(background, "opacity", s.admin_tile_opacity, width, back.opacity_min / step,
+                                         100 / step, back.opacity / step, on_background_opacity,
+                                         &g_background_opacity_value);
+  set_percent_text(g_background_opacity_value, back.opacity);
+  lv_obj_t* dim = display_slider_row(background, "brightness-5", s.admin_background_dim, width, 0,
+                                     back.dim_max / step, back.dim / step, on_background_dim, &g_background_dim_value);
+  set_percent_text(g_background_dim_value, back.dim);
+  for (lv_obj_t* slider : {opacity, dim}) {
+    lv_obj_set_style_opa(slider, LV_OPA_30, LV_STATE_DISABLED);
+    if (!back.photo) lv_obj_add_state(slider, LV_STATE_DISABLED);
+  }
 }
 
 // ---------- Localization page ----------
@@ -1644,6 +1739,7 @@ void refresh_wifi_async(void*) { wifi_tick(); }
 void on_page_timer(lv_timer_t*) {
   if (g_category == Category::System) system_tick();
   if (g_category == Category::Wifi) wifi_tick();
+  if (g_category == Category::Display) background_tick();
 }
 
 void stop_page_timer() {
@@ -1663,7 +1759,8 @@ void build_page() {
   clear_system_refs();
   if (g_category != Category::System) close_dialog();
   if (g_category != Category::Wifi) close_entry();
-  const bool polled = g_category == Category::System || g_category == Category::Wifi;
+  const bool polled =
+      g_category == Category::System || g_category == Category::Wifi || g_category == Category::Display;
   if (!polled) stop_page_timer();
   lv_obj_clean(g_page);
   if (g_category == Category::Display) build_display_page(g_page);

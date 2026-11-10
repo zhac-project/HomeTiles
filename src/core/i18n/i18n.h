@@ -103,6 +103,27 @@ struct Strings {
   // to change the connection, install firmware or write files.
   const char* cloud_remote_blocked;
 
+  // Settings › Display › Background (photo from the microSD /images folder).
+  const char* background_label;
+  const char* background_photo_label;
+  const char* background_opacity_label;
+  const char* background_dim_label;
+  const char* background_none;
+  const char* background_hint;
+  const char* background_no_card;
+  const char* background_loading;
+  const char* background_not_found;
+  const char* background_no_memory;
+  const char* background_cant_progressive;
+  const char* background_cant_too_big;
+  const char* background_cant_too_large;
+  const char* background_cant_unreadable;
+  const char* background_cant_name;
+  // Web Admin labels for the same settings (no colon).
+  const char* admin_background_photo;
+  const char* admin_tile_opacity;
+  const char* admin_background_dim;
+
   const char* display_label;
   const char* sleep_never;
 

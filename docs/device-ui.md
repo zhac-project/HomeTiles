@@ -115,7 +115,7 @@ Settings has four pages; the **X** closes it.
 
 ### Display
 
-Brightness, sleep timeout, rotation, and the theme; for the screensaver its start time and brightness. **Never** switches the corresponding timeout off. Rotation offers 0°, 90°, 180° and 270° on displays that turn in quarter turns, 0° and 180° on the others. Tap a **Clock** tile to open the [screensaver](screensaver.md) at once.
+Brightness, sleep timeout, rotation, and the theme; for the screensaver its start time and brightness. **Never** switches the corresponding timeout off. Rotation offers 0°, 90°, 180° and 270° on displays that turn in quarter turns, 0° and 180° on the others. Tap a **Clock** tile to open the [screensaver](screensaver.md) at once. **Background** puts a photo behind the tiles; see [Background photo](#background-photo).
 
 On displays with a speaker the page is called **Display & Sound** and adds a **Sound** group: the speaker volume and, where there is a microphone, its switch. Home Assistant sets the same values.
 
@@ -155,3 +155,27 @@ The keyboard follows the language when set to **Auto**: German, Czech, and Slova
 - **Connection:** **Home Assistant** with a check while the display is connected, and the way: **Direct · Bridge** with the Bridge's address, or **MQTT · Broker**.
 - **Security:** **Pairing** with Home Assistant ([Installation](installer.md#set-up-the-display)): **Pair** while unpaired, **Unpair** inside **Paired**. **Web Admin password**: **Allow** lets you set the first password in the Web Admin within two minutes; while a password is set, you can remove a forgotten one here. Both ask before they act.
 - **Setup** opens the first-start setup again, **Restart** restarts the display, **GitHub** shows a QR code for the project.
+
+## Background photo
+
+One photo from the microSD card can sit behind every page, with see-through tiles on top. It needs microSD support, like the [screensaver images](screensaver.md#prepare-the-microsd-card).
+
+1. Copy JPEG photos into the `/images` folder of a FAT32 card: with a card reader, or with the Web Admin [file manager](web-admin.md#file-manager) (local Web Admin only, not through the cloud remote).
+2. Open Settings › Display, scroll to the **Background** group, tap **Photo** and pick a photo. **None** keeps the black background.
+3. **Tile opacity** sets how solid the tiles are, from 0 to 100 % (60 % the first time a photo is chosen). **Dim photo** darkens the photo, from 0 to 60 % (default 25 %), so tile text stays readable. Both are grey while **None** is chosen.
+
+The photo fills the screen, cropped to fit, and stands upright as the camera's EXIF orientation says. Popups, Settings, the PIN pad and the screensaver stay solid; the clock drops its card over a photo.
+
+Photos the panel cannot show are greyed out in the list with the reason:
+
+| Reason | Meaning |
+| --- | --- |
+| **Can’t use: progressive JPEG** | Save the photo as a baseline (standard) JPEG. |
+| **Can’t use: over 8 MB** | The file is larger than 8 MB. |
+| **Can’t use: over 4.2 MP** | The photo has more than 4.2 million pixels (2048 × 2048), like most phone photos; scale it down to 2048 pixels on the long side. |
+| **Can’t use: not a readable JPEG** | The file is damaged or not a JPEG. |
+| **Can’t use: file name** | The name is 64 bytes or longer; shorten it. |
+
+Without the card, or when the chosen file is gone, the panel shows solid tiles on black and keeps the choice: the **Photo** row shows the name with **No microSD card** or **Not found**. Put the card or the file back and restart the panel, or pick the photo again. **Not enough memory** means the photo could not be decoded; restart the panel.
+
+The same three settings appear in the Web Admin [global settings](web-admin.md#global-settings), also through the cloud remote.
